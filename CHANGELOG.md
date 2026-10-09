@@ -51,6 +51,7 @@ The first release for people who don't build from source. 1.0 adds no features t
 - "Search Spotify for …" and its YouTube Music twin now say whose results they show and for what ("Searching Spotify for …", "Spotify results for …"). The screen read "Search" and "Results", so its rows could be taken for the library's own.
 - Editing the query of such a search while it was still running left it on "Searching..." with Enter doing nothing, until Esc. Editing a live provider search now cancels the pending request, clears the loading state and allows a new search to start.
 - A sync requested while another ran could run twice, and a sync that had just finished could cancel the retry of a newer one that failed, leaving that source unsynced until the next refresh.
+- With a long config directory (a `DDSONIC_CONFIG_DIR`, `XDG_CONFIG_HOME` or `HOME` that puts the IPC socket's path over 107 bytes on Linux, 103 on macOS), ddsonic started normally but without its socket, so `ddsonic pause`, `ddsonic status` and the rest failed with "connect: invalid argument", and the only notice appeared after quitting. ddsonic now refuses to start with such a path and says which path is too long and by how many bytes; the commands print the same message. See [ddsonic files and names](docs/ddsonic/files.md).
 - Hardening from an independent review of playback, catalog identity and sync.
 
 ## [0.10.0] - 2026-09-30

@@ -103,6 +103,10 @@ func restoreJellyfinContext(state resume.State, prov *jellyfin.Provider) ([]play
 }
 
 func run(overrides config.Overrides, positional []string, daemon, visualizer60FPS bool) error {
+	// ddsonic: no player without a usable IPC socket (sockpath_ddsonic.go).
+	if err := checkSocketPath(); err != nil {
+		return err
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
@@ -879,7 +883,7 @@ func userIPCError(err error) error {
 	if errors.Is(err, ipc.ErrNotRunning) {
 		return fmt.Errorf("%s is not running (no socket at %s)", appmeta.ClientName(), ipc.DefaultSocketPath()) // ddsonic
 	}
-	return err
+	return socketPathAdvice(err) // ddsonic: sockpath_ddsonic.go
 }
 
 func ipcSend(operation string, params ipc.Request) (ipc.Response, error) {
