@@ -5,7 +5,7 @@ ddsonic keeps your Spotify library and an index of your local music folder in on
 ## What it holds
 
 - **Spotify:** saved albums, followed artists, liked songs, and the playlists you own or follow, with their tracks. Album track lists are cached as you open albums, and in the background for the rest of your saved albums.
-- **YouTube Music:** your music playlists (and those listed in `youtube_playlists`) with their tracks, and Liked Music. Each track's artist, album and year is read in the background, which gives YouTube its Albums and Artists; an album holds only the tracks of it you have. See [youtube.md](youtube.md).
+- **YouTube Music:** your music playlists (and those listed in `youtube_playlists`) with their tracks, and Liked Music. Each track's artist, album and year is read in the background, which gives YouTube its Albums from tracks and Artists from tracks; an album holds only the tracks of it you have. Saved YouTube Music Library Albums and followed artists are not synchronized. See [youtube.md](youtube.md).
 - **Local:** every audio file under the music folder, grouped into albums, artists and genres. The folder is `initial_directory` in `config.toml`, else `$XDG_MUSIC_DIR`, else `~/Music`.
 - **Radio:** your favorite stations and the built-in and `radios.toml` stations, so [search](search.md) finds them. They are read from local files at every start and whenever you star or unstar a station. Browsing Radio still reads them directly.
 - **Search index:** a full-text index of everything above, kept in step with every change. See [search.md](search.md).

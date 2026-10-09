@@ -1,10 +1,14 @@
 # YouTube Music
 
-ddsonic syncs your YouTube Music playlists and Liked Music into its catalog, so they browse and search offline next to Spotify and your local files. In the background it also reads each track's real artist, album and year, which gives YouTube Music its own Albums and Artists lists. Tracks play through yt-dlp, as in cliamp.
+ddsonic syncs your YouTube Music playlists and Liked Music into its catalog, so they browse and search offline next to Spotify and your local files. In the background it also reads each track's real artist, album and year, which gives YouTube Music its **Albums from tracks** and **Artists from tracks** lists. Tracks play through yt-dlp, as in cliamp.
 
 ```
-Music → YouTube Music   Albums · Artists · Playlists · Liked Music
+Music → YouTube Music   Albums from tracks · Artists from tracks · Playlists · Liked Music
 ```
+
+**Saved YouTube Music Library Albums are not synchronized.** Albums from tracks groups the albums found in your Liked Music and synchronized playlists, and albums may be incomplete. An album you save at music.youtube.com does not appear in ddsonic unless one of its tracks is in Liked Music or a synced playlist. See [Albums from tracks](#albums-from-tracks-and-artists-from-tracks-enrichment).
+
+**Followed YouTube Music artists are not synchronized.** Artists from tracks groups the artists found in your Liked Music and synchronized playlists. An artist you follow (subscribe to) does not appear unless one of those tracks credits them, and an artist you don't follow appears when one does.
 
 ## Setup
 
@@ -56,6 +60,8 @@ To switch to another Google account, run `ddsonic youtube signin --force`: it op
 | Your playlists | yes (the youtube.com playlists feed) | often none: the API lists few or none |
 | Playlists saved from others | only those listed in `youtube_playlists` | only those listed in `youtube_playlists` |
 | Liked Music | yes | yes, with cleaner artist names |
+| Saved Library Albums | no | no |
+| Followed artists (subscriptions) | no | no |
 | Cost | about 1.5 s per playlist per sync | quota: about 3 units per sync (10,000 a day) |
 
 With both configured, ddsonic reads Liked Music through OAuth and playlists through cookies. When OAuth needs signing in again, Liked Music falls back to cookies.
@@ -75,19 +81,42 @@ With both configured, ddsonic reads Liked Music through OAuth and playlists thro
   youtube_refresh = "6h"
   ```
 
-## Albums and Artists (enrichment)
+## Albums from tracks, and Artists from tracks (enrichment)
+
+ddsonic does not read your YouTube Music library's Albums or the artists you follow: neither current ddsonic integration (browser cookies or OAuth) enumerates them. Spotify's Albums are your saved albums and its Artists the artists you follow; YouTube Music's **Albums from tracks** and **Artists from tracks** are a different thing, built from the tracks ddsonic does sync. Each list says so above its rows when space permits (a terminal too short to keep a usable list shows the list alone), and where sources mix (All Music and search) their rows are labelled `YouTube · from tracks`.
 
 A playlist knows each track only as a video title and the channel that uploaded it. After each sync, ddsonic reads the tracks you have, one at a time in the background (about 4–5 s each, newest first), for their real title, artists, album and year. As it goes:
 
-- YouTube Music's **Albums** and **Artists** lists fill in, and they join **All Music** and search.
-- A YouTube album holds the tracks of it you have, not the whole album; opening it plays those.
+- YouTube Music's **Albums from tracks** and **Artists from tracks** lists fill in, and they join **All Music** and search.
+- An album there holds the tracks of it you have in Liked Music and your synced playlists, not the whole album; opening it plays those.
+- An artist there is one a track credits. Opening one shows the albums of theirs found in your tracks.
+- Until a track has been read, its album and artists are not listed. A list with nothing read yet shows "No albums found in your tracks yet" or "No artists found in your tracks yet".
 - A track with no music details (a fan upload, say) keeps its video title and uploader.
 - A track yt-dlp keeps failing to read is skipped, so the rest are still read. After three passes that read other tracks but failed on it, it is left as it is (video title and uploader). A pass that reads nothing, or fails on several tracks in a row, looks like an outage: ddsonic stops and tries again after the next sync, without holding it against those tracks.
 
 The first pass over a large library takes a while (about half an hour for 360 tracks); it pauses while YouTube syncs, resumes after a restart, and slows right down if YouTube asks it to (a "not a bot" check).
+
+### A whole album: add it as a playlist
+
+A YouTube Music album is also a playlist, whose ID starts with `OLAK5uy_`. Open the album at music.youtube.com, copy its link from Share (`https://music.youtube.com/playlist?list=OLAK5uy_…`), and add it to `youtube_playlists`:
+
+```toml
+[ddsonic]
+youtube_playlists = ["https://music.youtube.com/playlist?list=OLAK5uy_…"]
+```
+
+What this does, and does not:
+
+- It uses the existing playlist setting; nothing about it is specific to albums.
+- When readable through your configured sign-in mode, the album is synchronized under **Playlists** with the tracks the existing playlist path can import.
+- Its tracks are then read like any others, so the album usually also appears in **Albums from tracks**. That list groups by what each track's details say: a compilation whose tracks credit different first artists is split over several rows, and a track without album details is in none.
+- It is not saved-album discovery. ddsonic still does not know which albums are in your YouTube Music library; you list each one yourself.
+- Removing the album from your YouTube Music library does not remove it from ddsonic. It stays until you take its link out of `youtube_playlists`.
 
 ## Troubleshooting
 
 - **No YouTube Music in Music:** check that `[ytmusic]` does not say `enabled = false`, that it has a sign-in (cookies or both OAuth keys), and that `yt-dlp` is on your PATH.
 - **"sync failed" for YouTube:** the log (`~/.config/ddsonic/ddsonic.log`) has yt-dlp's message. A 401, or `cannot decrypt`, means the cookies are not being read (see the keyring note above).
 - **A saved playlist is missing:** add its link to `youtube_playlists`.
+- **An album saved in YouTube Music is missing:** saved Library Albums are not synchronized, and pressing `r` or restarting does not change that. See [Albums from tracks](#albums-from-tracks-and-artists-from-tracks-enrichment).
+- **An artist you follow in YouTube Music is missing:** followed artists are not synchronized either. An artist appears in Artists from tracks once a track in Liked Music or a synced playlist credits them.

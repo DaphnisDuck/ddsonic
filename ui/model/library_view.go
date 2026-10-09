@@ -103,13 +103,41 @@ func (m *Model) libAdjustScroll() {
 }
 
 // libListBudget is how many rows the list gets: the body, less the search
-// input line on the search screen.
+// input line on the search screen and the level's note.
 func (m *Model) libListBudget() int {
 	_, budget := m.bodySize()
 	if _, ok := m.libSearchLevel(); ok {
 		budget--
 	}
+	budget -= len(m.libNote())
 	return max(budget, 1)
+}
+
+// libNoteMinRows is the fewest list rows a note leaves; a body too short
+// for that shows the list alone.
+const libNoteMinRows = 3
+
+// libNoteIndent is the note's left margin, the rows' own.
+const libNoteIndent = "  "
+
+// libNote is the top level's note (library.NotedLevel) as the lines shown
+// above its rows, or nil when it has none or the body is too short for
+// both. The note is wrapped to the panel, never cut short: what it
+// qualifies is the reason it is there.
+func (m *Model) libNote() []string {
+	nl, ok := m.libTop().level.(library.NotedLevel)
+	if !ok || m.lib.signingIn {
+		return nil
+	}
+	width, rows := m.bodySize()
+	var lines []string
+	for _, sentence := range nl.Note() {
+		lines = append(lines, wrapText(sentence, width-len(libNoteIndent))...)
+	}
+	if len(lines) == 0 || rows-len(lines) < libNoteMinRows {
+		return nil
+	}
+	return lines
 }
 
 func (m Model) libBreadcrumb() string {
@@ -202,8 +230,11 @@ func (m *Model) renderLibraryBody() string {
 		}
 		return m.libSearchPrompt(sl) + "\n" + body
 	}
-	_, rows := m.bodySize()
-	return m.renderLibraryList(rows)
+	var b strings.Builder
+	for _, line := range m.libNote() {
+		b.WriteString(dimStyle.Render(libNoteIndent+line) + "\n")
+	}
+	return b.String() + m.renderLibraryList(m.libListBudget())
 }
 
 // renderLibraryList renders the top frame's rows, or its loading, sign-in

@@ -318,7 +318,7 @@ func TestPartialAlbums(t *testing.T) {
 	yt := SyncedSource{Provider: "youtube", Title: "YouTube Music", Player: &fakeProvider{name: "YouTube Music"},
 		Collections: []string{catalog.CollectionAlbums}, PartialAlbums: true}
 
-	albums := load(t, child(t, SyncedMenu(c, yt), "Albums"))
+	albums := load(t, child(t, SyncedMenu(c, yt), AlbumsFromTracks))
 	var row Entry
 	for _, e := range albums {
 		if e.Title == "Best of Chicago" {

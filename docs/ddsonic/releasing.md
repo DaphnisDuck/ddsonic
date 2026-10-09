@@ -23,6 +23,8 @@ ddsonic releases one build: Linux x86-64, from the pinned environment in `packag
 
 ## Cutting a release
 
+Before a release candidate, from `v1.0.0-rc.4` on: the human acceptance checklist has been executed against the candidate and its findings triaged ([release-plan.md](release-plan.md#rc-audit-and-release-gate)).
+
 1. `CHANGELOG.md` has a section for the version (`## [1.0.0]`). A candidate (`v1.0.0-rc.2`) uses the section of the version it leads to.
 2. Switch the repository's tag ruleset off (Settings → Rules → Rulesets), tag the commit, push that one tag (`git push origin v1.0.0`), and switch the ruleset back on. The ruleset refuses every new, moved or deleted tag, so that cliamp's tags can never reach ddsonic's repository by accident: a tag push runs the workflow of the tagged commit, and cliamp's would publish cliamp releases here. Locally, cliamp's tags live under `refs/upstream-tags/` for the same reason; see [upstream.md](upstream.md).
 3. The Release workflow (actions pinned by commit) builds the files, installs the archive in a fresh Debian 13 container, attests the build, and creates a **draft** release. A tag with a hyphen is marked as a prerelease.

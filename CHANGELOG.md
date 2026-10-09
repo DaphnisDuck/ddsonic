@@ -26,6 +26,7 @@ The first release for people who don't build from source. 1.0 adds no features t
 - ddsonic 1.0 supports Spotify, YouTube Music, local files and internet radio. cliamp's other providers (Navidrome, Plex, Jellyfin, SoundCloud and the rest) are not offered: `--provider` and `setup` no longer list them, and their sections in `config.toml` are left untouched but have no effect.
 - The log and the IPC socket are named `ddsonic.log` and `ddsonic.sock` (they kept cliamp's names before, and were `ddmus.log` and `ddmus.sock` in 1.0.0-rc.1). A script that opens the socket by path needs the new name.
 - In "Search Spotify for …" and its YouTube Music twin, Enter replaces the queue, as playing from the library does.
+- YouTube Music's "Albums" and "Artists" lists are now "Albums from tracks" and "Artists from tracks", and each says above its rows, when space permits, what it holds: the albums and artists found in your Liked Music and synced playlists (albums may be incomplete). Saved YouTube Music Library Albums and followed artists are not synchronized, and never were; the old names read as if they were. In All Music and search, these rows are labelled `YouTube · from tracks`. Nothing about what syncs has changed.
 - By default, Spotify syncs at startup when its last successful sync is more than two hours old (it was 30 minutes).
 - ddsonic names itself, not cliamp, in the HTTP requests it makes (radio streams, the station directory, lyrics): `ddsonic/<version>`.
 - `shuffle` and `repeat` reject values they don't know.

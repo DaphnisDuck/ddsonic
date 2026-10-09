@@ -162,7 +162,7 @@ func (s *catalogView) more(q catalog.Query, kind catalog.SearchKind, heading str
 			return nil, err
 		}
 		return s.rows(found[kind]), nil
-	}}, ""} // read from the catalog alone, so a sync rereads it
+	}}, "", nil} // read from the catalog alone, so a sync rereads it
 }
 
 // restrict limits q to the configured sources, so results of a source that
@@ -273,9 +273,20 @@ func (s *catalogView) artistRow(a catalog.Artist) (Entry, bool) {
 	default:
 		return Entry{}, false
 	}
-	e.Detail = SourceLabel(a.Ref.Provider)
+	e.Detail = s.sourceLabel(a.Ref.Provider)
 	e.Source = a.Ref.Provider
 	return e, true
+}
+
+// sourceLabel labels an album's or artist's row with its source. A
+// PartialAlbums source's are not saved albums or followed artists, only
+// what its tracks name, and the label says so.
+func (s *catalogView) sourceLabel(provider string) string {
+	label := SourceLabel(provider)
+	if b := s.synced[provider]; b != nil && b.partialAlbums {
+		label = joinDetail(label, FromTracks)
+	}
+	return label
 }
 
 // albumRow is an album's row, built by its source and labelled with it.
@@ -291,7 +302,7 @@ func (s *catalogView) albumRow(a catalog.Album) (Entry, bool) {
 		return Entry{}, false
 	}
 	// The source comes first so a long credit cannot truncate it away.
-	e.Detail = joinDetail(SourceLabel(a.Ref.Provider), e.Detail)
+	e.Detail = joinDetail(s.sourceLabel(a.Ref.Provider), e.Detail)
 	e.Source = a.Ref.Provider
 	return e, true
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/bjarneo/cliamp/catalog/sqlite"
 	"github.com/bjarneo/cliamp/catalogsync"
 	"github.com/bjarneo/cliamp/config"
+	"github.com/bjarneo/cliamp/library"
 	"github.com/bjarneo/cliamp/playlist"
 	"github.com/bjarneo/cliamp/ui/model"
 )
@@ -462,6 +463,48 @@ func TestLibrarySourcesSyncedMenus(t *testing.T) {
 	}
 	if src := librarySources(providers, "", &catalogRuntime{providers: map[string]*providerSync{}}); len(src.Synced) != 0 || src.Catalog != nil {
 		t.Errorf("without a catalog: synced %+v, catalog %v", src.Synced, src.Catalog)
+	}
+}
+
+// YouTube Music's saved albums and followed artists are not synced, so its
+// lists must not be titled "Albums" and "Artists" as Spotify's are: they are
+// "Albums from tracks" and "Artists from tracks".
+func TestYouTubeListsAreFromTracks(t *testing.T) {
+	store, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	rt := &catalogRuntime{store: store, providers: map[string]*providerSync{}}
+	rt.ctx, rt.cancel = context.WithCancel(context.Background())
+	defer rt.cancel()
+	rt.setSources(source{Source: &namedSource{catalog.Spotify}, lists: []string{catalog.CollectionArtists}},
+		source{Source: &namedSource{catalog.YouTube}, lists: []string{catalog.CollectionArtists}})
+	src := librarySources([]model.ProviderEntry{
+		{Key: "spotify", Provider: fakePlayer{"Spotify"}}, {Key: "ytmusic", Provider: fakePlayer{"YouTube Music"}}}, "", rt)
+	want := map[string][]string{
+		catalog.Spotify: {"Albums", "Artists"},
+		catalog.YouTube: {library.AlbumsFromTracks, library.ArtistsFromTracks},
+	}
+	if len(src.Synced) != len(want) {
+		t.Fatalf("synced = %+v", src.Synced)
+	}
+	for _, s := range src.Synced {
+		entries, err := library.SyncedMenu(src.Catalog, s).Load(context.Background())
+		if err != nil || len(entries) != 2 {
+			t.Errorf("%s menu = %+v (err %v)", s.Provider, entries, err)
+			continue
+		}
+		if s.PartialAlbums != (s.Provider == catalog.YouTube) {
+			t.Errorf("%s: partial albums %v", s.Provider, s.PartialAlbums)
+		}
+		for i, e := range entries {
+			note, _ := e.Open.(library.NotedLevel)
+			hasNote := note != nil && len(note.Note()) > 0
+			if e.Title != want[s.Provider][i] || hasNote != s.PartialAlbums {
+				t.Errorf("%s list %d is %q with note %v, want %q with note %v", s.Provider, i, e.Title, hasNote, want[s.Provider][i], s.PartialAlbums)
+			}
+		}
 	}
 }
 

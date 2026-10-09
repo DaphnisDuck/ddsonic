@@ -61,6 +61,9 @@ func ddsonicSetupProviders() []providerSpec {
 
 	ytmusic.intro = []string{
 		"Your YouTube Music playlists and liked music. Needs yt-dlp.",
+		"Saved Library Albums and followed artists are not synchronized:",
+		"\"Albums from tracks\" and \"Artists from tracks\" group what those",
+		"tracks name, and albums may be incomplete.",
 		"",
 		"Browser cookies need no setup beyond a browser signed in to",
 		"YouTube. On Linux, name a Chrome-family browser with its keyring,",

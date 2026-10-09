@@ -234,6 +234,17 @@ Each gate is a checklist; the next phase starts only when every box is ticked or
 - [ ] Terminal resizing, and artwork in Kitty and Ghostty
 - [ ] Docs and website re-walked against the RC
 
+**Before v1.0.0-rc.4: the human acceptance checklist** (required, decided 2026-10-09). The rc.3 report that albums saved in YouTube Music never appeared was found by using ddsonic, not by a test or an audit. A reusable human release-candidate acceptance checklist is therefore created and executed before the next candidate, and at every candidate after it: a repeatable gate in place of ad-hoc exploratory testing. It complements the automated tests and does not duplicate them.
+
+- [ ] The known rc.3 bugs are triaged or resolved
+- [ ] The checklist is drafted and independently reviewed
+- [ ] Steve executes it against the release candidate
+- [ ] Anything it uncovers is triaged before rc.4 is published
+
+It emphasizes real workflows and state transitions. The pattern, for each synced source: add content upstream; verify it is absent; refresh; verify it appears; restart; verify it persisted; remove it upstream; refresh; verify it is gone.
+
+It is to cover, at minimum: install, first run and setup; the Local library; Spotify; YouTube Music; Internet Radio; search; playback; queue and transport controls; metadata; artwork and info views; synchronization; persistence; manual refresh; configuration; hotkeys; degraded and error states; authentication failure and recovery; upgrades; restart and recovery; shutdown. The fresh-user scenarios A–H (Workstream 5) are a starting point, not the checklist.
+
 **Gate D: v1.0.0.** Every RC-audit finding fixed or waived by you, by criteria you set in advance; no open BLOCKER or HIGH; and a 7-day soak of your own use with no new release-blocking regression. Any fix to code that runs (not docs-only) means a new candidate and restarts the soak. Otherwise cut rc.2, and review its fixes at effort proportional to their risk: a migration or concurrency fix can warrant high effort even then. The stable tag is built as a draft too: its own artifacts pass the CI, archive, SBOM, attestation and install checks, and its release record is written, before it is published.
 
 ## Post-1.0 backlog
@@ -244,12 +255,12 @@ Historical freeze-time inventory: these items were transferred to [plan.md](../.
 | --- | --- |
 | Auto EQ from normalized genre metadata | Builds on the catalog's genre data |
 | Ambient or generated sounds | New feature area |
-| More providers | Only one you use and can test; the 16 hidden ones are candidates |
+| More providers | Only one you use and can test; the 16 hidden ones are candidates. Since 2026-10-09, only after the [Provider Admission Contract](POST-1.0-IDEAS.md#provider-admission-contract) |
 | Sixel, iTerm2 and other artwork protocols | WezTerm, Konsole, foot |
-| InnerTube playlist discovery | Saved YouTube Music playlists the API doesn't list |
+| InnerTube playlist discovery | Saved YouTube Music playlists the API doesn't list. Since 2026-10-09 part of [YouTube Music Provider v2](POST-1.0-IDEAS.md#youtube-music-provider-v2) |
 | Cross-source playlists | ddsonic-owned playlists mixing sources |
 | Clear the whole queue with X | Ctrl+Z undoes it, like x; X is reused: cliamp's provider-switching hotkeys (X was Mixcloud) have no place in ddsonic's library workflow. Today, playing from the library replaces the queue |
-| YouTube cookie playlist count check | Guard against a short playlist feed |
+| YouTube cookie playlist count check | Guard against a short playlist feed. Since 2026-10-09 part of [YouTube Music Provider v2](POST-1.0-IDEAS.md#youtube-music-provider-v2) |
 | Separate Local scan folder from file-browser folder | Open question in `plan.md` |
 | Daemon or headless persistent playback | Likely a larger 2.0 architectural project; affects how the inherited `--daemon` is treated now |
 | Broad-prefix search speed (P3) | Codex's ranking-preserving idea (about 22% faster), only if search speed becomes a complaint |

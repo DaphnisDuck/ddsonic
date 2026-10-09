@@ -6,19 +6,19 @@ ddsonic opens on **Music**, a library hierarchy that sits above cliamp's playbac
 Music
 ├── All Music      Albums · Artists (every source together)
 ├── Spotify        Albums · Artists · Playlists · Liked Songs
-├── YouTube Music  Albums · Artists · Playlists · Liked Music
+├── YouTube Music  Albums from tracks · Artists from tracks · Playlists · Liked Music
 ├── Local          Albums · Artists · Genres · Folders · Playlists
 ├── Radio          Favorites · Browse Stations (cliamp radio · Countries · Genres & Tags)
 └── Search
 ```
 
-- **All Music:** Albums and Artists from Spotify, YouTube Music and Local in one list each, every row labelled with its source. The same album or artist in both stays two rows, side by side. Opening a row goes to that source's own album or artist.
+- **All Music:** Albums and Artists from Spotify, YouTube Music and Local in one list each, every row labelled with its source (YouTube Music's albums and artists as `YouTube · from tracks`). The same album or artist in both stays two rows, side by side. Opening a row goes to that source's own album or artist.
 - **Spotify:**
   - **Albums** are your saved albums.
   - **Artists** are the artists you follow. Each one opens the albums of theirs the catalog knows, with no wait, and a **Full discography…** row that loads all their albums and singles from Spotify. An artist with no albums in the catalog opens the full discography directly.
   - **Playlists** are the ones you own or follow.
   - **Liked Songs** is your saved tracks.
-- **YouTube Music:** your music playlists, Liked Music, and the albums and artists read from those tracks in the background. See [youtube.md](youtube.md).
+- **YouTube Music:** your music playlists and Liked Music. **Albums from tracks** and **Artists from tracks** are read from those tracks in the background: saved YouTube Music Library Albums and followed artists are not synchronized, and an album there holds only the tracks of it you have. See [youtube.md](youtube.md).
 - **Local:**
   - **Albums**, **Artists** and **Genres** come from an index of your music directory: `initial_directory` from config, else `$XDG_MUSIC_DIR`, else `~/Music`. Files are grouped into albums by album tag within a folder (per-disc folders like `CD1` stay one album); an album with several track artists is credited to Various Artists and listed under each of them.
   - **Folders** opens the file browser.

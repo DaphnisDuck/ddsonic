@@ -20,8 +20,8 @@ Results come in sections, best match first:
 
 | Section | Shown | What |
 |---|---|---|
-| Artists | 5 | Followed Spotify artists, local artists, and artists credited on your albums and tracks |
-| Albums | 8 | Saved Spotify albums and local albums, labelled with their source |
+| Artists | 5 | Followed Spotify artists, local artists, and artists credited on your albums and tracks. YouTube Music artists are always the credited kind, labelled `YouTube · from tracks`: followed YouTube Music artists are not synchronized |
+| Albums | 8 | Saved Spotify albums and local albums, labelled with their source, and albums found in your YouTube Music tracks, labelled `YouTube · from tracks` (not your saved Library Albums, and possibly incomplete) |
 | Tracks | 20 | Liked, playlist, cached-album and local tracks |
 | Playlists | 5 | Spotify playlists you own or follow |
 | Stations | 5 | Your favorite radio stations first, then the built-in and `radios.toml` stations |

@@ -59,6 +59,14 @@ type OrderedLevel interface {
 	NextOrder() string
 }
 
+// NotedLevel is implemented by levels whose title alone could mislead about
+// what their rows are. The UI shows the note above the rows, in a populated
+// list and an empty one alike, each line wrapped to the panel. No lines
+// means no note.
+type NotedLevel interface {
+	Note() []string
+}
+
 // Intent is a UI action an entry requests instead of navigating.
 type Intent int
 
