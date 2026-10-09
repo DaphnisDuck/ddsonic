@@ -51,9 +51,11 @@ func (m *Model) handleSpotSearchInputKey(msg tea.KeyPressMsg) tea.Cmd {
 			return fetchSpotSearchCmd(m.newSpotRequestContext(30*time.Second), s, m.spotSearch.prov.Name(), m.spotSearch.query, nextRequest(&m.requests.spotSearch))
 		}
 	default:
+		before := m.spotSearch.query // ddsonic: an edit ends the search in flight
 		if m.editText("spot-search", &m.spotSearch.query, msg) {
 			m.spotSearch.err = ""
 		}
+		m.spotSearchQueryEdited(before)
 	}
 	return nil
 }

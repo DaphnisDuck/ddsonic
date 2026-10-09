@@ -588,13 +588,14 @@ func (m Model) renderNetSearchBody() string {
 func (m Model) spotSearchHeaderLine() string {
 	switch m.spotSearch.screen {
 	case spotSearchResults:
-		return sepHeaderN("Results", m.spotSearch.cursor+1, len(m.spotSearch.results))
+		// ddsonic: the results name their provider and query (library_search.go).
+		return sepHeaderN(m.spotSearchResultsLabel(), m.spotSearch.cursor+1, len(m.spotSearch.results))
 	case spotSearchPlaylist:
 		return sepHeaderN("Add to Playlist", m.spotSearch.cursor+1, len(m.spotSearch.playlists)+1)
 	case spotSearchNewName:
 		return m.promptHeader("spot-playlist-name", "New Playlist", m.spotSearch.newName)
 	default:
-		return m.promptHeader("spot-search", "Search", m.spotSearch.query)
+		return m.promptHeader("spot-search", m.spotSearchPromptLabel(), m.spotSearch.query) // ddsonic: names the provider
 	}
 }
 
@@ -652,7 +653,7 @@ func (m Model) renderSpotSearchBody() string {
 	default:
 		var lines []string
 		if m.spotSearch.loading {
-			lines = append(lines, dimStyle.Render("  Searching..."))
+			lines = append(lines, dimStyle.Render("  "+m.spotSearchLoadingLabel())) // ddsonic: names the provider and query
 		} else {
 			lines = append(lines, dimStyle.Render("  Type a query and press Enter to search."))
 		}

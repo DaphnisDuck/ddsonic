@@ -34,7 +34,7 @@ Opening a result works exactly as it does while browsing: an album opens its tra
 
 Search reads only the catalog, so it never waits on the network. Two rows at the end reach outside it when you choose them:
 
-- **Search Spotify for "…"** (and the same for any source that can search live, such as YouTube Music signed in with cookies only) opens that service's own search with your query already running. There you can find music you haven't saved, and add it to a playlist. `Enter` on a track or an album replaces the queue and plays it, as the library does; `a` adds it to the end of the queue and `q` plays it next. Stopping playback while an album is still opening cancels it.
+- **Search Spotify for "…"** (and the same for any source that can search live, such as YouTube Music signed in with cookies only) opens that service's own search with your query already running, in place of the library's results. The screen names the service and the query ("Searching Spotify for …", then "Spotify results for …"), since a recording you have locally is often on the service too and its rows carry no source label. There you can find music you haven't saved, and add it to a playlist. `Esc` goes back to the query, and `Esc` again to your library's results, as you left them. `Enter` on a track or an album replaces the queue and plays it, as the library does; `a` adds it to the end of the queue and `q` plays it next. Stopping playback while an album is still opening cancels it.
 - **Search the radio directory for "…"** lists matching stations from the Radio Browser directory (about 58,000 stations).
 
 ## Query language

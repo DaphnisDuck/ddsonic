@@ -48,6 +48,8 @@ The first release for people who don't build from source. 1.0 adds no features t
 - A stalled Spotify request could hold a library sync until quit.
 - A Spotify connection that stalled while starting up held every Spotify action behind it: a track stayed on "Buffering" and the sync never finished. Setting up the session now gives up after 30 seconds, and the next action tries again.
 - Stop now cancels an album that is still opening from search.
+- "Search Spotify for …" and its YouTube Music twin now say whose results they show and for what ("Searching Spotify for …", "Spotify results for …"). The screen read "Search" and "Results", so its rows could be taken for the library's own.
+- Editing the query of such a search while it was still running left it on "Searching..." with Enter doing nothing, until Esc. Editing a live provider search now cancels the pending request, clears the loading state and allows a new search to start.
 - A sync requested while another ran could run twice, and a sync that had just finished could cancel the retry of a newer one that failed, leaving that source unsynced until the next refresh.
 - Hardening from an independent review of playback, catalog identity and sync.
 
