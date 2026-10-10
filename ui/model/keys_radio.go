@@ -168,6 +168,9 @@ func (m *Model) togglePlaylistStar() tea.Cmd {
 
 // playlistTrackStarred does not reuse Track.Bookmark for radio favorites.
 func (m Model) playlistTrackStarred(track playlist.Track) bool {
+	if m.libLoadedStationStarred(track) { // ddsonic: library_favorite.go
+		return true
+	}
 	if m.loadedPlaylist == "" && m.radioFavorites != nil {
 		if station, ok := radio.StationFromTrack(track); ok {
 			return m.radioFavorites.Contains(station.URL)

@@ -466,6 +466,11 @@ func (rt *catalogRuntime) notify(ev catalogsync.Event) {
 		return
 	}
 	if ps := rt.providers[ev.Provider]; ps != nil && ps.quiet {
+		// No status, only that the sync, sweep included, changed the rows
+		// (a station starred or unstarred), so search rereads them.
+		if ev.Kind == catalogsync.Finished {
+			rt.send(model.CatalogChangedMsg{Provider: ev.Provider})
+		}
 		return
 	}
 	var phase model.CatalogSyncPhase

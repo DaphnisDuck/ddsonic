@@ -14,6 +14,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/bjarneo/cliamp/catalog"
 	"github.com/bjarneo/cliamp/library"
 	"github.com/bjarneo/cliamp/playlist"
 )
@@ -59,6 +60,10 @@ type libraryState struct {
 
 	// barRows is how many rows the layout gave the key bar (0 before any).
 	barRows int
+
+	// favSaving holds the stream URLs of the stations whose f is still
+	// being saved (library_favorite.go).
+	favSaving map[string]bool
 }
 
 // libSync is one provider's catalog sync status as the library shows it.
@@ -84,6 +89,13 @@ type CatalogSyncMsg struct {
 	Phase      CatalogSyncPhase
 	Collection string // CatalogSyncCollectionDone only
 	Err        error
+}
+
+// CatalogChangedMsg reports that a sync changed provider's catalog rows, for
+// a source that shows no sync status (radio, whose sync follows a station
+// starred or unstarred). main sends it when such a sync finishes.
+type CatalogChangedMsg struct {
+	Provider string
 }
 
 // CatalogStatus is a provider's last sync outcome, read at startup.
@@ -331,7 +343,8 @@ func (m *Model) libraryRefresh() tea.Cmd {
 }
 
 // libraryCatalogChanged refreshes the visible level if a sync of provider
-// changed it, and marks the catalog levels beneath it stale.
+// changed it, and marks the catalog levels beneath it stale. The starred
+// stations change with radio's (library_favorite.go).
 func (m *Model) libraryCatalogChanged(provider string) tea.Cmd {
 	if !m.libraryEnabled() {
 		return nil
@@ -340,6 +353,9 @@ func (m *Model) libraryCatalogChanged(provider string) tea.Cmd {
 	isCatalog := func(f *libFrame) bool {
 		if cl, ok := f.level.(library.CachedLevel); ok {
 			return cl.CachedProvider() == provider
+		}
+		if _, ok := f.level.(library.StarredStationsLevel); ok {
+			return provider == catalog.Radio
 		}
 		cl, ok := f.level.(library.CatalogLevel)
 		return ok && (cl.CatalogProvider() == provider || cl.CatalogProvider() == "")
@@ -419,6 +435,12 @@ func (m *Model) handleLibraryMsg(msg tea.Msg) (tea.Cmd, bool) {
 		}
 		return nil, true
 
+	case CatalogChangedMsg:
+		return m.libraryCatalogChanged(msg.Provider), true
+
+	case libFavoriteSavedMsg:
+		return m.libFavoriteSaved(msg), true
+
 	case libraryPlayMsg:
 		if msg.gen != m.lib.playGen {
 			return nil, true
@@ -479,6 +501,8 @@ func (m *Model) handleLibraryKey(msg tea.KeyPressMsg) (cmd tea.Cmd, handled bool
 			return nil, true
 		case "p", "n":
 			return m.librarySkip(key == "n"), true
+		case "f":
+			return m.libToggleFavorite(), true
 		}
 		return nil, !queuePassthroughKeys[key] && !libraryPassthroughKeys[key]
 	}
@@ -546,6 +570,8 @@ func (m *Model) handleLibraryKey(msg tea.KeyPressMsg) (cmd tea.Cmd, handled bool
 		return m.librarySearch(), true
 	case "space":
 		return m.togglePlayPause(), true
+	case "f":
+		return m.libToggleFavorite(), true
 	default:
 		return nil, !libraryPassthroughKeys[key]
 	}

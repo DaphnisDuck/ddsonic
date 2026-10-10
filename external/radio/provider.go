@@ -372,16 +372,25 @@ func (p *Provider) AppendCatalog(stations []CatalogStation) {
 // ToggleFavorite toggles the favorite status of a catalog or favorite entry.
 // Returns (true, name) if added, (false, name) if removed.
 func (p *Provider) ToggleFavorite(id string) (added bool, name string, err error) {
+	// ddsonic: p.mu, which the UI takes to list the pane, covers finding the
+	// station only. It is released before the save, which may wait for the
+	// favorites file, and the observer is told after both.
+	defer func() {
+		if err == nil {
+			p.favorites.toggled()
+		}
+	}()
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	defer p.favoritesToggled() // ddsonic: resync catalogued favorites
+	unlock := sync.OnceFunc(p.mu.Unlock)
+	defer unlock()
 
 	if strings.HasPrefix(id, "f:") {
 		station, err := p.favoriteStation(id)
 		if err != nil {
 			return false, "", err
 		}
-		added, err := p.favorites.Toggle(station)
+		unlock()                                  // ddsonic
+		added, err := p.favorites.toggle(station) // ddsonic: the observer is told above
 		return added, station.Name, err
 	}
 
@@ -406,7 +415,8 @@ func (p *Provider) ToggleFavorite(id string) (added bool, name string, err error
 		return false, "", errors.New("cannot favorite local stations")
 	}
 
-	added, err = p.favorites.Toggle(s)
+	unlock()                           // ddsonic
+	added, err = p.favorites.toggle(s) // ddsonic: the observer is told above
 	return added, s.Name, err
 }
 

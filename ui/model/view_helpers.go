@@ -226,7 +226,7 @@ func (c *radioMarkerCache) starCount(m Model) int {
 	key := radioMarkerKey{
 		playlist: m.playlist, playlistRevision: m.playlist.Revision(),
 		favorites: m.radioFavorites, favoritesRevision: m.radioFavorites.Revision(),
-		savedPlaylist: m.loadedPlaylist != "",
+		savedPlaylist: m.loadedPlaylist != "" && !m.libraryEnabled(), // ddsonic: the library counts a loaded queue's starred stations too (library_favorite.go)
 	}
 	if c.key == key {
 		return c.count

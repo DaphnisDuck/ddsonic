@@ -28,7 +28,7 @@ Results come in sections, best match first:
 
 A full section ends in **More…**, which lists up to 200 matches of that kind.
 
-Opening a result works exactly as it does while browsing: an album opens its tracks, an artist their albums, a playlist its tracks. **Enter on a track plays its album from that track.** A Spotify album whose tracks aren't cached yet is fetched first. Offline, or for a track with no album, only the track plays. A station plays as a live stream.
+Opening a result works exactly as it does while browsing: an album opens its tracks, an artist their albums, a playlist its tracks. **Enter on a track plays its album from that track.** A Spotify album whose tracks aren't cached yet is fetched first. Offline, or for a track with no album, only the track plays. A station plays as a live stream. On a starred station, and on a station in the radio directory's results, `f` adds it to Radio → Favorites or takes it out; the results follow.
 
 ## Beyond your library
 

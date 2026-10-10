@@ -48,6 +48,7 @@ The bar at the bottom of each view lists every key that works there, and only th
 | `g` `G` / `Home` `End` | Top / bottom |
 | `Ctrl+D` `Ctrl+U` / `PgDn` `PgUp` | Page down / up |
 | `l` `Enter` `→` | Open, or play |
+| `f` | On a station from the radio directory: add it to Radio → Favorites, or take it out |
 | `h` `Esc` `Backspace` `←` | Back; at Music, nothing |
 | `q` | Quit |
 | `/` | Search |
@@ -59,6 +60,8 @@ The bar at the bottom of each view lists every key that works there, and only th
 | `s` | Stop |
 | `+` `-` | Volume |
 | `Ctrl+G` | Hide or show the key bar |
+
+`f` works on the highlighted station, whether or not anything is playing: in a country's or a tag's list, in the results of "Search the radio directory", in Favorites, and on a starred station among search results. The key bar shows `f Favorite`, or `f Unfavorite` when the station is already a favorite, and shows neither on a row that is not a directory station: a menu, a cliamp radio channel, a station from radios.toml, a track. A station is saved under the directory's name for it and its stream address. Favorites and search follow as soon as the change is saved: unstarred in Favorites, a station leaves the list. Saving happens in the background, so ddsonic stays responsive even while another ddsonic is writing the favorites file; until a station's change is saved the key bar shows no `f` for it and a second `f` on it does nothing.
 
 On an error screen, Enter retries. When Spotify needs you to sign in, Enter starts sign-in in your browser and reloads once it finishes.
 
@@ -83,6 +86,7 @@ In search results, `/`, `Esc` and `h` return to the query; while typing, Enter o
 | `a` | Play the selected track next (again to take it back) |
 | `A` | Up next: the tracks queued with `a` |
 | `x` | Remove the selected track; `Ctrl+Z` undoes it |
+| `f` | On a queued station from the radio directory: add it to Radio → Favorites, or take it out (a `★` marks a favorite, however the station was queued) |
 | `Shift+↑` `Shift+↓` | Move the selected track up / down |
 | `e` | Next EQ preset |
 | `v` | Next visualizer (saved as `visualizer` in config.toml) |
@@ -103,6 +107,6 @@ The settings panel shows the queue's settings: **SRC** is the playing track's so
 
 ## Disabled cliamp keys
 
-Keys that jump to other parts of cliamp are disabled, including provider switching (`S`, `R`, `L`, `N`, …), the pickers (`t`, `Ctrl+V`, `d`), the full-screen visualizer (`V`), `u`, `w`, the playlist manager and Favorite (their `p` and `n` are previous and next here), Mono (`m`), Metadata (`Ctrl+I`, which terminals send as Tab) and the keymap overlay (`?`, `Ctrl+K`). The key bar replaces the overlay; `Ctrl+K` still opens it over cliamp's own screens.
+Keys that jump to other parts of cliamp are disabled, including provider switching (`S`, `R`, `L`, `N`, …), the pickers (`t`, `Ctrl+V`, `d`), the full-screen visualizer (`V`), `u`, `w`, the playlist manager and the favorite-tracks playlist (their `p` and `n` are previous and next here; `f` stars radio stations, see above), Mono (`m`), Metadata (`Ctrl+I`, which terminals send as Tab) and the keymap overlay (`?`, `Ctrl+K`). The key bar replaces the overlay; `Ctrl+K` still opens it over cliamp's own screens.
 
 Each view's keys come from one table in `ui/model/library_keymap.go`: the library's own keys, then the cliamp keys it passes through. The gate passes exactly the cliamp keys the table lists, and the key bar shows the same table, so a cliamp key works in a view if and only if its bar lists it. The library's own keys are handled in `handleLibraryKey` (`ui/model/library_nav.go`); a new one needs a row in the table too. To bring a cliamp key back, add a row to the view's table.

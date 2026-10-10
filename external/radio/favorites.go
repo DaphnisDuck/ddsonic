@@ -20,6 +20,7 @@ const favoritesFile = "radio_favorites.toml"
 
 // Favorites manages a persistent set of favorite radio stations.
 type Favorites struct {
+	mutate   sync.Mutex // ddsonic: one toggle at a time; see library_favorites.go for the lock order
 	mu       sync.RWMutex
 	revision uint64
 	stations []CatalogStation
@@ -79,12 +80,17 @@ func (f *Favorites) Revision() uint64 {
 // latest file contents. An intent already applied by another instance is a
 // successful no-op on disk, not a second toggle. The result is the new favorite
 // state. Failed persistence leaves the local snapshot unchanged.
-func (f *Favorites) Toggle(s CatalogStation) (bool, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+func (f *Favorites) toggle(s CatalogStation) (bool, error) { // ddsonic: Toggle (library_favorites.go) adds the observer
+	// ddsonic: f.mutate, not f.mu, is held across the file lock and the
+	// disk: f.mu is taken only to read the intent and to publish the result,
+	// so readers (drawing among them) never wait for a save.
+	f.mutate.Lock()
+	defer f.mutate.Unlock()
+	f.mu.RLock()
 	_, wasFavorite := f.byURL[s.URL]
+	f.mu.RUnlock()
 	favorite := !wasFavorite
-	if f.path == "" {
+	if f.path == "" { // written under f.mutate alone, as it is read
 		dir, err := appdir.Dir()
 		if err != nil {
 			return false, fmt.Errorf("resolve radio favorites directory: %w", err)
@@ -119,12 +125,15 @@ func (f *Favorites) Toggle(s CatalogStation) (bool, error) {
 			return false, fmt.Errorf("save radio favorites: %w", err)
 		}
 	}
-	f.stations = stations
-	f.byURL = make(map[string]struct{}, len(stations))
+	byURL := make(map[string]struct{}, len(stations))
 	for _, station := range stations {
-		f.byURL[station.URL] = struct{}{}
+		byURL[station.URL] = struct{}{}
 	}
+	f.mu.Lock() // ddsonic: publish only
+	f.stations = stations
+	f.byURL = byURL
 	f.revision++
+	f.mu.Unlock()
 	return favorite, nil
 }
 

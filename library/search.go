@@ -257,11 +257,30 @@ func (s *catalogView) trackRow(t catalog.Track, station bool) Entry {
 		PlayFrom: s.albumFrom(t), Source: t.Ref.Provider}
 	if station {
 		track.Stream, track.Realtime = true, true
+		track.ProviderMeta = s.starredStationMeta(track.Path)
 		e.PlayFrom = func(context.Context) ([]playlist.Track, int, error) {
 			return []playlist.Track{track}, 0, nil
 		}
 	}
 	return e
+}
+
+// starredStationMeta is the station streaming from url as the favorites hold
+// it, or nil when it is not starred. The catalog keeps a station's name and
+// stream alone, and its stations are the starred ones and radios.toml's; the
+// favorite's own track says which directory station a result is, so it can
+// be unstarred from the results and from the queue it plays into.
+func (s *catalogView) starredStationMeta(url string) map[string]string {
+	fs, ok := s.radioProv.(favoriteStations)
+	if !ok {
+		return nil
+	}
+	for _, t := range fs.FavoriteTracks() {
+		if t.Path == url {
+			return t.ProviderMeta
+		}
+	}
+	return nil
 }
 
 // artistRow is an artist's row, built by its source and labelled with it.

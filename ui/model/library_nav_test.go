@@ -44,7 +44,7 @@ func libRun(t testing.TB, m Model, cmd tea.Cmd) Model {
 		return m
 	}
 	switch msg := cmd().(type) {
-	case libraryLoadedMsg, libraryPlayMsg, libraryAuthDoneMsg, librarySearchTickMsg:
+	case libraryLoadedMsg, libraryPlayMsg, libraryAuthDoneMsg, librarySearchTickMsg, libFavoriteSavedMsg:
 		updated, next := m.Update(msg)
 		return libRun(t, updated.(Model), next)
 	}
