@@ -247,7 +247,55 @@ It emphasizes real workflows and state transitions. The pattern, for each synced
 
 It is to cover, at minimum: install, first run and setup; the Local library; Spotify; YouTube Music; Internet Radio; search; playback; queue and transport controls; metadata; artwork and info views; synchronization; persistence; manual refresh; configuration; hotkeys; degraded and error states; authentication failure and recovery; upgrades; restart and recovery; shutdown. The fresh-user scenarios A–H (Workstream 5) are a starting point, not the checklist.
 
+### Before v1.0.0: the adversarial security audit
+
+Required, decided by the owner on 2026-10-10. It has not been run: nothing here records a finding, an approval or an execution.
+
+**When.** Only after the current candidate has completed its intended deterministic, live-provider, platform and human acceptance and is otherwise believed ready to be `v1.0.0`. It is an audit of the actual candidate that is intended to ship, not of an earlier one and not of the source in general.
+
+**What it is not.** It is separate from ordinary code review, staticcheck, govulncheck, the race tests, Release Acceptance, the SBOM, artifact verification and dependency scans. **It is not skipped because those are green.**
+
+**Stance.** Adversarial. Assume hostile inputs and look actively for ways to leak data, run unintended commands, expose credentials, deliver malicious content, or reach the network or the file system unexpectedly.
+
+**Scope.** All of:
+
+- Spotify and YouTube Music credentials and tokens
+- config contents and file-system permissions
+- SQLite, the cache and the database
+- secrets in logs, diagnostics and crash output; redaction
+- network and TLS
+- radio and arbitrary URLs
+- remote, untrusted metadata
+- terminal escape and control-sequence injection
+- subprocess and shell execution; command injection
+- path traversal and hostile file names
+- temporary files
+- archive extraction
+- input handling and malformed data
+- the trust boundaries between providers, local files and the UI
+- the install, build and release scripts
+- CI/CD permissions and release credentials
+- dependencies and the supply chain
+- unexpected telemetry, outbound connections or data collection
+- persistence mechanisms, and backdoor or spyware-like behavior
+- generated and third-party code whose network, file-system, process or credential operations are broader than they need to be
+
+**The release chain.** Source-to-artifact identity, dependency pins, the SBOM's accuracy, the build image and the trust placed in the toolchain, artifact integrity, what installing the package does, and whether the build and release tooling downloads or executes anything unexpected.
+
+**Who.** Recommended: an independent Codex GPT-6.1-Sol review at high effort, or the strongest appropriate independent reviewer available at the time.
+
+**If a finding needs a code change,** `v1.0.0` is not authorized. Then: Claude implements the fix by the normal workflow; Codex reviews it independently; focused security regression tests are added and run; the affected acceptance is rerun; validation is broadened if the change materially alters release behavior; and the final, corrected snapshot is reviewed again before release authorization.
+
+**Complete only when** all of these hold:
+
+- [ ] Every release-blocking finding is resolved
+- [ ] Residual risks are documented explicitly
+- [ ] No HIGH security concern is unresolved
+- [ ] The code and the artifact that were finally audited are exactly the ones intended to be `v1.0.0`
+
 **Gate D: v1.0.0.** Every RC-audit finding fixed or waived by you, by criteria you set in advance; no open BLOCKER or HIGH; and a 7-day soak of your own use with no new release-blocking regression. Any fix to code that runs (not docs-only) means a new candidate and restarts the soak. Otherwise cut rc.2, and review its fixes at effort proportional to their risk: a migration or concurrency fix can warrant high effort even then. The stable tag is built as a draft too: its own artifacts pass the CI, archive, SBOM, attestation and install checks, and its release record is written, before it is published.
+
+- [ ] Required before `v1.0.0`: [the adversarial security audit](#before-v100-the-adversarial-security-audit) of the candidate intended to ship is complete. It is separate from Gate C's Codex audit and from every automated check, and is not skipped because they are green
 
 ## Post-1.0 backlog
 
