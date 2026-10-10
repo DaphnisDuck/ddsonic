@@ -188,7 +188,7 @@ A to D and G run after the README and docs are written and before the RC. E, F a
 
 ## RC audit and release gate
 
-Each gate is a checklist; the next phase starts only when every box is ticked or explicitly waived by you. Only the RC audit gets a high-effort comprehensive Codex review; ordinary fixes stay low or medium.
+Each gate is a checklist; the next phase starts only when every box is ticked or explicitly waived by you, with one exception: the box for [the adversarial security audit before `v1.0.0`](#before-v100-the-adversarial-security-audit) may not be waived. Only the RC audit gets a high-effort comprehensive Codex review; ordinary fixes stay low or medium.
 
 **Gate A: clean baseline** (end of `review-fixes`)
 
@@ -255,6 +255,8 @@ Required, decided by the owner on 2026-10-10. It has not been run: nothing here 
 
 **What it is not.** It is separate from ordinary code review, staticcheck, govulncheck, the race tests, Release Acceptance, the SBOM, artifact verification and dependency scans. **It is not skipped because those are green.**
 
+**This gate may not be waived.**
+
 **Stance.** Adversarial. Assume hostile inputs and look actively for ways to leak data, run unintended commands, expose credentials, deliver malicious content, or reach the network or the file system unexpectedly.
 
 **Scope.** All of:
@@ -295,7 +297,7 @@ Required, decided by the owner on 2026-10-10. It has not been run: nothing here 
 
 **Gate D: v1.0.0.** Every RC-audit finding fixed or waived by you, by criteria you set in advance; no open BLOCKER or HIGH; and a 7-day soak of your own use with no new release-blocking regression. Any fix to code that runs (not docs-only) means a new candidate and restarts the soak. Otherwise cut rc.2, and review its fixes at effort proportional to their risk: a migration or concurrency fix can warrant high effort even then. The stable tag is built as a draft too: its own artifacts pass the CI, archive, SBOM, attestation and install checks, and its release record is written, before it is published.
 
-- [ ] Required before `v1.0.0`: [the adversarial security audit](#before-v100-the-adversarial-security-audit) of the candidate intended to ship is complete. It is separate from Gate C's Codex audit and from every automated check, and is not skipped because they are green
+- [ ] Required before `v1.0.0`: [the adversarial security audit](#before-v100-the-adversarial-security-audit) of the candidate intended to ship is complete. It is separate from Gate C's Codex audit and from every automated check, is not skipped because they are green, and may not be waived
 
 ## Post-1.0 backlog
 
