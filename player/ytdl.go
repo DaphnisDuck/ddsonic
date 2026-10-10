@@ -16,6 +16,7 @@ import (
 	"github.com/gopxl/beep/v2"
 
 	"github.com/bjarneo/cliamp/internal/ytdlcookies"
+	"github.com/bjarneo/cliamp/internal/ytdlp"
 )
 
 // pipeBufSize is the buffer size for audio pipe readers (yt-dlp, ffmpeg).
@@ -56,7 +57,7 @@ func probeYTDLDuration(pageURL string) time.Duration {
 	// playlist.IsURL, but keep the terminator so a future caller cannot turn
 	// a crafted URL into --exec and reach arbitrary command execution.
 	args = append(args, "--", pageURL)
-	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
+	cmd := exec.CommandContext(ctx, "yt-dlp", ytdlp.Args(args...)...) // ddsonic: no ambient yt-dlp configuration
 	// WaitDelay ensures cmd.Output() doesn't hang indefinitely if the
 	// process is killed but I/O pipe goroutines haven't drained. Without
 	// this, a zombie yt-dlp child keeping stdout open can block Output()
@@ -333,7 +334,7 @@ func decodeYTDLPipe(pageURL string, sr beep.SampleRate, bitDepth, startSec int) 
 	}
 	ytdlArgs = appendYTDLCookieArgs(ytdlArgs, pageURL)
 	ytdlArgs = append(ytdlArgs, "--", pageURL)
-	ytdlCmd := exec.Command("yt-dlp", ytdlArgs...)
+	ytdlCmd := exec.Command("yt-dlp", ytdlp.Args(ytdlArgs...)...) // ddsonic: no ambient yt-dlp configuration
 	ytdlCmd.Stdout = pw
 	var ytdlStderr limitedBuffer
 	ytdlCmd.Stderr = &ytdlStderr

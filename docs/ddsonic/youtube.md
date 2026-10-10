@@ -34,6 +34,16 @@ cookies_from = "brave+gnomekeyring"
 
 On Arch, the GNOME keyring needs `python-secretstorage` (`sudo pacman -S python-secretstorage`). Without it yt-dlp reports `cannot decrypt v11 cookies` and YouTube treats you as signed out.
 
+### yt-dlp's own configuration is not read
+
+ddsonic runs yt-dlp with `--ignore-config` and `--no-mark-watched`, every time: to sync, to play and to save a track.
+
+- No yt-dlp configuration file takes part: not `yt-dlp.conf` beside the yt-dlp executable or in the folder you started ddsonic from, not `~/.config/yt-dlp/config` and its other user locations, not `/etc/yt-dlp.conf`. They stay as they are and keep working for yt-dlp on its own.
+- ddsonic asks yt-dlp for no watch-history updates (`--no-mark-watched`), and ignores yt-dlp's configuration files, so a `--mark-watched` in one no longer applies. A sync reads your account signed in, so it would otherwise mark every video it reads. This is as far as ddsonic's own request goes: `yt-dlp` is a separate program that ddsonic finds on your `PATH`, and it still loads any yt-dlp plugins installed on your machine. ddsonic trusts both to do what they were asked.
+- Cookies come from `cookies_from` above, which ddsonic passes to yt-dlp itself. Cookies named in a yt-dlp configuration file (`--cookies`, `--cookies-from-browser`) are not used.
+- A proxy set in the environment (`HTTPS_PROXY`, `ALL_PROXY`) still applies. A `--proxy` in a configuration file does not.
+- Other options you may have set there, such as `--extractor-args` or a format, do not reach ddsonic's yt-dlp. ddsonic has no setting that passes extra yt-dlp options.
+
 ### Your own Google OAuth client
 
 The official YouTube Data API, through a free Google Cloud OAuth client you create once (about 10 minutes):
@@ -117,6 +127,7 @@ What this does, and does not:
 
 - **No YouTube Music in Music:** check that `[ytmusic]` does not say `enabled = false`, that it has a sign-in (cookies or both OAuth keys), and that `yt-dlp` is on your PATH.
 - **"sync failed" for YouTube:** the log (`~/.config/ddsonic/ddsonic.log`) has yt-dlp's message. A 401, or `cannot decrypt`, means the cookies are not being read (see the keyring note above).
+- **yt-dlp works in a terminal but not in ddsonic:** ddsonic does not read yt-dlp's configuration files, so an option that makes it work there (cookies, extractor arguments, a proxy) is missing here. See [yt-dlp's own configuration is not read](#yt-dlps-own-configuration-is-not-read).
 - **A saved playlist is missing:** add its link to `youtube_playlists`.
 - **An album saved in YouTube Music is missing:** saved Library Albums are not synchronized, and pressing `r` or restarting does not change that. See [Albums from tracks](#albums-from-tracks-and-artists-from-tracks-enrichment).
 - **An artist you follow in YouTube Music is missing:** followed artists are not synchronized either. An artist appears in Artists from tracks once a track in Liked Music or a synced playlist credits them.

@@ -495,9 +495,12 @@ const (
 func YTWatchURL(id string) string { return "https://music.youtube.com/watch?v=" + id }
 
 // Responses scripts the account: the exact invocations ddsonic makes for a
-// cookie-mode sync and for reading each liked video's details.
+// cookie-mode sync and for reading each liked video's details. Each starts
+// with --ignore-config and --no-mark-watched, spelled out here rather than
+// taken from the player's code: the fake answers nothing else, so a sync
+// that could be steered by a yt-dlp.conf, or mark a video watched, fails.
 func (a YTAccount) Responses() []YTResponse {
-	base := []string{"--socket-timeout", "15", "--no-warnings", "--cookies-from-browser", a.Browser}
+	base := []string{"--ignore-config", "--no-mark-watched", "--socket-timeout", "15", "--no-warnings", "--cookies-from-browser", a.Browser}
 	invocation := func(url string, args ...string) []string {
 		return append(append(append([]string{}, base...), args...), "--", url)
 	}

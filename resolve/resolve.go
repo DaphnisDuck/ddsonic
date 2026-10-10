@@ -24,6 +24,7 @@ import (
 
 	"github.com/bjarneo/cliamp/internal/appmeta" // ddsonic
 	"github.com/bjarneo/cliamp/internal/ytdlcookies"
+	"github.com/bjarneo/cliamp/internal/ytdlp"
 	"github.com/bjarneo/cliamp/player"
 	"github.com/bjarneo/cliamp/playlist"
 
@@ -654,7 +655,7 @@ func resolveYTDLRangePageContext(ctx context.Context, pageURL string, start, end
 		args = append(args, "--playlist-end", strconv.Itoa(end))
 	}
 	args = append(args, "--", pageURL)
-	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
+	cmd := exec.CommandContext(ctx, "yt-dlp", ytdlp.Args(args...)...) // ddsonic: no ambient yt-dlp configuration
 	cmd.WaitDelay = 3 * time.Second
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -737,7 +738,7 @@ func DownloadYTDL(pageURL, saveDir string) (string, error) {
 		args = append(args, "--cookies-from-browser", browser)
 	}
 	args = append(args, "--", pageURL)
-	cmd := exec.Command("yt-dlp", args...)
+	cmd := exec.Command("yt-dlp", ytdlp.Args(args...)...) // ddsonic: no ambient yt-dlp configuration
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	stdout, err := cmd.Output()

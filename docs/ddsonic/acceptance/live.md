@@ -66,6 +66,8 @@ Play a track from Liked Songs, one from an album and one from a playlist. Each s
 2. The screen says it is searching Spotify for that query, then shows Spotify's results under Spotify's name.
 3. Play one result.
 
+**Do not press `p` on this screen.** There, `p` adds the highlighted track to one of the account's Spotify playlists, or to a new one it creates: a change to the account, made on purpose by the player and not needed by this case. It is allowed only under an explicit authorization for [account changes](#account-changes). `a` and `q` change only ddsonic's own queue.
+
 ## Account changes
 
 *Case LIVE-SPOT-005. **Do not run this yet.***

@@ -95,7 +95,7 @@ func TestYTAccountResponses(t *testing.T) {
 	responses := account.Responses()
 	var urls []string
 	for _, r := range responses {
-		if got := r.Args[:5]; !slices.Equal(got, []string{"--socket-timeout", "15", "--no-warnings", "--cookies-from-browser", "b"}) {
+		if got := r.Args[:7]; !slices.Equal(got, []string{"--ignore-config", "--no-mark-watched", "--socket-timeout", "15", "--no-warnings", "--cookies-from-browser", "b"}) {
 			t.Errorf("invocation starts %q", got)
 		}
 		if r.Args[len(r.Args)-2] != "--" {

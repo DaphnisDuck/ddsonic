@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bjarneo/cliamp/internal/ytdlcookies"
+	"github.com/bjarneo/cliamp/internal/ytdlp"
 	"github.com/bjarneo/cliamp/playlist"
 )
 
@@ -111,7 +112,7 @@ func FetchUserPlaylists(browser string) ([]playlist.PlaylistInfo, error) {
 	}
 	args = append(args, "--", "https://www.youtube.com/feed/playlists")
 
-	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
+	cmd := exec.CommandContext(ctx, "yt-dlp", ytdlp.Args(args...)...) // ddsonic: no ambient yt-dlp configuration
 	cmd.WaitDelay = 3 * time.Second
 	var stderr strings.Builder
 	cmd.Stderr = &stderr

@@ -21,6 +21,7 @@ import (
 
 	"github.com/bjarneo/cliamp/applog"
 	"github.com/bjarneo/cliamp/catalog"
+	"github.com/bjarneo/cliamp/internal/ytdlp"
 )
 
 // ErrIncomplete means a playlist read ended with a different number of
@@ -329,11 +330,13 @@ func (c *CookieCatalog) TrackMetadata(ctx context.Context, track catalog.Ref) (c
 	return meta, nil
 }
 
-// runYTDLP runs yt-dlp and returns its stdout. A failure carries yt-dlp's
+// runYTDLP runs yt-dlp and returns its stdout. The run reads no yt-dlp
+// configuration and marks nothing watched (ytdlp.Args): it is signed in to
+// the account, and a sync only reads it. A failure carries yt-dlp's
 // last error line; a missing or private playlist wraps catalog.ErrForbidden,
 // so a sync skips it and keeps what it had.
 func runYTDLP(ctx context.Context, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
+	cmd := exec.CommandContext(ctx, "yt-dlp", ytdlp.Args(args...)...)
 	cmd.WaitDelay = 3 * time.Second
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

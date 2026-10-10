@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bjarneo/cliamp/internal/ytdlp"
 	"github.com/bjarneo/cliamp/playlist"
 	"github.com/bjarneo/cliamp/provider"
 	"github.com/bjarneo/cliamp/resolve"
@@ -448,7 +449,7 @@ func extractBrowserCookieHeader(ctx context.Context, browser string) (string, er
 
 	cmdCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(cmdCtx, "yt-dlp",
+	cmd := exec.CommandContext(cmdCtx, "yt-dlp", ytdlp.Args( // ddsonic: no ambient yt-dlp configuration
 		"--cookies-from-browser", browser,
 		"--cookies", path,
 		"--flat-playlist",
@@ -457,7 +458,7 @@ func extractBrowserCookieHeader(ctx context.Context, browser string) (string, er
 		"--print", "title",
 		"--",
 		probeURL,
-	)
+	)...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
