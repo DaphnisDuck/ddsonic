@@ -4,7 +4,7 @@
 # digest, the codec libraries from one Debian snapshot, and mpg123 from a
 # checksummed source archive. Debian 12 sets the glibc baseline (2.36).
 # To move any of them, change the pin here and cut a new candidate.
-FROM golang:1.27.1-bookworm@sha256:69a7b9788769bec032d238959b61854e9ae87f57be9029ec04e9885fabf99195
+FROM golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61
 
 ARG DEBIAN_SNAPSHOT=20260918T000000Z
 ARG MPG123_VERSION=1.32.6

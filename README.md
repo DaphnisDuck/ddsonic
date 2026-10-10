@@ -52,7 +52,7 @@ Local files and radio need no account at all. cliamp's other sources (Navidrome,
 
 **From source**
 
-You need [Go](https://go.dev/dl/) 1.26.6 or later (ddsonic is built and tested with 1.27.1), a C compiler, `pkg-config`, and the ALSA and codec headers:
+You need [Go](https://go.dev/dl/) 1.26.6 or later (ddsonic is built and tested with 1.27.2), a C compiler, `pkg-config`, and the ALSA and codec headers:
 
 ```sh
 # Debian/Ubuntu
