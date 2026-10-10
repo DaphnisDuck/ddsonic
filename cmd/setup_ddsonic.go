@@ -117,7 +117,7 @@ func localSetupSpec() providerSpec {
 			if err != nil {
 				return "", err
 			}
-			if err := setTopLevelKey("initial_directory", `"`+dir+`"`); err != nil {
+			if err := setTopLevelKey("initial_directory", config.QuoteString(dir)); err != nil {
 				return "", err
 			}
 			return "Saved initial_directory = " + dir + ".", nil

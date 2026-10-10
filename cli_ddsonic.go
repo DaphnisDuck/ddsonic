@@ -26,6 +26,11 @@ var (
 	removedFlags    = []string{"daemon", "expanded", "mono", "simplified"}
 )
 
+// sourceSHA is the commit a release build was made from, set at build time
+// via -ldflags "-X main.sourceSHA=<sha>" (packaging/release.sh). Empty in
+// every other build.
+var sourceSHA string
+
 // ddsonicApp is buildApp as ddsonic ships it.
 func ddsonicApp() *cli.Command {
 	app := buildApp()
@@ -33,6 +38,13 @@ func ddsonicApp() *cli.Command {
 	// A plain go build has no version; urfave hides --version when it's empty.
 	if app.Version == "" {
 		app.Version = "dev"
+	}
+	// A release build says which commit it was built from, so that the
+	// binary alone identifies its source: "ddsonic version v1.0.0 (commit
+	// <40 hex digits>)". Release acceptance compares it with the archive's
+	// manifest and the expected release commit.
+	if sourceSHA != "" {
+		app.Version += " (commit " + sourceSHA + ")"
 	}
 	// A removed command becomes a hidden stub that says so; otherwise the
 	// word would fall through to the player as a file to open.

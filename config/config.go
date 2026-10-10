@@ -805,6 +805,7 @@ func Save(key, value string) error {
 		return err
 	}
 
+	value = saveValue(key, value) // ddsonic: what is written is TOML (syntax_ddsonic.go)
 	line := fmt.Sprintf("%s = %s", key, value)
 
 	data, err := os.ReadFile(path)

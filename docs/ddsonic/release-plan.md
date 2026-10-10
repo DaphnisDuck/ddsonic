@@ -236,6 +236,8 @@ Each gate is a checklist; the next phase starts only when every box is ticked or
 
 **Before v1.0.0-rc.4: the human acceptance checklist** (required, decided 2026-10-09). The rc.3 report that albums saved in YouTube Music never appeared was found by using ddsonic, not by a test or an audit. A reusable human release-candidate acceptance checklist is therefore created and executed before the next candidate, and at every candidate after it: a repeatable gate in place of ad-hoc exploratory testing. It complements the automated tests and does not duplicate them.
 
+That checklist has become **Release Acceptance** ([acceptance.md](acceptance.md)): a case catalog, scripted cases that run on the candidate's own binary, live-provider and human runbooks, and one gate over all of them. The order is automated code validation, then agent and workflow acceptance, then the human exploratory pass, which starts only when the agent pass is green. For `v1.0.0-rc.4`, live acceptance of both Spotify and YouTube Music is required. The first slice of the tooling exists (2026-10-09); no release run and no live or human pass has been made yet.
+
 - [ ] The known rc.3 bugs are triaged or resolved
 - [ ] The checklist is drafted and independently reviewed
 - [ ] Steve executes it against the release candidate

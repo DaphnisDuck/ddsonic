@@ -3,7 +3,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 BINARY  ?= ddsonic
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: build test vet lint staticcheck fmt fmt-check coverage security ci check clean install
+.PHONY: build test vet lint staticcheck fmt fmt-check coverage security ci check clean install acceptance acceptance-validate
 
 build:
 	go build -trimpath -ldflags="$(LDFLAGS)" -o $(BINARY) .
@@ -42,6 +42,15 @@ ci: fmt-check vet staticcheck security
 	git diff --exit-code
 
 check: fmt vet test
+
+# ddsonic: release acceptance (docs/ddsonic/acceptance.md). acceptance runs the
+# scripted cases on a local build, which is never release evidence; a release
+# run is given the draft release's archive (see the doc).
+acceptance-validate:
+	go run ./acceptance/cmd/acceptance validate
+
+acceptance: acceptance-validate
+	go run ./acceptance/cmd/acceptance run --dev
 
 clean:
 	rm -f $(BINARY)
