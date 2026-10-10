@@ -247,11 +247,14 @@ func (s *catalogView) entry(r catalog.SearchResult) (e Entry, ok bool) {
 	return e, ok
 }
 
-// trackRow is a searched track's row: Enter plays its album from it, or
-// plays a station alone as a live stream.
+// trackRow is a searched track's row, labelled with its source: Enter plays
+// its album from it, or plays a station alone as a live stream. The label
+// is the row's, not the track's: what plays and what is queued is the track
+// as its source holds it.
 func (s *catalogView) trackRow(t catalog.Track, station bool) Entry {
 	track := PlayableTrack(t)
-	e := Entry{ID: catalogID(t.ID), Title: t.Title, Track: &track, PlayFrom: s.albumFrom(t), Source: t.Ref.Provider}
+	e := Entry{ID: catalogID(t.ID), Title: t.Title, Detail: SourceLabel(t.Ref.Provider), Track: &track,
+		PlayFrom: s.albumFrom(t), Source: t.Ref.Provider}
 	if station {
 		track.Stream, track.Realtime = true, true
 		e.PlayFrom = func(context.Context) ([]playlist.Track, int, error) {

@@ -319,14 +319,35 @@ func libTrackNumbers(entries []library.Entry) []int {
 	return numbers
 }
 
+// libTrackRow is formatTrackRow with a label after the name: "3. Name  Label
+// 4:05". The label is kept whole and the name gives way to it, down to four
+// cells; only a row too narrow for both shortens the label. Without a label
+// it is formatTrackRow's row.
+func libTrackRow(number int, name, label string, secs int) string {
+	if label == "" {
+		return formatTrackRow(number, name, secs)
+	}
+	// What formatTrackRow leaves for the name: the row less its number and
+	// its duration.
+	budget := ui.PanelWidth - libCursorPrefix - lipgloss.Width(fmt.Sprintf("%d. ", number))
+	if dur := formatTrackTime(secs); dur != "" {
+		budget -= lipgloss.Width(dur) + 1
+	}
+	const minName = 4
+	label = truncate(label, max(budget-minName-libTrackLabelGap, 1))
+	name = truncate(name, max(budget-libTrackLabelGap-lipgloss.Width(label), minName))
+	return formatTrackRow(number, name+strings.Repeat(" ", libTrackLabelGap)+label, secs)
+}
+
 // libEntryLabel renders "Title      Detail ›"; tracks use the numbered track
-// row with duration. A station is a live stream with neither, so it is a
-// plain row. Browsable rows end in "›". Up to listReadWidth the detail is
+// row with duration, and their detail, which only a search result has (its
+// source), follows the name. A station is a live stream with neither, so it
+// is a plain row. Browsable rows end in "›". Up to listReadWidth the detail is
 // right-aligned; on a wider terminal (titleCol > 0) it starts after a
 // titleCol-wide title column, or after a longer title.
 func libEntryLabel(e library.Entry, number, titleCol int) string {
 	if e.Track != nil && !e.Track.Realtime {
-		return formatTrackRow(number, library.CleanText(trackViewName(*e.Track)), e.Track.DurationSecs)
+		return libTrackRow(number, library.CleanText(trackViewName(*e.Track)), library.CleanText(e.Detail), e.Track.DurationSecs)
 	}
 	width := ui.PanelWidth - libCursorPrefix
 	suffix := ""

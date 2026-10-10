@@ -42,6 +42,7 @@ The first release for people who don't build from source. 1.0 adds no features t
 - cliamp's Nix flake, desktop entry, icons, website and install script, which built or installed cliamp. ddsonic installs from the release archive, the AUR package or source, and has a launcher entry and an icon of its own.
 
 ### Fixed
+- Search results: a track and a radio station now say which source they are from (`Local`, `Spotify`, `YouTube`, `Radio`), as albums, artists and playlists did. The same recording held in two sources was two rows nothing told apart.
 - Two quick volume changes from a desktop media control could freeze ddsonic; a dropped session bus could crash it.
 - A stalled YouTube Music download froze every control until yt-dlp gave up.
 - Opening a Spotify track on a stalled network froze ddsonic for up to 30 seconds.

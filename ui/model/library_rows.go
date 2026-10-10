@@ -59,6 +59,10 @@ func libEntryTitleWidth(e library.Entry) int {
 	return w
 }
 
+// libTrackLabelGap is the space between a track row's name and its label
+// (libTrackRow).
+const libTrackLabelGap = 2
+
 // libIsTrackRow reports whether entry renders as a numbered track row.
 func libIsTrackRow(e library.Entry) bool { return e.Track != nil && !e.Track.Realtime }
 
@@ -67,7 +71,11 @@ func libIsTrackRow(e library.Entry) bool { return e.Track != nil && !e.Track.Rea
 // its track number.
 func libEntryNeed(e library.Entry, number, titleCol int) int {
 	if libIsTrackRow(e) {
-		return libCursorPrefix + lipgloss.Width(fmt.Sprintf("%d. ", number)) + trackRowNeed(library.CleanText(trackViewName(*e.Track)), *e.Track, false)
+		need := libCursorPrefix + lipgloss.Width(fmt.Sprintf("%d. ", number)) + trackRowNeed(library.CleanText(trackViewName(*e.Track)), *e.Track, false)
+		if d := library.CleanText(e.Detail); d != "" {
+			need += libTrackLabelGap + lipgloss.Width(d) // a search result's source, after the name
+		}
+		return need
 	}
 	w := max(libEntryTitleWidth(e), titleCol)
 	if d := library.CleanText(e.Detail); d != "" {
