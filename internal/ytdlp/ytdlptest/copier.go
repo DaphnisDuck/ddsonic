@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -26,7 +27,13 @@ const (
 	// HangUnremovable holds its copy until it is told to stop, and then
 	// leaves such a directory.
 	HangUnremovable = "hang-unremovable"
+	// Fail removes its copy and fails as yt-dlp does for a video it cannot
+	// play: FailMessage on standard error, no output, exit status 1.
+	Fail = "fail"
 )
+
+// FailMessage is what a Fail run says.
+const FailMessage = "ERROR: [youtube] synthetic: Video unavailable"
 
 // Copier is a fake yt-dlp that treats temporary storage as yt-dlp treats a
 // browser's cookie database: it copies it (here an empty stand-in, never a
@@ -40,6 +47,7 @@ const copierScript = `#!/bin/sh
 state=%STATE%
 copy="${TMPDIR:-/tmp}/yt_dlp$$"
 mkdir -p "$copy" && : >"$copy/temporary.sqlite"
+printf '%s\n' "$$" >>"$state/pids"
 printf '%s\n' "${TMPDIR:-}" >>"$state/tmpdir"
 printf '%s\n' "$*" >>"$state/args"
 mode=$(cat "$state/mode")
@@ -59,6 +67,11 @@ else
 	trap ': >"$state/interrupted"; finish 130' INT
 fi
 : >"$state/copying"
+if [ "$mode" = fail ]; then
+	printf '%s\n' 'ERROR: [youtube] synthetic: Video unavailable' >&2
+	rm -rf "$copy"
+	exit 1
+fi
 if [ "$mode" = unremovable ]; then
 	lock
 	cat "$state/stdout"
@@ -155,6 +168,62 @@ func (c *Copier) WaitCopying(t *testing.T) {
 		}
 	}
 	t.Fatal("yt-dlp did not start copying within 10 s")
+}
+
+// WaitRuns waits until n runs of the fake have started and hold their copies.
+func (c *Copier) WaitRuns(t *testing.T, n int) {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		if len(c.lines(t, "args")) >= n {
+			return
+		}
+	}
+	t.Fatalf("yt-dlp was started %d times within 10 s, want %d", len(c.lines(t, "args")), n)
+}
+
+// Live returns how many runs of the fake are still running, or have ended
+// and not been reaped: the processes the fake reported the pids of that the
+// system still knows (alive, in alive_unix.go).
+func (c *Copier) Live(t *testing.T) int {
+	t.Helper()
+	live := 0
+	for _, line := range c.lines(t, "pids") {
+		pid, err := strconv.Atoi(line)
+		if err != nil {
+			t.Fatalf("pid %q: %v", line, err)
+		}
+		if alive(pid) {
+			live++
+		}
+	}
+	return live
+}
+
+// WaitLive waits until exactly n runs are still running, and reports how
+// long that took.
+func (c *Copier) WaitLive(t *testing.T, n int, within time.Duration) time.Duration {
+	t.Helper()
+	start := time.Now()
+	for time.Since(start) < within {
+		if c.Live(t) == n {
+			return time.Since(start)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("%d yt-dlp run(s) still running after %v, want %d", c.Live(t), within, n)
+	return 0
+}
+
+// WaitNoCopy waits until the runs have left nothing in the temporary
+// directory: a cleanup that runs on a goroutine of its own takes a moment.
+func (c *Copier) WaitNoCopy(t *testing.T, within time.Duration) {
+	t.Helper()
+	for deadline := time.Now().Add(within); time.Now().Before(deadline); time.Sleep(2 * time.Millisecond) {
+		if len(c.CopiesLeft(t)) == 0 {
+			return
+		}
+	}
+	t.Fatalf("still in the temporary directory after %v: %q", within, c.CopiesLeft(t))
 }
 
 // Runs returns the argument list of each run so far, space-joined.

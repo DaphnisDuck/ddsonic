@@ -25,6 +25,10 @@ type trackPipeline struct {
 	// yt-dlp seek-by-restart: when true, seeking restarts yt-dlp with --download-sections.
 	ytdlSeek bool
 
+	// ddsonic: the load a yt-dlp pipeline came from (ytdl_load_ddsonic.go);
+	// nil for every other source.
+	load *ytdlLoad
+
 	// Network byte counter — incremented by countingReader for HTTP streams.
 	// nil for local files.
 	bytesRead *atomic.Int64
@@ -67,6 +71,9 @@ func (tp *trackPipeline) close() {
 	}
 	if tp.livePrefetch != nil {
 		tp.livePrefetch.Wait()
+	}
+	if tp.load != nil {
+		tp.load.end() // ddsonic: ends the load's context, and its duration probe with it
 	}
 }
 

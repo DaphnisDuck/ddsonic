@@ -3,6 +3,7 @@ package player
 // ddsonic: playback's yt-dlp runs leave no copy of the browser's cookies.
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -17,7 +18,7 @@ import (
 
 func TestProbeYTDLDurationLeavesNoCookieCopy(t *testing.T) {
 	fake := ytdlptest.InstallCopier(t, ytdlptest.Finish, "212.0\n")
-	if got := probeYTDLDuration("https://www.youtube.com/watch?v=abc"); got != 212*time.Second {
+	if got := probeYTDLDuration(context.Background(), "https://www.youtube.com/watch?v=abc"); got != 212*time.Second {
 		t.Errorf("probeYTDLDuration = %v, want 3m32s", got)
 	}
 	fake.RequireNoCopy(t)
@@ -35,7 +36,7 @@ func TestDecodeYTDLPipePlayedThroughLeavesNoCookieCopy(t *testing.T) {
 	fake := ytdlptest.InstallCopier(t, ytdlptest.Finish, strings.Repeat("\x00", 1024))
 	installPassThroughFFmpeg(t)
 
-	y, _, err := decodeYTDLPipe("https://www.youtube.com/watch?v=abc", beep.SampleRate(44100), 16, 0)
+	y, _, err := decodeYTDLPipe(context.Background(), "https://www.youtube.com/watch?v=abc", beep.SampleRate(44100), 16, 0)
 	if err != nil {
 		t.Fatalf("decodeYTDLPipe: %v", err)
 	}
@@ -58,7 +59,7 @@ func TestDecodeYTDLPipeStoppedEarlyLeavesNoCookieCopy(t *testing.T) {
 			fake := ytdlptest.InstallCopier(t, mode, "")
 			installPassThroughFFmpeg(t)
 
-			y, _, err := decodeYTDLPipe("https://www.youtube.com/watch?v=abc", beep.SampleRate(44100), 16, 0)
+			y, _, err := decodeYTDLPipe(context.Background(), "https://www.youtube.com/watch?v=abc", beep.SampleRate(44100), 16, 0)
 			if err != nil {
 				t.Fatalf("decodeYTDLPipe: %v", err)
 			}

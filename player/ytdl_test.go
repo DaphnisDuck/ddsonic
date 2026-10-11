@@ -3,6 +3,7 @@ package player
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -82,7 +83,7 @@ func TestBuildYTDLPipelineRetriesTransient403(t *testing.T) {
 	attemptsPath, ffmpegDonePath := installYTDLRetryFixtures(t, "403-once")
 	p := &Player{sr: beep.SampleRate(44100), bitDepth: 16}
 
-	pipeline, err := p.buildYTDLPipeline("https://www.youtube.com/watch?v=retry", 0)
+	pipeline, err := p.buildYTDLPipeline(p.beginYTDLLoad(ytdlPlayLoad, 0, false), "https://www.youtube.com/watch?v=retry", 0)
 	if err != nil {
 		t.Fatalf("buildYTDLPipeline() error = %v", err)
 	}
@@ -99,7 +100,7 @@ func TestBuildYTDLPipelineStopsAfterTransient403RetryBudget(t *testing.T) {
 	attemptsPath, _ := installYTDLRetryFixtures(t, "403-always")
 	p := &Player{sr: beep.SampleRate(44100), bitDepth: 16}
 
-	_, err := p.buildYTDLPipeline("https://www.youtube.com/watch?v=retry", 0)
+	_, err := p.buildYTDLPipeline(p.beginYTDLLoad(ytdlPlayLoad, 0, false), "https://www.youtube.com/watch?v=retry", 0)
 	if err == nil || !strings.Contains(err.Error(), "HTTP Error 403: Forbidden") {
 		t.Fatalf("buildYTDLPipeline() error = %v, want yt-dlp 403 cause", err)
 	}
@@ -112,7 +113,7 @@ func TestBuildYTDLPipelineDoesNotRetryPermanentYTDLError(t *testing.T) {
 	attemptsPath, _ := installYTDLRetryFixtures(t, "unavailable")
 	p := &Player{sr: beep.SampleRate(44100), bitDepth: 16}
 
-	_, err := p.buildYTDLPipeline("https://www.youtube.com/watch?v=unavailable", 0)
+	_, err := p.buildYTDLPipeline(p.beginYTDLLoad(ytdlPlayLoad, 0, false), "https://www.youtube.com/watch?v=unavailable", 0)
 	if err == nil || !strings.Contains(err.Error(), "Video unavailable") {
 		t.Fatalf("buildYTDLPipeline() error = %v, want unavailable-video cause", err)
 	}
@@ -253,7 +254,7 @@ func TestYTDLPipeDrainsOutputAfterFFmpegExits(t *testing.T) {
 	writeExecutable(t, filepath.Join(dir, "ffmpeg"), "#!/bin/sh\ncat\n")
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	y, _, err := decodeYTDLPipe("https://www.youtube.com/watch?v=end", beep.SampleRate(44100), 16, 0)
+	y, _, err := decodeYTDLPipe(context.Background(), "https://www.youtube.com/watch?v=end", beep.SampleRate(44100), 16, 0)
 	if err != nil {
 		t.Fatalf("decodeYTDLPipe() error = %v", err)
 	}

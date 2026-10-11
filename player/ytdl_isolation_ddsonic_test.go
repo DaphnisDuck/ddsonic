@@ -3,6 +3,7 @@ package player
 // ddsonic: playback's yt-dlp runs against ambient yt-dlp configuration.
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -21,7 +22,7 @@ func TestProbeYTDLDurationIgnoresAmbientYTDLPConfiguration(t *testing.T) {
 	t.Cleanup(func() { ytdlcookies.SetForHost("youtube.com", "") })
 	fake := ytdlptest.Install(t, "212.0\n")
 
-	if got := probeYTDLDuration("https://www.youtube.com/watch?v=abc"); got != 212*time.Second {
+	if got := probeYTDLDuration(context.Background(), "https://www.youtube.com/watch?v=abc"); got != 212*time.Second {
 		t.Errorf("probeYTDLDuration = %v, want 3m32s", got)
 	}
 
@@ -47,7 +48,7 @@ func TestDecodeYTDLPipeIgnoresAmbientYTDLPConfiguration(t *testing.T) {
 	writeExecutable(t, filepath.Join(bin, "ffmpeg"), "#!/bin/sh\ncat\n")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	y, _, err := decodeYTDLPipe("https://www.youtube.com/watch?v=abc", beep.SampleRate(44100), 16, 0)
+	y, _, err := decodeYTDLPipe(context.Background(), "https://www.youtube.com/watch?v=abc", beep.SampleRate(44100), 16, 0)
 	if err != nil {
 		t.Fatalf("decodeYTDLPipe: %v", err)
 	}

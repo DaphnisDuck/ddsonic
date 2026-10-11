@@ -4,6 +4,7 @@ package player
 // made, or cannot be removed.
 
 import (
+	"context"
 	"io"
 	"strings"
 	"testing"
@@ -19,7 +20,7 @@ func TestDecodeYTDLPipeIsNotStartedWithoutATemporaryDirectoryOfItsOwn(t *testing
 	installPassThroughFFmpeg(t)
 	fake.DenyTemp(t)
 
-	y, _, err := decodeYTDLPipe("https://www.youtube.com/watch?v=abc", beep.SampleRate(44100), 16, 0)
+	y, _, err := decodeYTDLPipe(context.Background(), "https://www.youtube.com/watch?v=abc", beep.SampleRate(44100), 16, 0)
 	if err == nil {
 		_ = y.Close()
 		t.Fatal("decodeYTDLPipe started without a temporary directory for yt-dlp")
@@ -27,7 +28,7 @@ func TestDecodeYTDLPipeIsNotStartedWithoutATemporaryDirectoryOfItsOwn(t *testing
 	if runs := fake.Runs(t); len(runs) != 0 {
 		t.Errorf("yt-dlp was run without a temporary directory of its own: %q", runs)
 	}
-	if got := probeYTDLDuration("https://www.youtube.com/watch?v=abc"); got != 0 || len(fake.Runs(t)) != 0 {
+	if got := probeYTDLDuration(context.Background(), "https://www.youtube.com/watch?v=abc"); got != 0 || len(fake.Runs(t)) != 0 {
 		t.Errorf("probeYTDLDuration = %v after %d runs, want 0 and no run", got, len(fake.Runs(t)))
 	}
 }
@@ -40,7 +41,7 @@ func TestDecodeYTDLPipeReportsATemporaryDirectoryItCouldNotRemove(t *testing.T) 
 	installPassThroughFFmpeg(t)
 	applog.Drain()
 
-	y, _, err := decodeYTDLPipe("https://www.youtube.com/watch?v=abc", beep.SampleRate(44100), 16, 0)
+	y, _, err := decodeYTDLPipe(context.Background(), "https://www.youtube.com/watch?v=abc", beep.SampleRate(44100), 16, 0)
 	if err != nil {
 		t.Fatalf("decodeYTDLPipe: %v", err)
 	}
