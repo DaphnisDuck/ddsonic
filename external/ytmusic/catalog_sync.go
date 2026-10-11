@@ -14,7 +14,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os/exec"
 	"slices"
 	"strings"
 	"time"
@@ -332,17 +331,22 @@ func (c *CookieCatalog) TrackMetadata(ctx context.Context, track catalog.Ref) (c
 
 // runYTDLP runs yt-dlp and returns its stdout. The run reads no yt-dlp
 // configuration and marks nothing watched (ytdlp.Args): it is signed in to
-// the account, and a sync only reads it. A failure carries yt-dlp's
+// the account, and a sync only reads it. A sync that is cancelled interrupts
+// the run before it kills it, and no copy of the browser's cookies is left
+// in temporary storage either way (ytdlp.Command). A failure carries yt-dlp's
 // last error line; a missing or private playlist wraps catalog.ErrForbidden,
 // so a sync skips it and keeps what it had.
-func runYTDLP(ctx context.Context, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "yt-dlp", ytdlp.Args(args...)...)
-	cmd.WaitDelay = 3 * time.Second
+func runYTDLP(ctx context.Context, args ...string) (_ []byte, err error) {
+	cmd, release, err := ytdlp.Command(ctx, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer ytdlp.Finish(release, &err)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	stdout := &cappedBuffer{limit: maxYTDLPOutput}
 	cmd.Stdout = stdout
-	err := cmd.Run()
+	err = cmd.Run()
 	switch {
 	case stdout.over:
 		return nil, fmt.Errorf("yt-dlp: output over %d MB", maxYTDLPOutput>>20)

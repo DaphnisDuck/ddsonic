@@ -1,0 +1,242 @@
+package ytdlptest
+
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/bjarneo/cliamp/internal/appdir"
+)
+
+// Modes of a Copier.
+const (
+	// Finish prints the scripted output and exits, removing its copy.
+	Finish = "finish"
+	// Hang holds its copy until it is told to stop.
+	Hang = "hang"
+	// Stubborn holds its copy and ignores every request to stop.
+	Stubborn = "stubborn"
+	// Unremovable finishes, leaving in its temporary directory a directory
+	// that cannot be read, and so cannot be emptied.
+	Unremovable = "unremovable"
+	// HangUnremovable holds its copy until it is told to stop, and then
+	// leaves such a directory.
+	HangUnremovable = "hang-unremovable"
+)
+
+// Copier is a fake yt-dlp that treats temporary storage as yt-dlp treats a
+// browser's cookie database: it copies it (here an empty stand-in, never a
+// real cookie) into a yt_dlp* directory under $TMPDIR while it works, and
+// removes the copy when it finishes or is interrupted (SIGINT). Killed or
+// terminated (SIGKILL, SIGTERM), it leaves the copy behind, as yt-dlp
+// 2026.08.19 does.
+type Copier struct{ state, temp string }
+
+const copierScript = `#!/bin/sh
+state=%STATE%
+copy="${TMPDIR:-/tmp}/yt_dlp$$"
+mkdir -p "$copy" && : >"$copy/temporary.sqlite"
+printf '%s\n' "${TMPDIR:-}" >>"$state/tmpdir"
+printf '%s\n' "$*" >>"$state/args"
+mode=$(cat "$state/mode")
+child=
+lock() {
+	mkdir -p "${TMPDIR:-/tmp}/locked" && : >"${TMPDIR:-/tmp}/locked/left" && chmod 000 "${TMPDIR:-/tmp}/locked"
+}
+finish() {
+	[ -n "$child" ] && kill "$child" 2>/dev/null
+	[ "$mode" = hang-unremovable ] && lock
+	rm -rf "$copy"
+	exit "$1"
+}
+if [ "$mode" = stubborn ]; then
+	trap '' INT TERM
+else
+	trap ': >"$state/interrupted"; finish 130' INT
+fi
+: >"$state/copying"
+if [ "$mode" = unremovable ]; then
+	lock
+	cat "$state/stdout"
+	finish 0
+fi
+if [ "$mode" != finish ]; then
+	sleep 20 >/dev/null 2>&1 &
+	child=$!
+	wait "$child"
+fi
+cat "$state/stdout"
+finish 0
+`
+
+// unrelated is what else the temporary directory holds: things a cleanup by
+// name would take for yt-dlp's or ddsonic's own.
+var unrelated = []string{likeOurs, "unrelated.txt", "yt_dlp-not-ours"}
+
+// likeOurs is named like a directory ddsonic makes for a run, and is not one.
+var likeOurs = appdir.Name + "-yt-dlp-not-ours"
+
+// InstallCopier puts the fake first on PATH for the rest of the test and
+// gives the test a temporary directory of its own, holding a few things that
+// are nobody's to remove. Each run of the fake behaves as mode says and, when
+// it finishes, prints stdout.
+func InstallCopier(t *testing.T, mode, stdout string) *Copier {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake yt-dlp is a shell script")
+	}
+	root := t.TempDir()
+	c := &Copier{state: filepath.Join(root, "state"), temp: filepath.Join(root, "tmp")}
+	for path, content := range map[string]string{
+		filepath.Join(c.state, "stdout"):                 stdout,
+		filepath.Join(c.state, "mode"):                   mode,
+		filepath.Join(root, "bin", "yt-dlp"):             strings.ReplaceAll(copierScript, "%STATE%", "'"+c.state+"'"),
+		filepath.Join(c.temp, "unrelated.txt"):           "keep",
+		filepath.Join(c.temp, "yt_dlp-not-ours", "keep"): "keep",
+		filepath.Join(c.temp, likeOurs, "keep"):          "keep",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", filepath.Join(root, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMPDIR", c.temp)
+	// Whatever a test did to the directories' modes, the test's own
+	// directory has to be removable again.
+	t.Cleanup(func() {
+		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, _ error) error {
+			if d != nil && d.IsDir() {
+				_ = os.Chmod(path, 0o700)
+			}
+			return nil
+		})
+	})
+	return c
+}
+
+// Unlock makes what an Unremovable run left removable again.
+func (c *Copier) Unlock(t *testing.T) {
+	t.Helper()
+	err := filepath.WalkDir(c.temp, func(path string, d os.DirEntry, err error) error {
+		if d != nil && d.IsDir() {
+			return os.Chmod(path, 0o700)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// DenyTemp makes the temporary directory one nothing can be created in.
+func (c *Copier) DenyTemp(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("root creates files wherever it likes")
+	}
+	if err := os.Chmod(c.temp, 0o500); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// WaitCopying waits until a run of the fake holds its copy.
+func (c *Copier) WaitCopying(t *testing.T) {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		if _, err := os.Stat(filepath.Join(c.state, "copying")); err == nil {
+			return
+		}
+	}
+	t.Fatal("yt-dlp did not start copying within 10 s")
+}
+
+// Runs returns the argument list of each run so far, space-joined.
+func (c *Copier) Runs(t *testing.T) []string {
+	t.Helper()
+	return c.lines(t, "args")
+}
+
+// RequireNoCopy fails the test unless yt-dlp ran and nothing of the runs is
+// left in the temporary directory: no copy, and no directory made for one.
+// What was there before must still be there.
+func (c *Copier) RequireNoCopy(t *testing.T) {
+	t.Helper()
+	if len(c.Runs(t)) == 0 {
+		t.Fatal("yt-dlp was not run")
+	}
+	entries, err := os.ReadDir(c.temp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if !slices.Equal(names, unrelated) {
+		t.Errorf("the temporary directory holds %q after the run, want only what was there before, %q", names, unrelated)
+	}
+	for _, keep := range []string{"unrelated.txt", "yt_dlp-not-ours/keep", likeOurs + "/keep"} {
+		if _, err := os.Stat(filepath.Join(c.temp, keep)); err != nil {
+			t.Errorf("a file that was not the run's is gone: %v", err)
+		}
+	}
+}
+
+// Interrupted reports whether a run was interrupted, and so removed its copy
+// itself.
+func (c *Copier) Interrupted(t *testing.T) bool {
+	t.Helper()
+	_, err := os.Stat(filepath.Join(c.state, "interrupted"))
+	return err == nil
+}
+
+// CopiesLeft returns what the runs so far left in the temporary directory.
+func (c *Copier) CopiesLeft(t *testing.T) []string {
+	t.Helper()
+	entries, err := os.ReadDir(c.temp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var left []string
+	for _, e := range entries {
+		if !slices.Contains(unrelated, e.Name()) {
+			left = append(left, e.Name())
+		}
+	}
+	return left
+}
+
+// RequireOwnTemp fails the test unless every run was given a temporary
+// directory of its own, inside the test's and not the test's itself.
+func (c *Copier) RequireOwnTemp(t *testing.T) {
+	t.Helper()
+	dirs := c.lines(t, "tmpdir")
+	if len(dirs) == 0 {
+		t.Fatal("yt-dlp was not run")
+	}
+	for _, dir := range dirs {
+		if filepath.Dir(dir) != c.temp || slices.Contains(unrelated, filepath.Base(dir)) {
+			t.Errorf("yt-dlp ran with TMPDIR %q, want a directory of its own inside %q", dir, c.temp)
+		}
+	}
+}
+
+func (c *Copier) lines(t *testing.T, name string) []string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(c.state, name))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	logged := strings.TrimSuffix(string(b), "\n")
+	if logged == "" {
+		return nil
+	}
+	return strings.Split(logged, "\n")
+}

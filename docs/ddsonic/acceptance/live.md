@@ -14,6 +14,7 @@ Nothing here has been executed as part of building the acceptance system. A case
 - **These cases run on the real network,** outside the isolation the scripted cases run in. That is the point of them.
 - **Every case here applies to rc.4.** None can be recorded `not applicable`: the catalog grants that, and grants it to none of them.
 - **A check that cannot be run is `blocked`,** with the reason in `environment_limitation`: an outage, a sign-in that fails for reasons outside ddsonic, a rate limit. Blocked is not a pass. For rc.4 a blocked Spotify or YouTube Music case still has to be triaged like any other case that did not pass.
+- **After a session that used YouTube Music,** check that nothing was left in the temporary folder: no `yt_dlp*` and no `ddsonic-yt-dlp-*` entry that the session made. Look at names only. A `yt_dlp*` folder is a copy of the browser's cookies; one that the candidate left behind is a `fail`, and is reported, not opened.
 - **Keep secrets out of what you record.** No tokens, cookies or account identifiers in `detail`. The evidence bundle is redacted before it is sealed, but do not rely on that for something you typed yourself.
 
 Results are recorded as in [human.md](human.md#recording-what-you-find).

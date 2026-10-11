@@ -44,6 +44,18 @@ ddsonic runs yt-dlp with `--ignore-config` and `--no-mark-watched`, every time: 
 - A proxy set in the environment (`HTTPS_PROXY`, `ALL_PROXY`) still applies. A `--proxy` in a configuration file does not.
 - Other options you may have set there, such as `--extractor-args` or a format, do not reach ddsonic's yt-dlp. ddsonic has no setting that passes extra yt-dlp options.
 
+### The temporary copy of your browser's cookies
+
+To use `cookies_from`, yt-dlp copies the browser's cookie database into a temporary folder, reads the copy, and removes it. That is yt-dlp's own way of reading a database the browser may have open, and it takes a moment at the start of each run.
+
+- ddsonic gives each yt-dlp run a temporary folder of its own (`ddsonic-yt-dlp-…` in your temporary folder, readable by you alone) and removes it when the run is over, however it ended. The copy never sits in the shared `/tmp` itself.
+- When ddsonic has to stop yt-dlp (Stop, leaving a list that is still loading, quitting during a sync, a timeout), it interrupts it first, as Ctrl+C would, so that yt-dlp removes its copy itself. Only a yt-dlp still running three seconds later is killed. Playback stops yt-dlp at once, as before; its folder is removed all the same.
+- ddsonic removes only the folders it made. It does not search the temporary folder or delete anything by its name.
+- Quitting stops every yt-dlp that is still running, the same way: interrupted, killed after three seconds if it has not stopped, its folder removed. So quitting can take a few seconds while that happens, and **a track that was still being saved when you quit is not saved**. Save it again after starting ddsonic. Whether anything of the first attempt is reused is yt-dlp's and the source's affair: there may be no file yet (yt-dlp may have been stopped before the download began), a partial file may stay in your downloads folder, and yt-dlp starts over when the server cannot resume.
+- If ddsonic cannot make that folder (the temporary folder is full or not writable), it does not run yt-dlp at all and says why. If it cannot remove the folder afterwards, it says so and names it, in the status line and the log, and the sync, list or save that used it is reported as failed: the folder may hold the copy. A folder that is still there when you quit is named again in the terminal after ddsonic exits.
+- What this cannot cover: ddsonic itself being killed (`kill -9`, a crash, power loss) while yt-dlp runs. Nothing of ddsonic's runs then, and a yt-dlp that was reading the cookies at that moment may leave its copy in its `ddsonic-yt-dlp-…` folder.
+- Versions before 1.0 could leave `yt_dlp…` folders holding `temporary.sqlite` in your temporary folder, and so can yt-dlp run by hand and stopped at the wrong moment. ddsonic does not remove them. They are copies of your browser's cookies: delete them.
+
 ### Your own Google OAuth client
 
 The official YouTube Data API, through a free Google Cloud OAuth client you create once (about 10 minutes):
