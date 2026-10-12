@@ -110,13 +110,22 @@ func (m *Model) libCanSignIn(f *libFrame) bool {
 }
 
 // libSigningInLines is the sign-in in flight as the screen shows it, with
-// the address to open by hand once the browser flow has one. It is the same
-// wherever the sign-in was started: the library, the provider's own search,
-// or its playlist picker.
+// the address to open by hand once the browser flow has one, whole. It is
+// the same wherever the sign-in was started: the library, the provider's own
+// search, or its playlist picker.
 func (m Model) libSigningInLines() []string {
 	lines := []string{loadingLine(libSigningIn)}
-	if m.lib.authURL != "" {
-		lines = append(lines, dimStyle.Render("  If no browser opened, visit:"), dimStyle.Render("  "+truncate(m.lib.authURL, ui.PanelWidth-4)))
+	if m.lib.authURL == "" {
+		return lines
+	}
+	lines = append(lines, dimStyle.Render("  If no browser opened, visit:"))
+	// The whole address, over as many rows as it takes: cut at the panel's
+	// edge it loses the parameters the sign-in cannot do without.
+	width := max(ui.PanelWidth-4, 20)
+	for rest := []rune(m.lib.authURL); len(rest) > 0; {
+		n := min(width, len(rest))
+		lines = append(lines, dimStyle.Render("  "+string(rest[:n])))
+		rest = rest[n:]
 	}
 	return lines
 }

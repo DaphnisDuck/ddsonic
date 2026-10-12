@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/bjarneo/cliamp/catalog"
 	"github.com/bjarneo/cliamp/catalog/sqlite"
+	"github.com/bjarneo/cliamp/external/spotify"
 	"github.com/bjarneo/cliamp/library"
 	"github.com/bjarneo/cliamp/playlist"
 )
@@ -565,6 +568,117 @@ func TestSearchOverlaySignInShowsURL(t *testing.T) {
 
 	m = runAll(t, m, cmd)
 	wantView(t, "the search after signing in", m, []string{"Found"}, signingIn, "accounts.example")
+}
+
+// longAuthURL is an authorize address of realistic length: about 580 bytes,
+// with the parameters the sign-in cannot do without at its end.
+func longAuthURL() string {
+	u := "https://accounts.spotify.com/authorize?access_type=offline&client_id=0123456789abcdef0123456789abcdef" +
+		"&code_challenge=" + strings.Repeat("Ab3_", 11) + "&code_challenge_method=S256" +
+		"&redirect_uri=http%3A%2F%2F127.0.0.1%3A19872%2Flogin&response_type=code&scope=" +
+		strings.Repeat("playlist-read-private+", 12) + "user-library-read" +
+		"&state=" + strings.Repeat("9z", 16)
+	return u
+}
+
+// screenText is the screen as one string with the frame, the indentation and
+// the line breaks taken out, so that text wrapped over several rows reads as
+// it would once copied.
+func screenText(m Model) string {
+	var b strings.Builder
+	for _, line := range strings.Split(viewText(m), "\n") {
+		b.WriteString(strings.Trim(line, " │┃|"))
+	}
+	return b.String()
+}
+
+// The address to open by hand is shown whole, at an ordinary width: an
+// address cut at the edge of the panel loses the parameters the sign-in
+// needs. In the library, in Spotify's search and in its playlist picker.
+func TestSignInAddressIsShownWhole(t *testing.T) {
+	url := longAuthURL()
+	if len(url) < 560 {
+		t.Fatalf("the test address is %d bytes, want about 580", len(url))
+	}
+	check := func(t *testing.T, where string, m Model) {
+		t.Helper()
+		m = sendAll(t, m, ProvAuthURLMsg{ProviderName: "Spotify", URL: url})
+		if !strings.Contains(screenText(m), url) {
+			t.Errorf("%s: the address is not shown whole:\n%s", where, viewText(m))
+		}
+	}
+	t.Run("library", func(t *testing.T) {
+		l := newSignInLib(t)
+		m := pressAll(t, syncEnds(t, l.model(), errSignInNeeded), "enter")
+		updated, _ := m.Update(libKey("enter"))
+		check(t, "Spotify's menu", updated.(Model))
+	})
+	t.Run("search", func(t *testing.T) {
+		l := newSignInLib(t)
+		m := l.model()
+		m = runAll(t, m, m.openProviderSearchQuery(l.prov, "kind of blue"))
+		updated, _ := m.Update(libKey("enter"))
+		check(t, "the search", updated.(Model))
+	})
+	t.Run("picker", func(t *testing.T) {
+		l := newSignInLib(t)
+		l.prov.authed = true
+		m := l.model()
+		m = runAll(t, m, m.openProviderSearchQuery(l.prov, "kind of blue"))
+		m = pressAll(t, m, "p")
+		l.prov.authed = false
+		m = pressAll(t, m, "enter") // the add, refused
+		if m.spotSearch.screen != spotSearchPlaylist || m.spotSearch.err != libSignInPrompt {
+			t.Fatalf("not at the picker's sign-in prompt: screen %v, %q", m.spotSearch.screen, m.spotSearch.err)
+		}
+		updated, _ := m.Update(libKey("enter"))
+		check(t, "the picker", updated.(Model))
+	})
+}
+
+// A test that registers the real Spotify provider and has no stand-in for
+// Spotify must fail to sign in, at once: no browser, no callback port.
+func TestSignInFailsClosedWithoutAStandIn(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "opened")
+	if err := os.WriteFile(filepath.Join(dir, "xdg-open"), []byte("#!/bin/sh\necho \"$@\" > "+marker+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CLIAMP_CONFIG_DIR", t.TempDir())
+	real := spotify.New(nil, "0123456789abcdef0123456789abcdef", 320)
+	t.Cleanup(real.Close)
+
+	l := newSignInLib(t)
+	m := l.model()
+	m.SetLibrarySignIn(catalog.Spotify, real)
+	m = pressAll(t, syncEnds(t, m, errSignInNeeded), "enter")
+	updated, cmd := m.Update(libKey("enter"))
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("Enter on the sign-in row did nothing")
+	}
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	select {
+	case msg := <-done:
+		m = sendAll(t, m, msg)
+	case <-time.After(3 * time.Second):
+		real.Close()
+		t.Error("the sign-in started for real and waited for a browser")
+	}
+	if conn, err := net.DialTimeout("tcp", "127.0.0.1:19872", 200*time.Millisecond); err == nil {
+		conn.Close()
+		t.Error("the sign-in callback port was opened")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("a browser was started")
+	}
+	wantView(t, "after the refused sign-in", m, []string{signInRow, "sign-in failed"}, signingIn)
+	if len(l.refreshes) != 0 {
+		t.Error("a sync was requested after a sign-in that did not happen")
+	}
 }
 
 func spotifyTrackPlaying(t *testing.T, m Model) (Model, playlist.Track) {

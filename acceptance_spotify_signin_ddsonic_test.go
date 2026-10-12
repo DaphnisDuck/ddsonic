@@ -13,6 +13,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,6 +28,7 @@ import (
 	"github.com/bjarneo/cliamp/catalogsync"
 	"github.com/bjarneo/cliamp/catalogsync/spotifysrc"
 	"github.com/bjarneo/cliamp/config"
+	"github.com/bjarneo/cliamp/external/spotify"
 	"github.com/bjarneo/cliamp/library"
 	"github.com/bjarneo/cliamp/player"
 	"github.com/bjarneo/cliamp/playlist"
@@ -316,5 +319,45 @@ func TestAcceptanceSpotifyFirstRunSignIn(t *testing.T) {
 	}
 	if got := account.callCount(); got != readsBefore {
 		t.Errorf("the restart read the account %d times, want none: the lists come from the catalog", got-readsBefore)
+	}
+}
+
+// The app's own wiring with the real Spotify provider and no stand-in for
+// Spotify: the sign-in fails at once. No browser is started and no callback
+// port is opened, in this package's tests as in every other's.
+func TestSignInFailsClosedInTheApp(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLIAMP_CONFIG_DIR", t.TempDir())
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "opened")
+	if err := os.WriteFile(filepath.Join(dir, "xdg-open"), []byte("#!/bin/sh\necho \"$@\" > "+marker+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	account := &spotifyAccount{unavailable: fmt.Errorf("spotify: %w", playlist.ErrNeedsAuth)}
+	stand := &signInSpotify{fakePlayer: fakePlayer{"Spotify"}, account: account}
+	home := startSignInHome(t, filepath.Join(t.TempDir(), "library.db"), account, stand)
+	t.Cleanup(home.rt.close)
+	real := spotify.New(nil, "0123456789abcdef0123456789abcdef", 320)
+	t.Cleanup(real.Close)
+	librarySignIn(&home.m, real) // as main registers it
+	if err := home.syncEnds(); err == nil {
+		t.Fatal("the first sync succeeded without a sign-in")
+	}
+
+	home.open("Spotify")
+	home.open("Sign in to Spotify")
+	home.want("after the refused sign-in", []string{"Sign in to Spotify", "sign-in failed"}, "Signing in")
+	if conn, err := net.DialTimeout("tcp", "127.0.0.1:19872", 200*time.Millisecond); err == nil {
+		conn.Close()
+		t.Error("the sign-in callback port was opened")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("a browser was started")
+	}
+	if stand.signIns != 0 {
+		t.Error("the stand-in was signed in to instead of the registered provider")
 	}
 }
