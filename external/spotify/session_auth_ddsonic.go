@@ -40,6 +40,7 @@ import (
 	"github.com/bjarneo/cliamp/applog"
 	"github.com/bjarneo/cliamp/internal/appmeta"
 	"github.com/bjarneo/cliamp/playlist"
+	"github.com/bjarneo/cliamp/provider"
 )
 
 var (
@@ -53,11 +54,18 @@ var (
 	// errSignInChanged ends a write whose sign-in was replaced while it was
 	// pending, by the user signing in again or by a reconnect: it was not
 	// asked for under the new one, and is not sent or retried.
-	errSignInChanged = errors.New("spotify: the Spotify session changed, so the request was not sent; try again")
+	errSignInChanged error = notSent("spotify: the Spotify session changed, so the request was not sent; try again")
 	// errSessionClosed and errProviderClosed end work that outlived its owner.
 	errSessionClosed  = fmt.Errorf("spotify: session closed: %w", context.Canceled)
 	errProviderClosed = fmt.Errorf("spotify: closed: %w", context.Canceled)
 )
+
+// notSent is an error for a write that was not sent: it is
+// provider.ErrNotApplied to whoever reports what became of the write.
+type notSent string
+
+func (e notSent) Error() string        { return string(e) }
+func (e notSent) Is(target error) bool { return target == provider.ErrNotApplied }
 
 // signInTimeout bounds one interactive sign-in.
 const signInTimeout = 5 * time.Minute
@@ -233,6 +241,19 @@ func (s *Session) refuseSignIn(gen uint64) bool {
 	return true
 }
 
+// refuseToken is refuseSignIn for an answer about one token of the sign-in:
+// it applies only while that token is still the session's. A refusal of a
+// token that has since been renewed, in the same sign-in, changes nothing.
+func (s *Session) refuseToken(stamp tokenStamp) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if stamp.gen != s.gen || stamp.rev != s.tokenRev {
+		return false
+	}
+	s.refused, s.refusedGen = true, stamp.gen
+	return true
+}
+
 // needsSignIn reports whether the session cannot call the Web API until the
 // user signs in again: Spotify refused its sign-in, or it has no token.
 func (s *Session) needsSignIn() bool {
@@ -276,35 +297,51 @@ func (s *Session) accessToken(write bool, pin *signInPin) (string, tokenStamp, e
 			return tok.AccessToken, stamp, nil
 		case !isInvalidGrant(err):
 			return "", stamp, fmt.Errorf("refresh access token: %w", err)
-		case s.refuseSignIn(stamp.gen):
+		case s.refuseToken(stamp):
 			return "", stamp, errSignInRefused
-		case write:
+		case write && changed:
 			return "", stamp, errSignInChanged
-		case attempt > 0:
+		case attempt >= 2:
 			return "", stamp, errors.New("spotify: the Spotify session changed during the request; try again")
 		}
+		// The refusal was of a token that is no longer the session's: the
+		// token was renewed, or (for a read) the sign-in replaced. Nothing
+		// has been sent; the token that stands is asked.
 	}
 }
 
-// signInPin is the sign-in an action on the account belongs to: the session
-// its first write was made on, and the sign-in that session was on then. An
-// action that began before the provider had a session is bound by its first
-// write, to the session that write is made on, and to no other after that.
+// signInPin is the sign-in an action on the account belongs to: the one that
+// stood when the action began. It holds the provider's count of accepted
+// sign-ins at that moment (authEpoch), and the session and its sign-in: the
+// ones the provider had then, or, for an action that began before the stored
+// session was set up, the ones its first write is made on. The silent setup
+// of the stored session is no sign-in and leaves the action as it was.
 type signInPin struct {
+	p     *SpotifyProvider
+	epoch uint64
+
 	mu    sync.Mutex
 	bound bool
 	sess  *Session
 	gen   uint64
 }
 
-// holds reports whether sess is the action's session, still on the action's
-// sign-in. The first call binds an unbound pin to sess as it is now.
+// holds reports whether the action may write on sess now: no sign-in has
+// been accepted since the action began, and sess is the action's session,
+// still on the action's sign-in. An action that began without a session is
+// bound to sess by the first call.
 func (pin *signInPin) holds(sess *Session) bool {
 	return pin.holdsGen(sess, sess.generation())
 }
 
-// holdsGen is holds for a caller that has read sess's sign-in already.
+// holdsGen is holds for a caller that has read sess's sign-in already. The
+// provider's count is read after it: a sign-in sets the session's sign-in
+// and the count in one step, so a caller that saw the new sign-in sees the
+// new count.
 func (pin *signInPin) holdsGen(sess *Session, gen uint64) bool {
+	if pin.p.authEpoch.Load() != pin.epoch {
+		return false
+	}
 	pin.mu.Lock()
 	defer pin.mu.Unlock()
 	if !pin.bound {
@@ -315,30 +352,38 @@ func (pin *signInPin) holdsGen(sess *Session, gen uint64) bool {
 
 type signInPinKey struct{}
 
-// WithSignIn marks ctx as one user action on the account: every write made
-// with it belongs to one sign-in, the one its first write is made under. An
-// action that takes more than one request (a new playlist and the track
-// added to it, or many tracks added at once) passes the same context to
-// each, so that none of them is sent under a sign-in that replaced it
-// part-way. What was written before that stays written; nothing is undone.
-//
-// The action has its identity from here, whether or not the provider has a
-// session yet: one that starts before the stored session is set up is bound
-// by its first write, not anew by each.
+// WithSignIn marks ctx as one user action on the account, begun now: every
+// write made with it belongs to the sign-in that stands now. An action that
+// takes more than one request (a new playlist and the track added to it, or
+// many tracks added at once) passes the same context to each. None of them
+// is sent once a sign-in has been accepted since: not the first, and not the
+// rest. Signing in again is not asking for the action again. What the action
+// had written stays written; nothing is undone or resumed.
 func (p *SpotifyProvider) WithSignIn(ctx context.Context) context.Context {
 	if _, ok := ctx.Value(signInPinKey{}).(*signInPin); ok {
 		return ctx // already one action
 	}
-	return context.WithValue(ctx, signInPinKey{}, &signInPin{})
+	return context.WithValue(ctx, signInPinKey{}, p.newSignInPin())
+}
+
+// newSignInPin is the pin of an action that begins now.
+func (p *SpotifyProvider) newSignInPin() *signInPin {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pin := &signInPin{p: p, epoch: p.authEpoch.Load()}
+	if sess := p.session; sess != nil {
+		pin.bound, pin.sess, pin.gen = true, sess, sess.generation()
+	}
+	return pin
 }
 
 // signInPinFrom is the pin of the action a write belongs to (WithSignIn), or
-// one for the single request it is.
-func signInPinFrom(ctx context.Context) *signInPin {
+// one for the single request it is, begun now.
+func (p *SpotifyProvider) signInPinFrom(ctx context.Context) *signInPin {
 	if pin, ok := ctx.Value(signInPinKey{}).(*signInPin); ok {
 		return pin
 	}
-	return &signInPin{}
+	return p.newSignInPin()
 }
 
 // isWrite reports whether a Web API method changes the account.
@@ -375,7 +420,7 @@ func (s *Session) renewToken(ctx context.Context, stamp tokenStamp) error {
 		// Held against the sign-in it was fetched for. When that one has
 		// been replaced meanwhile, the refusal is not the session's: there
 		// is nothing to report, and the caller goes on with the new one.
-		if s.refuseSignIn(stamp.gen) {
+		if s.refuseToken(stamp) {
 			return errSignInRefused
 		}
 		return nil
@@ -431,7 +476,7 @@ func (s *Session) renewalCreds(cred *credential) (storedCreds, error) {
 // it set out to renew): the session is renewed already, and the rebuild came
 // from the older credential. An unpublished session is closed once and its
 // credential is not written.
-func (s *Session) publish(fresh *Session, from uint64, silent bool) (bool, error) {
+func (s *Session) publish(fresh *Session, from uint64, silent bool, published func()) (bool, error) {
 	s.mu.Lock()
 	switch {
 	case s.closed:
@@ -455,6 +500,9 @@ func (s *Session) publish(fresh *Session, from uint64, silent bool) (bool, error
 	// What fresh held is s's now: its Close must not tear it down.
 	fresh.sess, fresh.player, fresh.cred, fresh.closed = nil, nil, nil, true
 	fresh.mu.Unlock()
+	if published != nil {
+		published() // with the swap, as one step for whoever reads both
+	}
 	s.cred.commit()
 	closeLibrespot(oldPlayer, oldSess)
 	s.mu.Unlock()
@@ -506,7 +554,8 @@ func (p *SpotifyProvider) signIn() error {
 
 	var fresh *Session
 	if sess != nil {
-		call.err = sess.ReconnectInteractive(ctx)
+		// The provider's count of sign-ins moves with the swap itself.
+		call.err = sess.reconnect(ctx, buildInteractiveSession, false, func() { p.authEpoch.Add(1) })
 	} else {
 		fresh, call.err = newSessionInteractive(ctx, clientID)
 	}
@@ -526,6 +575,7 @@ func (p *SpotifyProvider) signIn() error {
 		// that does not undo it, and does not make it a failure.
 		if fresh != nil {
 			p.session = fresh
+			p.authEpoch.Add(1)
 			fresh.accept()
 			fresh = nil
 		}
@@ -552,8 +602,11 @@ func (s *Session) unauthorized(ctx context.Context, method string, stamp tokenSt
 	if renewed {
 		// The renewed token was refused too: the sign-in is, unless it has
 		// been replaced meanwhile, when this answer is about the old one.
-		if s.refuseSignIn(stamp.gen) {
+		if s.refuseToken(stamp) {
 			return false, errSignInRefused
+		}
+		if s.generation() == stamp.gen {
+			return !isWrite(method), notSentUnlessRead(method) // renewed again meanwhile, in the same sign-in
 		}
 		return s.afterSignInChanged(method)
 	}
@@ -578,12 +631,21 @@ func (s *Session) unauthorized(ctx context.Context, method string, stamp tokenSt
 	case probe.gen != stamp.gen:
 		return false, errSignInChanged
 	case resp.StatusCode == http.StatusUnauthorized:
-		if s.refuseSignIn(probe.gen) {
+		if s.refuseToken(probe) {
 			return false, errSignInRefused
 		}
 		return false, errSignInChanged
 	}
-	return false, errors.New("spotify: the request was not authorised and has not been sent again; the sign-in has been renewed, so try once more")
+	return false, notSent("spotify: the request was not authorised, so it was not carried out, and has not been sent again; the sign-in has been renewed, so try once more")
+}
+
+// notSentUnlessRead is the error of a write that got a 401 and is not sent
+// again, and nil for a read, which is.
+func notSentUnlessRead(method string) error {
+	if !isWrite(method) {
+		return nil
+	}
+	return notSent("spotify: the request was not authorised, so it was not carried out, and has not been sent again; try once more")
 }
 
 // afterSignInChanged is what a call does when the answer it got was about a

@@ -711,14 +711,14 @@ func (s *Session) Close() {
 // Reconnect rebuilds the session from stored credentials (no browser).
 // Returns an error if stored credentials are missing or the refresh fails.
 func (s *Session) Reconnect(ctx context.Context) error {
-	return s.reconnect(ctx, NewSessionSilent, true) // ddsonic: gives way to a newer sign-in
+	return s.reconnect(ctx, NewSessionSilent, true, nil) // ddsonic: gives way to a newer sign-in
 }
 
 // ReconnectInteractive forces a fresh browser-based OAuth2 flow.
 // Stored credentials are preserved until the new session succeeds —
 // newInteractiveSession overwrites them via saveCreds on success.
 func (s *Session) ReconnectInteractive(ctx context.Context) error {
-	return s.reconnect(ctx, buildInteractiveSession, false) // ddsonic: a variable, for tests
+	return s.reconnect(ctx, buildInteractiveSession, false, nil) // ddsonic: a variable, for tests
 }
 
 // reconnect replaces the live session using the provided builder function.
@@ -734,7 +734,7 @@ func (s *Session) ReconnectInteractive(ctx context.Context) error {
 // from the user. Publication is conditional (publish, session_auth_ddsonic.go):
 // a closed session takes nothing, and a silent rebuild gives way to a sign-in
 // that finished while it ran. Upstream swapped unconditionally.
-func (s *Session) reconnect(ctx context.Context, build func(context.Context, string) (*Session, error), silent bool) error {
+func (s *Session) reconnect(ctx context.Context, build func(context.Context, string) (*Session, error), silent bool, published func()) error {
 	s.mu.RLock()
 	clientID, from, closed := s.clientID, s.gen, s.closed
 	s.mu.RUnlock()
@@ -746,8 +746,8 @@ func (s *Session) reconnect(ctx context.Context, build func(context.Context, str
 	if err != nil {
 		return fmt.Errorf("spotify: reconnect: %w", err)
 	}
-	published, err := s.publish(newSess, from, silent)
-	if !published {
+	done, err := s.publish(newSess, from, silent, published)
+	if !done {
 		return err
 	}
 

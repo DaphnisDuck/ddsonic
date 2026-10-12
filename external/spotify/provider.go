@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	librespot "github.com/devgianlu/go-librespot"
@@ -74,6 +75,9 @@ type SpotifyProvider struct {
 	authCancel context.CancelFunc // cancels any in-progress OAuth flow
 	signingIn  *signInCall        // ddsonic: the sign-in in flight, shared by its callers
 	closed     bool               // ddsonic: Close ran
+	// ddsonic: how many sign-ins the user has completed here; an action on
+	// the account belongs to the one that stood when it began.
+	authEpoch atomic.Uint64
 	// ddsonic: Spotify refused the stored sign-in at setup. It is not asked
 	// again until the user has signed in (session_auth_ddsonic.go).
 	storedRefused bool
@@ -821,7 +825,7 @@ func (p *SpotifyProvider) webAPIWithBody(ctx context.Context, method, path strin
 		// (WithSignIn). Under another sign-in it is not sent.
 		if isWrite(method) {
 			if pin == nil {
-				pin = signInPinFrom(ctx)
+				pin = p.signInPinFrom(ctx)
 			}
 			if !pin.holds(sess) {
 				return nil, errSignInChanged
