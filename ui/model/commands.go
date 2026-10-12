@@ -622,6 +622,13 @@ func addToSpotPlaylistCmd(ctx context.Context, w provider.PlaylistWriter, playli
 
 func createSpotPlaylistCmd(ctx context.Context, c provider.PlaylistCreator, w provider.PlaylistWriter, providerName, name string, track playlist.Track, gen uint64) tea.Cmd {
 	return func() tea.Msg {
+		// ddsonic: creating and adding are one action; neither request is
+		// sent under a sign-in that replaced the one it was asked on.
+		if pinner, ok := c.(interface {
+			WithSignIn(context.Context) context.Context
+		}); ok {
+			ctx = pinner.WithSignIn(ctx)
+		}
 		id, err := c.CreatePlaylist(ctx, name)
 		if err != nil {
 			return spotCreatedMsg{name: name, err: err, providerName: providerName, gen: gen}

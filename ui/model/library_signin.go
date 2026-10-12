@@ -16,6 +16,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/bjarneo/cliamp/library"
 	"github.com/bjarneo/cliamp/playlist"
@@ -109,25 +110,34 @@ func (m *Model) libCanSignIn(f *libFrame) bool {
 	return ok
 }
 
-// libSigningInLines is the sign-in in flight as the screen shows it, with
-// the address to open by hand once the browser flow has one, whole. It is
-// the same wherever the sign-in was started: the library, the provider's own
-// search, or its playlist picker.
-func (m Model) libSigningInLines() []string {
-	lines := []string{loadingLine(libSigningIn)}
+// libSigningInLines is the sign-in in flight as the screen shows it, in at
+// most budget rows, with the address to open by hand once the browser flow
+// has one. It is the same wherever the sign-in was started: the library, the
+// provider's own search, or its playlist picker.
+//
+// The address is the part that cannot be done without, so it is offered in a
+// form that needs no repair. Its rows are a terminal hyperlink (OSC 8) whose
+// target is the whole address: opening or copying the link gives the address
+// intact, however many rows it takes. The rows hold nothing but the address,
+// with no indentation, and come first in the claim on space: the two lines
+// above them give way before any row of the address does.
+func (m Model) libSigningInLines(budget int) []string {
+	head := []string{loadingLine(libSigningIn)}
 	if m.lib.authURL == "" {
-		return lines
+		return head
 	}
-	lines = append(lines, dimStyle.Render("  If no browser opened, visit:"))
-	// The whole address, over as many rows as it takes: cut at the panel's
-	// edge it loses the parameters the sign-in cannot do without.
-	width := max(ui.PanelWidth-4, 20)
+	head = append(head, dimStyle.Render("  If no browser opened, open this address (the rows below are one link):"))
+	var address []string
+	width := max(ui.PanelWidth, 20)
 	for rest := []rune(m.lib.authURL); len(rest) > 0; {
 		n := min(width, len(rest))
-		lines = append(lines, dimStyle.Render("  "+string(rest[:n])))
+		address = append(address, ansi.SetHyperlink(m.lib.authURL)+dimStyle.Render(string(rest[:n]))+ansi.ResetHyperlink())
 		rest = rest[n:]
 	}
-	return lines
+	for len(head) > 0 && len(head)+len(address) > budget {
+		head = head[1:]
+	}
+	return append(head, address...)
 }
 
 // libPending reports whether f is a list with nothing cached of a source

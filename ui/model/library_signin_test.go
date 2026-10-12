@@ -300,7 +300,7 @@ func TestSignInRowSignsIn(t *testing.T) {
 	}
 	wantView(t, "while signing in", m, []string{signingIn}, signInRow)
 	m = sendAll(t, m, ProvAuthURLMsg{ProviderName: "Spotify", URL: "https://accounts.example/authorize"})
-	wantView(t, "with the URL", m, []string{"If no browser opened, visit:", "https://accounts.example/authorize"})
+	wantView(t, "with the URL", m, []string{"If no browser opened, open this address", "https://accounts.example/authorize"})
 
 	m = runAll(t, m, cmd)
 	if l.prov.auths != 1 || len(l.refreshes) != 1 {
@@ -564,7 +564,7 @@ func TestSearchOverlaySignInShowsURL(t *testing.T) {
 		t.Fatal("Enter on the prompt did not start the sign-in")
 	}
 	m = sendAll(t, m, ProvAuthURLMsg{ProviderName: "Spotify", URL: "https://accounts.example/authorize"})
-	wantView(t, "the search while signing in", m, []string{signingIn, "If no browser opened, visit:", "https://accounts.example/authorize"})
+	wantView(t, "the search while signing in", m, []string{signingIn, "If no browser opened, open this address", "https://accounts.example/authorize"})
 
 	m = runAll(t, m, cmd)
 	wantView(t, "the search after signing in", m, []string{"Found"}, signingIn, "accounts.example")
@@ -581,21 +581,45 @@ func longAuthURL() string {
 	return u
 }
 
-// screenText is the screen as one string with the frame, the indentation and
-// the line breaks taken out, so that text wrapped over several rows reads as
-// it would once copied.
-func screenText(m Model) string {
-	var b strings.Builder
-	for _, line := range strings.Split(viewText(m), "\n") {
-		b.WriteString(strings.Trim(line, " │┃|"))
+// linked is what the screen offers as links: for each link target, the text
+// of the cells that carry it, in order. It is read from the screen as
+// rendered, by the terminal's own hyperlink sequences, so the frame, the
+// padding and the row breaks around the linked cells are not part of it and
+// nothing is taken out by the test.
+func linked(m Model) map[string]string {
+	const open = "\x1b]8;"
+	out := map[string]string{}
+	rest := m.View().Content
+	for {
+		i := strings.Index(rest, open)
+		if i < 0 {
+			return out
+		}
+		rest = rest[i+len(open):]
+		end := strings.IndexAny(rest, "\x07\x1b") // BEL, or ST's ESC
+		if end < 0 {
+			return out
+		}
+		params := rest[:end] // "<params>;<target>"
+		rest = strings.TrimPrefix(rest[end+1:], "\\")
+		target := params[strings.Index(params, ";")+1:]
+		if target == "" {
+			continue // a link's closing sequence
+		}
+		closing := strings.Index(rest, open)
+		if closing < 0 {
+			return out
+		}
+		out[target] += stripAnsi(rest[:closing])
 	}
-	return b.String()
 }
 
-// The address to open by hand is shown whole, at an ordinary width: an
-// address cut at the edge of the panel loses the parameters the sign-in
-// needs. In the library, in Spotify's search and in its playlist picker.
-func TestSignInAddressIsShownWhole(t *testing.T) {
+// The address to open by hand is offered whole and usable as it stands: the
+// rows that show it are a link whose target is the complete address, and the
+// linked cells, read in order, are the address and nothing else. No row of it
+// is cut at the supported sizes, down to 80x20, in the library, in Spotify's
+// search and in its playlist picker.
+func TestSignInAddressIsUsableWhole(t *testing.T) {
 	url := longAuthURL()
 	if len(url) < 560 {
 		t.Fatalf("the test address is %d bytes, want about 580", len(url))
@@ -603,37 +627,46 @@ func TestSignInAddressIsShownWhole(t *testing.T) {
 	check := func(t *testing.T, where string, m Model) {
 		t.Helper()
 		m = sendAll(t, m, ProvAuthURLMsg{ProviderName: "Spotify", URL: url})
-		if !strings.Contains(screenText(m), url) {
-			t.Errorf("%s: the address is not shown whole:\n%s", where, viewText(m))
+		links := linked(m)
+		text, ok := links[url]
+		if !ok || len(links) != 1 {
+			t.Fatalf("%s: the screen links to %d addresses, want the one complete address:\n%s", where, len(links), viewText(m))
+		}
+		if text != url {
+			t.Errorf("%s: the linked cells read\n %q\nwant the address, whole and with nothing added:\n %q", where, text, url)
 		}
 	}
-	t.Run("library", func(t *testing.T) {
-		l := newSignInLib(t)
-		m := pressAll(t, syncEnds(t, l.model(), errSignInNeeded), "enter")
-		updated, _ := m.Update(libKey("enter"))
-		check(t, "Spotify's menu", updated.(Model))
-	})
-	t.Run("search", func(t *testing.T) {
-		l := newSignInLib(t)
-		m := l.model()
-		m = runAll(t, m, m.openProviderSearchQuery(l.prov, "kind of blue"))
-		updated, _ := m.Update(libKey("enter"))
-		check(t, "the search", updated.(Model))
-	})
-	t.Run("picker", func(t *testing.T) {
-		l := newSignInLib(t)
-		l.prov.authed = true
-		m := l.model()
-		m = runAll(t, m, m.openProviderSearchQuery(l.prov, "kind of blue"))
-		m = pressAll(t, m, "p")
-		l.prov.authed = false
-		m = pressAll(t, m, "enter") // the add, refused
-		if m.spotSearch.screen != spotSearchPlaylist || m.spotSearch.err != libSignInPrompt {
-			t.Fatalf("not at the picker's sign-in prompt: screen %v, %q", m.spotSearch.screen, m.spotSearch.err)
-		}
-		updated, _ := m.Update(libKey("enter"))
-		check(t, "the picker", updated.(Model))
-	})
+	for _, size := range [][2]int{{100, 30}, {80, 24}, {80, 20}} {
+		name := fmt.Sprintf("%dx%d", size[0], size[1])
+		t.Run(name+" library", func(t *testing.T) {
+			l := newSignInLib(t)
+			m := sized(l.model(), size[0], size[1])
+			m = pressAll(t, syncEnds(t, m, errSignInNeeded), "enter")
+			updated, _ := m.Update(libKey("enter"))
+			check(t, "Spotify's menu", updated.(Model))
+		})
+		t.Run(name+" search", func(t *testing.T) {
+			l := newSignInLib(t)
+			m := sized(l.model(), size[0], size[1])
+			m = runAll(t, m, m.openProviderSearchQuery(l.prov, "kind of blue"))
+			updated, _ := m.Update(libKey("enter"))
+			check(t, "the search", updated.(Model))
+		})
+		t.Run(name+" picker", func(t *testing.T) {
+			l := newSignInLib(t)
+			l.prov.authed = true
+			m := sized(l.model(), size[0], size[1])
+			m = runAll(t, m, m.openProviderSearchQuery(l.prov, "kind of blue"))
+			m = pressAll(t, m, "p")
+			l.prov.authed = false
+			m = pressAll(t, m, "enter") // the add, refused
+			if m.spotSearch.screen != spotSearchPlaylist || m.spotSearch.err != libSignInPrompt {
+				t.Fatalf("not at the picker's sign-in prompt: screen %v, %q", m.spotSearch.screen, m.spotSearch.err)
+			}
+			updated, _ := m.Update(libKey("enter"))
+			check(t, "the picker", updated.(Model))
+		})
+	}
 }
 
 // A test that registers the real Spotify provider and has no stand-in for

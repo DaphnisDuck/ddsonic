@@ -248,7 +248,7 @@ func (m *Model) renderLibraryList(budget int) string {
 	f := m.libTop()
 	switch {
 	case m.libSigningInHere(f):
-		return bodyLines(m.libSigningInLines(), budget)
+		return bodyLines(m.libSigningInLines(budget), budget)
 	case f.loading() && len(f.entries) == 0:
 		return bodyLines([]string{loadingLine("Loading " + f.level.Title() + "…")}, budget)
 	case errors.Is(f.err, playlist.ErrNeedsAuth) && m.libCanSignIn(f):

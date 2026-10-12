@@ -620,7 +620,7 @@ func (m Model) renderSpotSearchBody() string {
 	// address to open by hand (library_signin.go).
 	errLines := []string{errorStyle.Render("  " + m.spotSearch.err)}
 	if m.spotSearch.err == libSigningIn {
-		errLines = m.libSigningInLines()
+		errLines = m.libSigningInLines(budget)
 	}
 	bodyBudget := budget
 	if showError {
@@ -655,6 +655,9 @@ func (m Model) renderSpotSearchBody() string {
 		}
 		list := windowList(items, m.spotSearch.cursor, m.spotSearch.scroll, max(0, bodyBudget-1))
 		body = strings.Join([]string{head, list}, "\n")
+		if bodyBudget < 2 { // ddsonic: one row, or none, is the track's line alone
+			body = head
+		}
 	case spotSearchNewName:
 		body = bodyMessage("Enter a name for the new playlist above.", bodyBudget)
 	default:
@@ -667,6 +670,9 @@ func (m Model) renderSpotSearchBody() string {
 		body = bodyLines(lines, bodyBudget)
 	}
 	if showError {
+		if bodyBudget == 0 {
+			body = "" // ddsonic: the sign-in's rows have every row; nothing else pushes one out
+		}
 		errLine := strings.Join(errLines, "\n")
 		if body == "" {
 			return errLine
