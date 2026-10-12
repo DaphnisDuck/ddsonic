@@ -107,10 +107,14 @@ type signInState struct {
 	// that is published starts the next. tokenRev counts the Web API token
 	// sources within one.
 	gen, tokenRev uint64
-	// refused is set when Spotify refused the sign-in refusedGen.
-	refused    bool
-	refusedGen uint64
-	closed     bool
+	// refused is set when Spotify refused the sign-in refusedGen: all of it
+	// (refusedWhole: playback's keys, a session it would not rebuild), or
+	// only the Web API token refusedRev, which a renewed token leaves behind.
+	refused      bool
+	refusedGen   uint64
+	refusedRev   uint64
+	refusedWhole bool
+	closed       bool
 	// cred is the credential that belongs to this sign-in.
 	cred *credential
 }
@@ -226,7 +230,9 @@ func (s *Session) signInRefused() bool {
 	return s.refusedLocked()
 }
 
-func (s *Session) refusedLocked() bool { return s.refused && s.refusedGen == s.gen }
+func (s *Session) refusedLocked() bool {
+	return s.refused && s.refusedGen == s.gen && (s.refusedWhole || s.refusedRev == s.tokenRev)
+}
 
 // refuseSignIn records that Spotify refused the sign-in gen. It reports
 // whether that is still the session's sign-in: a refusal of an earlier one
@@ -237,7 +243,7 @@ func (s *Session) refuseSignIn(gen uint64) bool {
 	if gen != s.gen {
 		return false
 	}
-	s.refused, s.refusedGen = true, gen
+	s.refused, s.refusedGen, s.refusedWhole = true, gen, true
 	return true
 }
 
@@ -250,7 +256,12 @@ func (s *Session) refuseToken(stamp tokenStamp) bool {
 	if stamp.gen != s.gen || stamp.rev != s.tokenRev {
 		return false
 	}
-	s.refused, s.refusedGen = true, stamp.gen
+	if s.refused && s.refusedGen == s.gen && s.refusedWhole {
+		return true // the whole sign-in is refused already; that stands
+	}
+	// Kept with the token it is about: a renewal that lands afterwards
+	// leaves this refusal behind with the old token.
+	s.refused, s.refusedGen, s.refusedRev, s.refusedWhole = true, stamp.gen, stamp.rev, false
 	return true
 }
 
@@ -611,7 +622,9 @@ func (s *Session) unauthorized(ctx context.Context, method string, stamp tokenSt
 		return s.afterSignInChanged(method)
 	}
 	if err := s.renewToken(ctx, stamp); err != nil {
-		return false, err
+		// A write that got the 401 was refused, whatever became of the
+		// renewal: it is not applied, and says so along with the cause.
+		return false, rejectedWrite(method, err)
 	}
 	if s.generation() != stamp.gen {
 		return s.afterSignInChanged(method)
@@ -621,10 +634,7 @@ func (s *Session) unauthorized(ctx context.Context, method string, stamp tokenSt
 	}
 	resp, probe, err := s.webAPIStamped(ctx, http.MethodGet, "/v1/me", nil, nil, "", nil)
 	if err != nil {
-		if errors.Is(err, playlist.ErrNeedsAuth) {
-			return false, err
-		}
-		return false, fmt.Errorf("spotify: the request was not authorised and has not been sent again: %w", err)
+		return false, rejectedWrite(method, err)
 	}
 	resp.Body.Close()
 	switch {
@@ -638,6 +648,27 @@ func (s *Session) unauthorized(ctx context.Context, method string, stamp tokenSt
 	}
 	return false, notSent("spotify: the request was not authorised, so it was not carried out, and has not been sent again; the sign-in has been renewed, so try once more")
 }
+
+// rejectedWrite is the error of a call whose 401 was followed by cause, a
+// failure to renew the token or to check the renewed one. For a write it
+// keeps what is known: Spotify refused the write, so it was not applied
+// (provider.ErrNotApplied), and it is not sent again; cause is kept beside
+// that, as what it is. A sign-in that cause says is required is reported as
+// that. For a read it is cause alone.
+func rejectedWrite(method string, cause error) error {
+	if !isWrite(method) || errors.Is(cause, playlist.ErrNeedsAuth) {
+		return cause
+	}
+	return &notAppliedError{cause: cause}
+}
+
+type notAppliedError struct{ cause error }
+
+func (e *notAppliedError) Error() string {
+	return "spotify: the request was not authorised, so it was not carried out, and has not been sent again: " + e.cause.Error()
+}
+func (e *notAppliedError) Unwrap() error        { return e.cause }
+func (e *notAppliedError) Is(target error) bool { return target == provider.ErrNotApplied }
 
 // notSentUnlessRead is the error of a write that got a 401 and is not sent
 // again, and nil for a read, which is.

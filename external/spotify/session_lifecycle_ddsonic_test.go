@@ -24,6 +24,7 @@ import (
 
 	"github.com/bjarneo/cliamp/catalog"
 	"github.com/bjarneo/cliamp/playlist"
+	"github.com/bjarneo/cliamp/provider"
 )
 
 // build stands in for Spotify under the real session builders.
@@ -1309,6 +1310,208 @@ func TestStaleRefreshDoesNotRefuseRenewedToken(t *testing.T) {
 		close(release)
 		if err := <-result; err != nil || sess.signInRefused() || n.Load() != 2 {
 			t.Errorf("the read = %v (refused %v) after %d requests; want it through on the renewed token, in 2", err, sess.signInRefused(), n.Load())
+		}
+	})
+}
+
+// A single write made through the provider's own CreatePlaylist or
+// AddTrackToPlaylist, with an ordinary context, is an action from the moment
+// it is called: before the stored session is set up, and before any other
+// wait. A sign-in the user completes while that setup runs ends it unsent.
+// (Adapted from the reviewer's round-6 probe.)
+func TestSingleWritesAreActionsFromTheCall(t *testing.T) {
+	for _, kind := range []string{"create", "add"} {
+		t.Run(kind+": a sign-in during the stored session's setup", func(t *testing.T) {
+			storeCreds(t)
+			stubBuild(t)
+			entered, release := make(chan struct{}), make(chan struct{})
+			var made atomic.Int32
+			original := newLibrespotSession
+			newLibrespotSession = func(ctx context.Context, opts *session.Options) (*session.Session, error) {
+				if _, stored := opts.Credentials.(session.StoredCredentials); stored && made.Add(1) == 1 {
+					close(entered)
+					<-release // the write's own setup, held
+				}
+				return original(ctx, opts)
+			}
+			// The sign-in's look at the stored credential is refused, so it
+			// goes to the browser; the held setup's refresh works.
+			h := fakeSpotifyHTTP(t, func(n int) (int, string) {
+				if n <= refusedRefresh {
+					return tokenRevoked(n)
+				}
+				return tokenOK(n)
+			}, apiOK)
+			p := New(nil, "client", 320)
+
+			done := make(chan error, 1)
+			go func() {
+				if kind == "create" {
+					_, err := p.CreatePlaylist(context.Background(), "New")
+					done <- err
+				} else {
+					done <- p.AddTrackToPlaylist(context.Background(), "pl", playlist.Track{Path: "spotify:track:one"})
+				}
+			}()
+			<-entered
+			if err := p.Authenticate(); err != nil {
+				t.Fatal(err)
+			}
+			close(release)
+			err := <-done
+			if !errors.Is(err, errSignInChanged) || h.apiCalls.Load() != 0 {
+				t.Fatalf("the %s = %v after %d requests, want errSignInChanged and none sent", kind, err, h.apiCalls.Load())
+			}
+		})
+		t.Run(kind+": the stored session's setup alone", func(t *testing.T) {
+			storeCreds(t)
+			stubBuild(t)
+			h := fakeSpotifyHTTP(t, tokenOK, apiOK)
+			p := New(nil, "client", 320)
+			var err error
+			if kind == "create" {
+				_, err = p.CreatePlaylist(context.Background(), "New")
+			} else {
+				err = p.AddTrackToPlaylist(context.Background(), "pl", playlist.Track{Path: "spotify:track:one"})
+			}
+			if err != nil || h.apiCalls.Load() != 1 {
+				t.Errorf("the %s = %v after %d requests, want it sent once: silent setup is no sign-in", kind, err, h.apiCalls.Load())
+			}
+		})
+	}
+}
+
+// A refusal of one token is about that token. When a renewal that was
+// already on its way then installs a new token, the refusal has nothing left
+// to refuse: the session is working. A refusal of the whole sign-in, such as
+// playback's, is not undone by a new token. (The first case is adapted from
+// the reviewer's round-6 probe, on the real staged token source.)
+func TestTokenRefusalDoesNotOutliveItsToken(t *testing.T) {
+	expiredSession := func(t *testing.T) *Session {
+		t.Helper()
+		s := &Session{clientID: "client"}
+		s.stageCreds(storedCreds{Username: "user", Data: []byte("blob"), DeviceID: "dev", RefreshToken: "old"})
+		s.accept()
+		s.tokenSource = s.stagedTokenSource(&oauth2.Token{AccessToken: "expired", RefreshToken: "old", Expiry: time.Now().Add(-time.Hour)})
+		return s
+	}
+	t.Run("the token's own refresh is refused, then the renewal lands", func(t *testing.T) {
+		storeCreds(t)
+		autoEntered, autoRelease := make(chan struct{}), make(chan struct{})
+		forcedEntered, forcedRelease := make(chan struct{}), make(chan struct{})
+		fakeSpotifyHTTP(t, func(n int) (int, string) {
+			switch n {
+			case 1: // the token source's own refresh
+				close(autoEntered)
+				<-autoRelease
+			case 2: // the forced renewal: accepted, its answer held
+				close(forcedEntered)
+				<-forcedRelease
+				return tokenOK(n)
+			}
+			return tokenRevoked(n)
+		}, apiOK)
+		s := expiredSession(t)
+		p := New(s, "client", 320)
+
+		auto := make(chan error, 1)
+		go func() {
+			resp, err := p.webAPI(context.Background(), "GET", "/v1/me", nil)
+			if resp != nil {
+				resp.Body.Close()
+			}
+			auto <- err
+		}()
+		<-autoEntered
+		forced := make(chan error, 1)
+		go func() { forced <- s.renewToken(context.Background(), tokenStamp{}) }()
+		<-forcedEntered
+
+		close(autoRelease)
+		if err := <-auto; !errors.Is(err, playlist.ErrNeedsAuth) {
+			t.Fatalf("the read on the old token = %v, want its refusal", err)
+		}
+		close(forcedRelease)
+		if err := <-forced; err != nil {
+			t.Fatal(err)
+		}
+		if s.signInRefused() {
+			t.Fatal("the session is still refused, for a token it no longer uses")
+		}
+		if resp, err := p.webAPI(context.Background(), "GET", "/v1/me", nil); err != nil {
+			t.Errorf("a read on the renewed token = %v", err)
+		} else {
+			resp.Body.Close()
+		}
+	})
+	t.Run("a refusal of the whole sign-in stays through a new token", func(t *testing.T) {
+		storeCreds(t)
+		forcedEntered, forcedRelease := make(chan struct{}), make(chan struct{})
+		fakeSpotifyHTTP(t, func(n int) (int, string) {
+			if n == 1 {
+				close(forcedEntered)
+				<-forcedRelease
+			}
+			return tokenOK(n)
+		}, apiOK)
+		s := expiredSession(t)
+
+		forced := make(chan error, 1)
+		go func() { forced <- s.renewToken(context.Background(), tokenStamp{}) }()
+		<-forcedEntered
+		s.refuseSignIn(s.generation()) // playback: the sign-in itself is refused
+		close(forcedRelease)
+		<-forced
+		if !s.signInRefused() {
+			t.Error("a new token undid a refusal of the whole sign-in")
+		}
+	})
+}
+
+// A write that got a 401 was refused: it did not take effect, whatever
+// happens next. When the renewal that follows cannot reach Spotify, the
+// error still says so (provider.NotApplied), and the outage stays an outage.
+// The write is sent once. (Adapted from the reviewer's round-6 probe.)
+func TestRefusedWriteStaysNotAppliedThroughAnOutage(t *testing.T) {
+	post := func(p *SpotifyProvider) error {
+		resp, err := p.webAPIWithBody(context.Background(), "POST", "/v1/me/playlists", nil, strings.NewReader(`{}`), "application/json", http.StatusOK)
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return err
+	}
+	t.Run("the renewal cannot reach Spotify", func(t *testing.T) {
+		storeCreds(t)
+		h := fakeSpotifyHTTP(t, func(int) (int, string) { return http.StatusServiceUnavailable, "unavailable" },
+			func(int, *http.Request) (int, http.Header) { return http.StatusUnauthorized, nil })
+		sess := &Session{clientID: "client", tokenSource: tokenSourceFunc(goodToken)}
+		err := post(New(sess, "client", 320))
+		if err == nil || h.apiCalls.Load() != 1 {
+			t.Fatalf("the write = %v after %d requests, want an error after one", err, h.apiCalls.Load())
+		}
+		if errors.Is(err, playlist.ErrNeedsAuth) || sess.signInRefused() {
+			t.Errorf("the outage was taken for a refused sign-in: %v", err)
+		}
+		if !provider.NotApplied(err) {
+			t.Errorf("the refused write is reported as uncertain: %v", err)
+		}
+		if !strings.Contains(err.Error(), "503") && !strings.Contains(err.Error(), "unavailable") {
+			t.Errorf("the error %q lost the renewal's cause", err)
+		}
+	})
+	t.Run("the check of the renewed token cannot reach Spotify", func(t *testing.T) {
+		storeCreds(t)
+		api := &apiByMethod{answer: func(method string, _ int) int {
+			if method == http.MethodPost {
+				return http.StatusUnauthorized
+			}
+			return http.StatusBadGateway
+		}}
+		fakeSpotifyHTTP(t, tokenOK, api.handle)
+		sess := &Session{clientID: "client", tokenSource: tokenSourceFunc(goodToken)}
+		err := post(New(sess, "client", 320))
+		if err == nil || api.sent("POST") != 1 || errors.Is(err, playlist.ErrNeedsAuth) || !provider.NotApplied(err) {
+			t.Errorf("the write = %v after %d writes; want one write, no sign-in, and not applied", err, api.sent("POST"))
 		}
 	})
 }

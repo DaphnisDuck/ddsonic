@@ -802,7 +802,12 @@ func (p *SpotifyProvider) webAPIWithBody(ctx context.Context, method, path strin
 	}
 
 	var renewed *uint64 // ddsonic: the sign-in whose token was renewed after a 401
-	var pin *signInPin  // ddsonic: the sign-in a write belongs to
+	// ddsonic: the sign-in a write belongs to, fixed before the first wait
+	// here: the caller's action (WithSignIn), or this request's own.
+	var pin *signInPin
+	if isWrite(method) {
+		pin = p.signInPinFrom(ctx)
+	}
 	for attempt := range maxRetries {
 		var reqBody io.Reader
 		if bodyBytes != nil {
@@ -823,13 +828,8 @@ func (p *SpotifyProvider) webAPIWithBody(ctx context.Context, method, path strin
 		// ddsonic: a write stays with the sign-in it was asked under, through
 		// every wait and retry here, and across the requests of one action
 		// (WithSignIn). Under another sign-in it is not sent.
-		if isWrite(method) {
-			if pin == nil {
-				pin = p.signInPinFrom(ctx)
-			}
-			if !pin.holds(sess) {
-				return nil, errSignInChanged
-			}
+		if pin != nil && !pin.holds(sess) {
+			return nil, errSignInChanged
 		}
 		// ddsonic: a session whose token refresh failed for a passing reason
 		// tries its stored refresh token again, as the catalog sync does, so
@@ -1111,6 +1111,10 @@ func (p *SpotifyProvider) albumTracksPage(ctx context.Context, albumID string, o
 // "spotify:episode:..."); the Spotify API accepts either.
 // Implements provider.PlaylistWriter.
 func (p *SpotifyProvider) AddTrackToPlaylist(ctx context.Context, playlistID string, track playlist.Track) error {
+	// ddsonic: the write is an action from here, before the stored session
+	// is set up or anything else is waited for: a sign-in that completes
+	// meanwhile ends it unsent (WithSignIn keeps a caller's own action).
+	ctx = p.WithSignIn(ctx)
 	trackURI := track.Path
 	if err := p.ensureSession(); err != nil {
 		return err
@@ -1136,6 +1140,7 @@ func (p *SpotifyProvider) AddTrackToPlaylist(ctx context.Context, playlistID str
 
 // CreatePlaylist creates a new private Spotify playlist and returns its ID.
 func (p *SpotifyProvider) CreatePlaylist(ctx context.Context, name string) (string, error) {
+	ctx = p.WithSignIn(ctx) // ddsonic: an action from here, as in AddTrackToPlaylist
 	if err := p.ensureSession(); err != nil {
 		return "", err
 	}

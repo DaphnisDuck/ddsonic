@@ -21,10 +21,11 @@ type ActionScoper interface {
 }
 
 // ActionContext is the context for one user action on p's account: every
-// write the action makes is given it. Whoever makes more than one write for
-// one request (several tracks added, a playlist created and then added to)
-// calls it once, before the first. For a provider that does not scope its
-// writes it is ctx.
+// write the action makes is given it. Whoever takes up a request that writes
+// (one track added, several, a playlist created, or created and then added
+// to) calls it once, when the request arrives and before anything is waited
+// for, and passes the result to every write. For a provider that does not
+// scope its writes it is ctx.
 func ActionContext(ctx context.Context, p any) context.Context {
 	if scoper, ok := p.(ActionScoper); ok {
 		return scoper.WithSignIn(ctx)
@@ -64,12 +65,12 @@ func (e *PartialError) Error() string {
 
 func (e *PartialError) Unwrap() error { return e.Err }
 
-// AddTracks adds tracks to a playlist one by one as one action. It stops at
-// the first failure and says what is known of how far it got (PartialError):
-// always when a track had been added, and also for a first track whose add
-// may have happened.
+// AddTracks adds tracks to a playlist one by one, every one with ctx, which
+// the caller made the request's action context (ActionContext) when the
+// request arrived. It stops at the first failure and says what is known of
+// how far it got (PartialError): always when a track had been added, and
+// also for a first track whose add may have happened.
 func AddTracks(ctx context.Context, w PlaylistWriter, playlistID string, tracks []playlist.Track) error {
-	ctx = ActionContext(ctx, w)
 	for i, track := range tracks {
 		if err := w.AddTrackToPlaylist(ctx, playlistID, track); err != nil {
 			unconfirmed := !NotApplied(err)
