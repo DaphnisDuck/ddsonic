@@ -248,15 +248,11 @@ func (m *Model) renderLibraryList(budget int) string {
 	f := m.libTop()
 	switch {
 	case m.libSigningInHere(f):
-		lines := []string{loadingLine(libSigningIn)}
-		if m.lib.authURL != "" {
-			lines = append(lines, dimStyle.Render("  If no browser opened, visit:"), dimStyle.Render("  "+truncate(m.lib.authURL, ui.PanelWidth-4)))
-		}
-		return bodyLines(lines, budget)
+		return bodyLines(m.libSigningInLines(), budget)
 	case f.loading() && len(f.entries) == 0:
 		return bodyLines([]string{loadingLine("Loading " + f.level.Title() + "…")}, budget)
-	case errors.Is(f.err, playlist.ErrNeedsAuth):
-		return bodyMessage("Sign-in required. Press Enter to sign in.", budget)
+	case errors.Is(f.err, playlist.ErrNeedsAuth) && m.libCanSignIn(f):
+		return bodyMessage(libSignInPrompt, budget)
 	case f.err != nil:
 		return bodyLines([]string{
 			dimStyle.Render("  " + truncate(f.err.Error(), ui.PanelWidth-4)),

@@ -107,7 +107,7 @@ func startSignInHome(t *testing.T, dbPath string, account *spotifyAccount, spoti
 	h.m = model.New(idleEngine{}, playlist.New(), providers, "", nil, nil, nil, config.SaveFunc{})
 	h.m.SetLibrary(library.Root(librarySources(providers, "", rt)))
 	rt.configure(&h.m)
-	librarySignIn(&h.m, spotify, rt)
+	librarySignIn(&h.m, spotify)
 	h.send(tea.WindowSizeMsg{Width: 110, Height: 32})
 	// What start does, without a program to send to: sync what is due.
 	for provider, ps := range rt.providers {

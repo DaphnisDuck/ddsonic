@@ -302,7 +302,7 @@ cases:
     applicability: always
     gate: required
     implemented: true
-    since: v1.0.0-rc.5
+    since: v1.0.0-rc.4
     regression_of: LIVE-SPOT-001 failing on v1.0.0-rc.4 (no reachable sign-in with an empty synced catalog; since 9df1c0c)
   - id: YTM-DER-003
     area: YouTube Music

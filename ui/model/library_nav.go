@@ -45,8 +45,7 @@ type libraryState struct {
 	authGen   uint64
 	signingIn bool
 	authURL   string
-	// signInProvider is the synced source signing in (library_signin.go), or
-	// "" when the top level signs in for itself.
+	// signInProvider is the source signing in (library_signin.go).
 	signInProvider string
 
 	// Catalog sync status per provider, and the action behind "r".
@@ -202,8 +201,7 @@ type libraryPlayMsg struct {
 type libraryAuthDoneMsg struct {
 	gen uint64
 	err error
-	// provider is the synced source that signed in (library_signin.go), or
-	// "" when a level signed in for itself.
+	// provider is the source that signed in (library_signin.go).
 	provider string
 }
 
@@ -286,9 +284,6 @@ func (m *Model) libraryPop() tea.Cmd {
 		f.cancel()
 	}
 	m.lib.stack = m.lib.stack[:len(m.lib.stack)-1]
-	if m.lib.signInProvider == "" { // a source's sign-in outlives the screen that started it
-		m.libEndSignIn()
-	}
 	if f := m.libTop(); f.stale {
 		return m.libraryRefreshTop()
 	}
@@ -478,15 +473,7 @@ func (m *Model) handleLibraryMsg(msg tea.Msg) (tea.Cmd, bool) {
 		if msg.gen != m.lib.authGen || !m.libraryEnabled() {
 			return nil, true
 		}
-		if msg.provider != "" {
-			return m.librarySignedIn(msg), true
-		}
-		m.libEndSignIn()
-		if msg.err != nil {
-			m.libTop().err = msg.err
-			return nil, true
-		}
-		return m.libraryLoad(), true
+		return m.librarySignedIn(msg), true
 
 	case ProvAuthURLMsg:
 		if m.lib.signingIn {
@@ -612,8 +599,10 @@ func (m *Model) libraryActivate() tea.Cmd {
 		return nil
 	}
 	if f.err != nil {
-		if errors.Is(f.err, playlist.ErrNeedsAuth) {
-			return m.librarySignIn()
+		// Only a source that signs in from the library does: any other
+		// provider's "sign-in required" is retried, never signed in to.
+		if provider, ok := m.libFrameSignIn(f); ok && errors.Is(f.err, playlist.ErrNeedsAuth) {
+			return m.librarySignInProvider(provider)
 		}
 		return m.libraryLoad()
 	}
@@ -679,24 +668,6 @@ func (m *Model) libEndSignIn() {
 	m.lib.signingIn = false
 	m.lib.authURL = ""
 	m.lib.signInProvider = ""
-}
-
-func (m *Model) librarySignIn() tea.Cmd {
-	al, ok := m.libTop().level.(library.AuthLevel)
-	if !ok || al.Authenticator() == nil {
-		return nil
-	}
-	auth := al.Authenticator()
-	if provider, ok := m.libAuthProviderOf(auth); ok {
-		return m.librarySignInProvider(provider)
-	}
-	gen := nextRequest(&m.lib.gen)
-	m.lib.authGen = gen
-	m.lib.signingIn = true
-	m.lib.authURL = ""
-	return func() tea.Msg {
-		return libraryAuthDoneMsg{gen: gen, err: auth.Authenticate()}
-	}
 }
 
 // libraryPlayTracks replaces the queue with tracks and plays tracks[index],

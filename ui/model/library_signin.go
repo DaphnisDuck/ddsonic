@@ -20,6 +20,7 @@ import (
 	"github.com/bjarneo/cliamp/library"
 	"github.com/bjarneo/cliamp/playlist"
 	"github.com/bjarneo/cliamp/provider"
+	"github.com/bjarneo/cliamp/ui"
 )
 
 const (
@@ -74,25 +75,50 @@ func libFrameProvider(f *libFrame) string {
 	return ""
 }
 
-// libSigningInHere reports whether f shows the sign-in in flight: the top
-// level for a level's own sign-in, a source's levels for the source's.
+// libSigningInHere reports whether f shows the sign-in in flight: the levels
+// of the source that is signing in.
 func (m *Model) libSigningInHere(f *libFrame) bool {
 	if !m.lib.signingIn {
 		return false
-	}
-	if m.lib.signInProvider == "" {
-		return f == m.libTop()
 	}
 	if provider, ok := m.libPending(f); ok {
 		return provider == m.lib.signInProvider
 	}
 	// A level of the source that asked for the sign-in itself.
-	if al, ok := f.level.(library.AuthLevel); ok && al.Authenticator() != nil {
-		if provider, ok := m.libAuthProviderOf(al.Authenticator()); ok {
-			return provider == m.lib.signInProvider
-		}
+	if provider, ok := m.libFrameSignIn(f); ok {
+		return provider == m.lib.signInProvider
 	}
 	return libFrameProvider(f) == m.lib.signInProvider
+}
+
+// libFrameSignIn is the source that signs in for f's level: one whose
+// provider is registered to sign in from the library (SetLibrarySignIn). A
+// level of any other provider has none, whatever that provider can do by
+// itself: YouTube Music's own sign-in is never started from here.
+func (m *Model) libFrameSignIn(f *libFrame) (provider string, ok bool) {
+	al, isAuth := f.level.(library.AuthLevel)
+	if !isAuth || al.Authenticator() == nil {
+		return "", false
+	}
+	return m.libAuthProviderOf(al.Authenticator())
+}
+
+// libCanSignIn reports whether Enter on f signs in.
+func (m *Model) libCanSignIn(f *libFrame) bool {
+	_, ok := m.libFrameSignIn(f)
+	return ok
+}
+
+// libSigningInLines is the sign-in in flight as the screen shows it, with
+// the address to open by hand once the browser flow has one. It is the same
+// wherever the sign-in was started: the library, the provider's own search,
+// or its playlist picker.
+func (m Model) libSigningInLines() []string {
+	lines := []string{loadingLine(libSigningIn)}
+	if m.lib.authURL != "" {
+		lines = append(lines, dimStyle.Render("  If no browser opened, visit:"), dimStyle.Render("  "+truncate(m.lib.authURL, ui.PanelWidth-4)))
+	}
+	return lines
 }
 
 // libPending reports whether f is a list with nothing cached of a source

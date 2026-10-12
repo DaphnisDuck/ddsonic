@@ -39,7 +39,12 @@ func (p *signInProv) Playlists() ([]playlist.PlaylistInfo, error) {
 	}
 	return []playlist.PlaylistInfo{{ID: "pl", Name: "Mine"}}, nil
 }
-func (p *signInProv) Tracks(string) ([]playlist.Track, error) { return nil, nil }
+func (p *signInProv) Tracks(string) ([]playlist.Track, error) {
+	if !p.authed {
+		return nil, fmt.Errorf("%s: %w", p.name, playlist.ErrNeedsAuth)
+	}
+	return tracksOf("read live"), nil
+}
 func (p *signInProv) Authenticate() error {
 	p.auths++
 	if p.authErr != nil {
@@ -504,6 +509,62 @@ func TestLiveLevelSignInIsTheSourcesSignIn(t *testing.T) {
 		t.Errorf("sign-ins = %d, syncs requested = %q, want 1 and Spotify's", l.prov.auths, l.refreshes)
 	}
 	wantView(t, "the album after signing in", m, []string{"So What"}, signInPrompt, signingIn)
+}
+
+// YouTube Music has no sign-in in the library. A synced playlist whose tracks
+// the sync could not read falls back to the provider; when that asks for
+// sign-in, Enter must not start the provider's own browser flow. It retries,
+// and the screen does not promise a sign-in.
+func TestYouTubeUncachedPlaylistDoesNotSignIn(t *testing.T) {
+	l := newSignInLib(t)
+	yt := &signInProv{name: "YouTube Music"}
+	ref := catalog.Ref{Provider: catalog.YouTube, ProviderID: "PL-unread"}
+	err := l.store.ApplySnapshot(context.Background(), catalog.Snapshot{
+		Provider: catalog.YouTube, Collection: catalog.CollectionPlaylists,
+		Playlists: []catalog.PlaylistRecord{{Ref: ref, Name: "Unread Playlist", TrackCount: 3, AddedAt: time.Now()}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := library.SyncedSource{Provider: catalog.YouTube, Title: "YouTube Music", Player: yt,
+		Collections: []string{catalog.CollectionPlaylists, catalog.CollectionLiked}, LikedTitle: "Liked Music"}
+	m := newLibraryModel(library.Menu("Music",
+		library.Entry{Title: "YouTube Music", Open: library.SyncedMenu(l.store, src), Source: catalog.YouTube}))
+	m = sized(m, 110, 30)
+	m.SetLibrarySignIn(catalog.Spotify, l.prov) // Spotify's, as main registers it; YouTube has none
+	m.SetCatalogSync(map[string]CatalogStatus{catalog.YouTube: {LastSuccess: time.Now()}}, func(string) {})
+
+	m = pressAll(t, m, "enter")
+	m = openRow(t, m, "Playlists")
+	m = openRow(t, m, "Unread Playlist")
+	if !errors.Is(m.libTop().err, playlist.ErrNeedsAuth) {
+		t.Fatalf("the unread playlist loaded with %v, want the provider's sign-in required:\n%s", m.libTop().err, viewText(m))
+	}
+	wantView(t, "the unread playlist", m, []string{"Press Enter to retry."}, signInPrompt, "Press Enter to sign in")
+
+	m = pressAll(t, m, "enter", "enter")
+	if yt.auths != 0 || l.prov.auths != 0 {
+		t.Errorf("Enter signed in: YouTube Music %d times, Spotify %d; want neither", yt.auths, l.prov.auths)
+	}
+	wantView(t, "after Enter", m, nil, signingIn)
+}
+
+// The browser's fallback address shows wherever the sign-in was started
+// from: in Spotify's own search too, and in its playlist picker.
+func TestSearchOverlaySignInShowsURL(t *testing.T) {
+	l := newSignInLib(t)
+	m := l.model()
+	m = runAll(t, m, m.openProviderSearchQuery(l.prov, "kind of blue"))
+	updated, cmd := m.Update(libKey("enter")) // the sign-in, held
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("Enter on the prompt did not start the sign-in")
+	}
+	m = sendAll(t, m, ProvAuthURLMsg{ProviderName: "Spotify", URL: "https://accounts.example/authorize"})
+	wantView(t, "the search while signing in", m, []string{signingIn, "If no browser opened, visit:", "https://accounts.example/authorize"})
+
+	m = runAll(t, m, cmd)
+	wantView(t, "the search after signing in", m, []string{"Found"}, signingIn, "accounts.example")
 }
 
 func spotifyTrackPlaying(t *testing.T, m Model) (Model, playlist.Track) {

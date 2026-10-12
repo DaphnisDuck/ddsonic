@@ -616,9 +616,15 @@ func (m Model) renderSpotSearchBody() string {
 	budget := m.effectivePlaylistVisible()
 	// ddsonic: the picker shows no errors, but the sign-in prompt asks for a key.
 	showError := m.spotSearch.err != "" && (m.spotSearch.screen != spotSearchPlaylist || m.spotSearchAsksSignIn())
+	// ddsonic: a sign-in in flight shows as it does in the library, with the
+	// address to open by hand (library_signin.go).
+	errLines := []string{errorStyle.Render("  " + m.spotSearch.err)}
+	if m.spotSearch.err == libSigningIn {
+		errLines = m.libSigningInLines()
+	}
 	bodyBudget := budget
 	if showError {
-		bodyBudget = max(0, bodyBudget-1)
+		bodyBudget = max(0, bodyBudget-len(errLines))
 	}
 	var body string
 	switch m.spotSearch.screen {
@@ -661,7 +667,7 @@ func (m Model) renderSpotSearchBody() string {
 		body = bodyLines(lines, bodyBudget)
 	}
 	if showError {
-		errLine := errorStyle.Render("  " + m.spotSearch.err)
+		errLine := strings.Join(errLines, "\n")
 		if body == "" {
 			return errLine
 		}

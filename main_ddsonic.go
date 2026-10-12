@@ -62,10 +62,11 @@ func librarySources(providers []model.ProviderEntry, initialDir string, rt *cata
 // signed in, or whose sign-in was revoked, could not be signed in at all.
 // YouTube Music signs in outside ddsonic (ddsonic youtube signin, or the
 // browser's cookies) and is not offered here.
-func librarySignIn(m *model.Model, spotify playlist.Authenticator, rt *catalogRuntime) {
-	if len(rt.collections(catalog.Spotify)) > 0 {
-		m.SetLibrarySignIn(catalog.Spotify, spotify)
-	}
+//
+// It is the only provider registered, and only a registered provider is ever
+// signed in to from the library, with or without a catalog.
+func librarySignIn(m *model.Model, spotify playlist.Authenticator) {
+	m.SetLibrarySignIn(catalog.Spotify, spotify)
 }
 
 // artworkLoader loads album artwork for the track info view, or is nil when

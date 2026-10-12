@@ -607,7 +607,7 @@ func run(overrides config.Overrides, positional []string, daemon, visualizer60FP
 	m.SetArtwork(artworkLoader(cfg.Ddsonic.Artwork)) // ddsonic: main_ddsonic.go
 	cat.configure(&m)
 	if spotifyProv != nil {
-		librarySignIn(&m, spotifyProv, cat) // ddsonic: main_ddsonic.go
+		librarySignIn(&m, spotifyProv) // ddsonic: main_ddsonic.go
 	}
 	if cfg.EQPreset != "" && cfg.EQPreset != "Custom" {
 		m.SetEQPreset(cfg.EQPreset, nil)
