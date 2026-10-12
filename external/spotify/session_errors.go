@@ -88,6 +88,9 @@ func (p *SpotifyProvider) ensureWebAPI() error {
 func (s *Session) restoreWebAPIToken() error {
 	restoreMu.Lock()
 	defer restoreMu.Unlock()
+	if s.authDead.Load() { // Spotify refused this sign-in (session_auth_ddsonic.go)
+		return errSignInRefused
+	}
 	s.mu.RLock()
 	ok := s.tokenSource != nil
 	s.mu.RUnlock()

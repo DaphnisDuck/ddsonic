@@ -81,6 +81,7 @@ type Session struct {
 	devID       string
 	clientID    string             // Spotify Developer app client ID
 	tokenSource oauth2.TokenSource // auto-refreshing OAuth2 token source
+	authDead    atomic.Bool        // ddsonic: Spotify refused this sign-in (session_auth_ddsonic.go)
 }
 
 type streamContextTransport struct {
@@ -676,8 +677,15 @@ func (s *Session) webApiWithBody(ctx context.Context, method, path string, query
 	if ts == nil {
 		return nil, fmt.Errorf("spotify: web api token unavailable, run '%s spotify reset' and sign in again: %w", appmeta.ClientName(), playlist.ErrNeedsAuth) // ddsonic
 	}
+	if s.authDead.Load() { // ddsonic: refused already; do not ask again
+		return nil, errSignInRefused
+	}
 	tok, err := ts.Token()
 	if err != nil {
+		if isInvalidGrant(err) { // ddsonic: the sign-in is gone, not the network
+			s.authDead.Store(true)
+			return nil, errSignInRefused
+		}
 		return nil, fmt.Errorf("refresh access token: %w", err)
 	}
 	token := tok.AccessToken
@@ -723,7 +731,7 @@ func (s *Session) Reconnect(ctx context.Context) error {
 // Stored credentials are preserved until the new session succeeds —
 // newInteractiveSession overwrites them via saveCreds on success.
 func (s *Session) ReconnectInteractive(ctx context.Context) error {
-	return s.reconnect(ctx, newInteractiveSession)
+	return s.reconnect(ctx, buildInteractiveSession) // ddsonic: a variable, for tests
 }
 
 // reconnect replaces the live session using the provided builder function.
@@ -754,12 +762,8 @@ func (s *Session) reconnect(ctx context.Context, build func(context.Context, str
 	s.player = newSess.player
 	s.devID = newSess.devID
 	s.tokenSource = newSess.tokenSource
-	if oldPlayer != nil {
-		oldPlayer.Close()
-	}
-	if oldSess != nil {
-		oldSess.Close()
-	}
+	s.authDead.Store(false)            // ddsonic: a new sign-in
+	closeLibrespot(oldPlayer, oldSess) // ddsonic: a variable, for tests
 	s.mu.Unlock()
 
 	// Prevent newSess.Close() from tearing down the resources we just adopted.

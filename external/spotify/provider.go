@@ -72,6 +72,8 @@ type SpotifyProvider struct {
 	trackCache map[string]*playlistCache // playlist ID → cache entry
 	pending    map[string]*pendingTracks
 	authCancel context.CancelFunc // cancels any in-progress OAuth flow
+	signingIn  *signInCall        // ddsonic: the sign-in in flight, shared by its callers
+	closed     bool               // ddsonic: Close ran
 
 	// Playlist list cache to avoid redundant API calls on provider switch.
 	listCache   []playlist.PlaylistInfo
@@ -125,50 +127,20 @@ func (p *SpotifyProvider) ensureSession() error {
 }
 
 // Authenticate runs the interactive sign-in flow (opens browser, waits for callback).
-// Any previous in-progress OAuth flow is cancelled first to free the callback port.
+//
+// ddsonic: a session that exists is not thereby signed in. A session Spotify
+// has refused, or one without a Web API token, is replaced by the sign-in
+// (session_auth_ddsonic.go); upstream returned at once for any session, and
+// cancelled a sign-in in flight where this joins it.
 func (p *SpotifyProvider) Authenticate() error {
-	p.mu.Lock()
-	if p.session != nil {
-		p.mu.Unlock()
-		return nil
-	}
-	if p.authCancel != nil {
-		p.authCancel()
-		p.authCancel = nil
-	}
-	clientID := p.clientID
-	p.mu.Unlock()
-
-	if clientID == "" {
-		return fmt.Errorf("spotify: no client ID available")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	p.mu.Lock()
-	p.authCancel = cancel
-	p.mu.Unlock()
-
-	sess, err := NewSession(ctx, clientID)
-
-	p.mu.Lock()
-	p.authCancel = nil
-	p.mu.Unlock()
-	cancel()
-
-	if err != nil {
-		return err
-	}
-	p.mu.Lock()
-	p.session = sess
-	p.resetSessionScopedStateLocked()
-	p.mu.Unlock()
-	return nil
+	return p.signIn()
 }
 
 // Close releases the session if one was created.
 func (p *SpotifyProvider) Close() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.closed = true // ddsonic: a sign-in still running installs nothing
 	if p.authCancel != nil {
 		p.authCancel()
 		p.authCancel = nil
@@ -743,7 +715,7 @@ func (p *SpotifyProvider) NewStreamer(uri string) (beep.StreamSeekCloser, beep.F
 	tryStream := func() (*spotifyStreamer, error) {
 		ctx, setupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer setupCancel()
-		stream, streamCancel, err := p.session.NewStream(ctx, *spotID, p.bitrate)
+		stream, streamCancel, err := sessionNewStream(p.session, ctx, *spotID, p.bitrate) // ddsonic: a variable, for tests
 		if err != nil {
 			return nil, err
 		}
@@ -762,11 +734,18 @@ func (p *SpotifyProvider) NewStreamer(uri string) (beep.StreamSeekCloser, beep.F
 	applog.UserWarn("spotify: stream auth error (%v), attempting silent reconnect...", err)
 
 	reconnCtx, reconnCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	reconnErr := p.session.Reconnect(reconnCtx)
+	reconnErr := sessionReconnect(p.session, reconnCtx) // ddsonic: a variable, for tests
 	reconnCancel()
 
 	if reconnErr != nil {
+		// ddsonic: a reconnect that could not reach Spotify says nothing
+		// about the sign-in; upstream asked for sign-in after any failure.
+		if !needsSignIn(reconnErr) {
+			applog.UserWarn("spotify: silent reconnect failed (%v)", reconnErr)
+			return nil, beep.Format{}, 0, fmt.Errorf("spotify: stream auth error, silent reconnect failed: %w", reconnErr)
+		}
 		applog.UserWarn("spotify: silent reconnect failed (%v); sign-in required", reconnErr)
+		p.session.authDead.Store(true) // ddsonic: so a sign-in replaces this session
 		return nil, beep.Format{}, 0, fmt.Errorf("spotify: stream auth error, silent reconnect failed: %w", playlist.ErrNeedsAuth)
 	}
 
@@ -781,6 +760,7 @@ func (p *SpotifyProvider) NewStreamer(uri string) (beep.StreamSeekCloser, beep.F
 	// Still failing after a silent reconnect — surface ErrNeedsAuth so the
 	// UI can prompt the user to sign in. Do NOT open a browser from here.
 	applog.UserWarn("spotify: stream still failing after silent reconnect (%v); sign-in required", err)
+	p.session.authDead.Store(true) // ddsonic: so a sign-in replaces this session
 	return nil, beep.Format{}, 0, fmt.Errorf("spotify: stream auth error after silent reconnect: %w", playlist.ErrNeedsAuth)
 }
 
@@ -821,6 +801,12 @@ func (p *SpotifyProvider) webAPIWithBody(ctx context.Context, method, path strin
 		p.mu.Unlock()
 		if sess == nil {
 			return nil, playlist.ErrNeedsAuth
+		}
+		// ddsonic: a session whose token refresh failed for a passing reason
+		// tries its stored refresh token again, as the catalog sync does, so
+		// an outage does not read as "sign in again" in search or the picker.
+		if err := sess.restoreWebAPIToken(); err != nil {
+			return nil, err
 		}
 		resp, err := sess.webApiWithBody(ctx, method, path, query, reqBody, contentType)
 		if err != nil {
