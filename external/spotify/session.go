@@ -662,7 +662,7 @@ func (s *Session) NewStream(ctx context.Context, spotID librespot.SpotifyId, bit
 // So if there is no OAuth2 token source, fail loudly with ErrNeedsAuth
 // rather than attempting the call with the wrong token.
 func (s *Session) webApiWithBody(ctx context.Context, method, path string, query url.Values, body io.Reader, contentType string) (*http.Response, error) {
-	resp, _, err := s.webAPIStamped(ctx, method, path, query, body, contentType)
+	resp, _, err := s.webAPIStamped(ctx, method, path, query, body, contentType, nil)
 	return resp, err
 }
 
@@ -670,8 +670,8 @@ func (s *Session) webApiWithBody(ctx context.Context, method, path string, query
 // was made with. ddsonic: the token comes with the sign-in it belongs to, so
 // that a refusal, or a 401, is held against that one only
 // (session_auth_ddsonic.go). Upstream read the token source and asked it here.
-func (s *Session) webAPIStamped(ctx context.Context, method, path string, query url.Values, body io.Reader, contentType string) (*http.Response, tokenStamp, error) {
-	token, stamp, err := s.accessToken(isWrite(method))
+func (s *Session) webAPIStamped(ctx context.Context, method, path string, query url.Values, body io.Reader, contentType string, pin *signInPin) (*http.Response, tokenStamp, error) {
+	token, stamp, err := s.accessToken(isWrite(method), pin)
 	if err != nil {
 		return nil, stamp, err
 	}

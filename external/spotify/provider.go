@@ -129,25 +129,12 @@ func (p *SpotifyProvider) ensureSession() error {
 	ctx, cancel := context.WithTimeout(context.Background(), sessionSetupTimeout)
 	defer cancel()
 	sess, err := newSessionSilent(ctx, clientID)
-	if err != nil {
-		if errors.Is(err, errStoredSignInRefused) { // ddsonic: remembered
-			p.mu.Lock()
-			p.storedRefused = true
-			p.mu.Unlock()
-		}
-		return silentSessionError(err) // ddsonic: only credential failures need sign-in
-	}
-	p.mu.Lock()
-	if p.closed { // ddsonic: closed while it was built; not taken, not written
-		p.mu.Unlock()
-		sess.Close()
-		return errProviderClosed
-	}
-	p.session = sess
-	sess.accept() // ddsonic: taken, so its credential is written
-	p.resetSessionScopedStateLocked()
-	p.mu.Unlock()
-	return nil
+	// ddsonic: the build ran without the lock, and the user may have signed
+	// in meanwhile (Authenticate does not wait for sessionMu). What the
+	// build found, a session or a refusal, is then about the stored
+	// credential the sign-in replaced: the provider keeps the session it
+	// took, and the build is closed unwritten (startupResult).
+	return p.startupResult(sess, err)
 }
 
 // Authenticate runs the interactive sign-in flow (opens browser, waits for callback).
@@ -810,7 +797,8 @@ func (p *SpotifyProvider) webAPIWithBody(ctx context.Context, method, path strin
 		}
 	}
 
-	renewed := false // ddsonic: the token was renewed after a 401
+	var renewed *uint64 // ddsonic: the sign-in whose token was renewed after a 401
+	var pin *signInPin  // ddsonic: the sign-in a write belongs to
 	for attempt := range maxRetries {
 		var reqBody io.Reader
 		if bodyBytes != nil {
@@ -828,26 +816,38 @@ func (p *SpotifyProvider) webAPIWithBody(ctx context.Context, method, path strin
 		if sess == nil {
 			return nil, playlist.ErrNeedsAuth
 		}
+		// ddsonic: a write stays with the sign-in it was asked under, through
+		// every wait and retry here, and across the requests of one action
+		// (WithSignIn). Under another sign-in it is not sent.
+		if isWrite(method) {
+			if pin == nil {
+				pin = signInPinFrom(ctx, sess)
+			}
+			if !pin.holds(sess) {
+				return nil, errSignInChanged
+			}
+		}
 		// ddsonic: a session whose token refresh failed for a passing reason
 		// tries its stored refresh token again, as the catalog sync does, so
 		// an outage does not read as "sign in again" in search or the picker.
 		if err := sess.restoreWebAPIToken(); err != nil {
 			return nil, err
 		}
-		resp, stamp, err := sess.webAPIStamped(ctx, method, path, query, reqBody, contentType)
+		resp, stamp, err := sess.webAPIStamped(ctx, method, path, query, reqBody, contentType, pin)
 		if err != nil {
 			return nil, err
 		}
-		// ddsonic: a 401 renews the token once; a read is then sent once
-		// more, a write never (session_auth_ddsonic.go). Upstream returned it
-		// as any other status, so nothing ever asked for the sign-in.
+		// ddsonic: a 401 renews the token once for its sign-in; a read is
+		// then sent once more, a write never (session_auth_ddsonic.go).
+		// Upstream returned it as any other status, so nothing ever asked
+		// for the sign-in.
 		if resp.StatusCode == http.StatusUnauthorized {
 			resp.Body.Close()
-			retry, err := sess.unauthorized(ctx, method, stamp, renewed)
+			retry, err := sess.unauthorized(ctx, method, stamp, renewed != nil && *renewed == stamp.gen)
 			if !retry {
 				return nil, err
 			}
-			renewed = true
+			renewed = &stamp.gen
 			continue
 		}
 		if resp.StatusCode == http.StatusTooManyRequests {

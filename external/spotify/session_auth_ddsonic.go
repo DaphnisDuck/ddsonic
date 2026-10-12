@@ -50,9 +50,10 @@ var (
 	// stored refresh token. Unlike a missing credential, asking again cannot
 	// help, so the provider remembers it.
 	errStoredSignInRefused = fmt.Errorf("spotify: the stored sign-in is no longer accepted: %w", playlist.ErrNeedsAuth)
-	// errSignInChanged ends a write that was pending when the user signed in
-	// again: it was not asked for under the new sign-in, and is not sent.
-	errSignInChanged = errors.New("spotify: signed in again while this was pending; it has not been sent, so try once more")
+	// errSignInChanged ends a write whose sign-in was replaced while it was
+	// pending, by the user signing in again or by a reconnect: it was not
+	// asked for under the new one, and is not sent or retried.
+	errSignInChanged = errors.New("spotify: the Spotify session changed, so the request was not sent; try again")
 	// errSessionClosed and errProviderClosed end work that outlived its owner.
 	errSessionClosed  = fmt.Errorf("spotify: session closed: %w", context.Canceled)
 	errProviderClosed = fmt.Errorf("spotify: closed: %w", context.Canceled)
@@ -247,15 +248,19 @@ type tokenStamp struct{ gen, rev uint64 }
 // A refresh that Spotify answers with invalid_grant refuses that sign-in and
 // is playlist.ErrNeedsAuth.
 //
-// When the user signed in again while the token was being fetched, the
-// answer is about the old sign-in. A read asks the new one instead, once. A
-// write does not: the user asked for it under the old sign-in, so it ends
-// with errSignInChanged and is sent only if the user asks again.
-func (s *Session) accessToken(write bool) (string, tokenStamp, error) {
+// When the sign-in was replaced while the token was being fetched, the answer
+// is about the old one. A read asks the new one instead, once. A write does
+// not: it was asked for under the old sign-in (pin, when its caller has one,
+// else the one it starts under), so it ends with errSignInChanged and is sent
+// only if the user asks again.
+func (s *Session) accessToken(write bool, pin *signInPin) (string, tokenStamp, error) {
 	for attempt := 0; ; attempt++ {
 		s.mu.RLock()
 		ts, stamp, refused := s.tokenSource, tokenStamp{s.gen, s.tokenRev}, s.refusedLocked()
 		s.mu.RUnlock()
+		if write && pin != nil && !pin.holdsGen(s, stamp.gen) {
+			return "", stamp, errSignInChanged
+		}
 		if ts == nil {
 			return "", stamp, fmt.Errorf("spotify: web api token unavailable, run '%s spotify reset' and sign in again: %w", appmeta.ClientName(), playlist.ErrNeedsAuth)
 		}
@@ -276,9 +281,52 @@ func (s *Session) accessToken(write bool) (string, tokenStamp, error) {
 		case write:
 			return "", stamp, errSignInChanged
 		case attempt > 0:
-			return "", stamp, errors.New("spotify: the sign-in changed during the request; try again")
+			return "", stamp, errors.New("spotify: the Spotify session changed during the request; try again")
 		}
 	}
+}
+
+// signInPin is the sign-in a write belongs to: the session it was asked on,
+// and the sign-in that session was on then.
+type signInPin struct {
+	sess *Session
+	gen  uint64
+}
+
+// holds reports whether sess is still the pinned session on the pinned
+// sign-in.
+func (pin *signInPin) holds(sess *Session) bool {
+	return pin.sess == sess && sess.generation() == pin.gen
+}
+
+func (pin *signInPin) holdsGen(sess *Session, gen uint64) bool {
+	return pin.sess == sess && gen == pin.gen
+}
+
+type signInPinKey struct{}
+
+// WithSignIn marks ctx as one user action on the account: every write made
+// with it belongs to the sign-in the provider is on now. A user action that
+// takes more than one request (a new playlist, then the track added to it)
+// passes the same context to each, so that none of them is sent under a
+// sign-in that replaced it part-way.
+func (p *SpotifyProvider) WithSignIn(ctx context.Context) context.Context {
+	p.mu.Lock()
+	sess := p.session
+	p.mu.Unlock()
+	if sess == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, signInPinKey{}, &signInPin{sess: sess, gen: sess.generation()})
+}
+
+// signInPinFrom is the pin a write was given (WithSignIn), or one made for
+// the single request it is.
+func signInPinFrom(ctx context.Context, sess *Session) *signInPin {
+	if pin, ok := ctx.Value(signInPinKey{}).(*signInPin); ok {
+		return pin
+	}
+	return &signInPin{sess: sess, gen: sess.generation()}
 }
 
 // isWrite reports whether a Web API method changes the account.
@@ -312,8 +360,13 @@ func (s *Session) renewToken(ctx context.Context, stamp tokenStamp) error {
 	}
 	token, err := silentTokenRefresh(ctx, s.clientID, creds.RefreshToken)
 	if isInvalidGrant(err) {
-		s.refuseSignIn(stamp.gen)
-		return errSignInRefused
+		// Held against the sign-in it was fetched for. When that one has
+		// been replaced meanwhile, the refusal is not the session's: there
+		// is nothing to report, and the caller goes on with the new one.
+		if s.refuseSignIn(stamp.gen) {
+			return errSignInRefused
+		}
+		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("spotify: web api token unavailable: %w", err)
@@ -485,16 +538,23 @@ func (p *SpotifyProvider) signIn() error {
 // playlist.ErrNeedsAuth; otherwise the write reports that it was not sent.
 func (s *Session) unauthorized(ctx context.Context, method string, stamp tokenStamp, renewed bool) (retry bool, err error) {
 	if renewed {
-		s.refuseSignIn(stamp.gen)
-		return false, errSignInRefused
+		// The renewed token was refused too: the sign-in is, unless it has
+		// been replaced meanwhile, when this answer is about the old one.
+		if s.refuseSignIn(stamp.gen) {
+			return false, errSignInRefused
+		}
+		return s.afterSignInChanged(method)
 	}
 	if err := s.renewToken(ctx, stamp); err != nil {
 		return false, err
 	}
+	if s.generation() != stamp.gen {
+		return s.afterSignInChanged(method)
+	}
 	if !isWrite(method) {
 		return true, nil
 	}
-	resp, probe, err := s.webAPIStamped(ctx, http.MethodGet, "/v1/me", nil, nil, "")
+	resp, probe, err := s.webAPIStamped(ctx, http.MethodGet, "/v1/me", nil, nil, "", nil)
 	if err != nil {
 		if errors.Is(err, playlist.ErrNeedsAuth) {
 			return false, err
@@ -502,11 +562,57 @@ func (s *Session) unauthorized(ctx context.Context, method string, stamp tokenSt
 		return false, fmt.Errorf("spotify: the request was not authorised and has not been sent again: %w", err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode == http.StatusUnauthorized {
-		s.refuseSignIn(probe.gen)
-		return false, errSignInRefused
+	switch {
+	case probe.gen != stamp.gen:
+		return false, errSignInChanged
+	case resp.StatusCode == http.StatusUnauthorized:
+		if s.refuseSignIn(probe.gen) {
+			return false, errSignInRefused
+		}
+		return false, errSignInChanged
 	}
 	return false, errors.New("spotify: the request was not authorised and has not been sent again; the sign-in has been renewed, so try once more")
+}
+
+// afterSignInChanged is what a call does when the answer it got was about a
+// sign-in that has since been replaced: a read is sent again, on the new
+// one; a write is not sent.
+func (s *Session) afterSignInChanged(method string) (retry bool, err error) {
+	if isWrite(method) {
+		return false, errSignInChanged
+	}
+	return true, nil
+}
+
+// startupResult finishes ensureSession: sess and err are what the stored
+// credential's silent build produced, begun when the provider had no session.
+// The provider takes the session only if it still has none and is open. A
+// user who signed in while the build ran keeps that sign-in: the build is
+// closed, unwritten, and neither it nor its failure changes anything.
+func (p *SpotifyProvider) startupResult(sess *Session, err error) error {
+	p.mu.Lock()
+	overtaken, closed := p.session != nil, p.closed
+	if err == nil && !overtaken && !closed {
+		p.session = sess
+		sess.accept() // taken, so its credential is written
+		p.resetSessionScopedStateLocked()
+		p.mu.Unlock()
+		return nil
+	}
+	if err != nil && !overtaken && !closed && errors.Is(err, errStoredSignInRefused) {
+		p.storedRefused = true // remembered: Spotify is not asked again
+	}
+	p.mu.Unlock()
+	if sess != nil {
+		sess.Close() // built, and not taken
+	}
+	switch {
+	case overtaken:
+		return nil
+	case closed:
+		return errProviderClosed
+	}
+	return silentSessionError(err) // only credential failures need sign-in
 }
 
 // What reaches Spotify, and the browser, when no test has put a stand-in in
