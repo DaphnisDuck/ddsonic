@@ -86,41 +86,18 @@ func (p *SpotifyProvider) ensureWebAPI() error {
 }
 
 func (s *Session) restoreWebAPIToken() error {
-	restoreMu.Lock()
-	defer restoreMu.Unlock()
-	if s.authDead.Load() { // Spotify refused this sign-in (session_auth_ddsonic.go)
-		return errSignInRefused
-	}
+	// ddsonic: one renewal for both this and a 401 (session_auth_ddsonic.go),
+	// which remembers a refusal instead of asking Spotify again each time.
 	s.mu.RLock()
-	ok := s.tokenSource != nil
+	ok, stamp, refused := s.tokenSource != nil, tokenStamp{s.gen, s.tokenRev}, s.refusedLocked()
 	s.mu.RUnlock()
-	if ok {
+	switch {
+	case refused:
+		return errSignInRefused
+	case ok:
 		return nil
-	}
-	creds, err := loadCreds()
-	if err != nil || creds.RefreshToken == "" {
-		return playlist.ErrNeedsAuth
 	}
 	// A refresh during the session's life: no setup deadline applies, and
 	// the bounded client ends a stalled request.
-	token, err := silentTokenRefresh(context.Background(), s.clientID, creds.RefreshToken)
-	if isInvalidGrant(err) {
-		return playlist.ErrNeedsAuth
-	}
-	if err != nil {
-		return fmt.Errorf("spotify: web api token unavailable: %w", err)
-	}
-	stored := *creds
-	if token.RefreshToken != "" {
-		stored.RefreshToken = token.RefreshToken
-		if err := saveCreds(&stored); err != nil {
-			return fmt.Errorf("spotify: save rotated refresh token: %w", err)
-		}
-	}
-	s.mu.Lock()
-	if s.tokenSource == nil {
-		s.tokenSource = webAPITokenSource(s.clientID, token, stored)
-	}
-	s.mu.Unlock()
-	return nil
+	return s.renewToken(context.Background(), stamp)
 }

@@ -1,29 +1,58 @@
 package spotify
 
-// ddsonic: a Spotify sign-in that stops working while ddsonic runs.
+// ddsonic: a Spotify sign-in that stops working while ddsonic runs, and the
+// sign-in that replaces it.
 //
 // Upstream treats a session that exists as a signed-in one: Authenticate
 // returns at once when the provider has a session, so a session whose refresh
 // token Spotify has revoked can never be signed in again without a restart,
-// and the refusal itself reaches callers as a plain error. Here the session
-// remembers the refusal (authDead), Web API calls report it as
-// playlist.ErrNeedsAuth, and an explicit sign-in replaces the session.
+// and the refusal itself reaches callers as a plain error. Upstream also
+// writes the credential while a session is still being built, and deletes it
+// when a stored one is refused.
+//
+// Here:
+//   - A session knows which sign-in it is on (its generation) and whether
+//     Spotify refused that one. A refusal is held against the sign-in that
+//     produced it: a late answer to a request made under the old sign-in says
+//     nothing about the new one.
+//   - A refusal is playlist.ErrNeedsAuth, remembered in memory. The stored
+//     credential is never deleted, and is replaced only by a sign-in that
+//     produced a working session which was taken: built sessions carry their
+//     credential staged, and whoever publishes the session writes it.
+//   - A session is published only into a live owner. A closed provider or
+//     session takes nothing; what it does not take is closed once and its
+//     credential is not written.
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"sync"
 	"time"
 
 	librespot "github.com/devgianlu/go-librespot"
 	librespotPlayer "github.com/devgianlu/go-librespot/player"
 	"github.com/devgianlu/go-librespot/session"
+	"golang.org/x/oauth2"
 
+	"github.com/bjarneo/cliamp/applog"
+	"github.com/bjarneo/cliamp/internal/appmeta"
 	"github.com/bjarneo/cliamp/playlist"
 )
 
-// errSignInRefused is what a Web API call returns once Spotify has refused
-// the session's refresh token.
-var errSignInRefused = fmt.Errorf("spotify: the sign-in is no longer accepted: %w", playlist.ErrNeedsAuth)
+var (
+	// errSignInRefused is what a Web API call returns once Spotify has
+	// refused the session's sign-in.
+	errSignInRefused = fmt.Errorf("spotify: the sign-in is no longer accepted: %w", playlist.ErrNeedsAuth)
+	// errStoredSignInRefused is a session setup that Spotify refused for the
+	// stored refresh token. Unlike a missing credential, asking again cannot
+	// help, so the provider remembers it.
+	errStoredSignInRefused = fmt.Errorf("spotify: the stored sign-in is no longer accepted: %w", playlist.ErrNeedsAuth)
+	// errSessionClosed and errProviderClosed end work that outlived its owner.
+	errSessionClosed  = fmt.Errorf("spotify: session closed: %w", context.Canceled)
+	errProviderClosed = fmt.Errorf("spotify: closed: %w", context.Canceled)
+)
 
 // signInTimeout bounds one interactive sign-in.
 const signInTimeout = 5 * time.Minute
@@ -39,7 +68,15 @@ var (
 		return s.NewStream(ctx, id, bitrate)
 	}
 	sessionReconnect = func(s *Session, ctx context.Context) error { return s.Reconnect(ctx) }
-	// closeLibrespot tears down the player and session a reconnect replaced.
+	// The pieces a session is built from.
+	interactiveTokens   = performOAuth2PKCEFlows
+	newLibrespotSession = session.NewSessionFromOptions
+	sessionIdentity     = func(sess *session.Session) (username string, data []byte) {
+		return sess.Username(), sess.StoredCredentials()
+	}
+	initSessionPlayer = func(s *Session) error { return s.initPlayer() }
+	// closeLibrespot tears down a player and session: the ones a reconnect
+	// replaced, a closed session's, or a replacement nobody took.
 	closeLibrespot = func(p *librespotPlayer.Player, sess *session.Session) {
 		if p != nil {
 			p.Close()
@@ -50,15 +87,257 @@ var (
 	}
 )
 
+// signInState is the part of a Session that says which sign-in it is on.
+// Session.mu guards it, except cred, which has its own lock.
+type signInState struct {
+	// gen counts the sign-ins the session has been through: a reconnect
+	// that is published starts the next. tokenRev counts the Web API token
+	// sources within one.
+	gen, tokenRev uint64
+	// refused is set when Spotify refused the sign-in refusedGen.
+	refused    bool
+	refusedGen uint64
+	closed     bool
+	// cred is the credential that belongs to this sign-in.
+	cred *credential
+}
+
+// credential is a sign-in's stored form. It is staged while the session that
+// carries it is built, and written when that session is taken; a rotated
+// refresh token follows the same rule.
+type credential struct {
+	mu        sync.Mutex
+	creds     storedCreds
+	committed bool
+}
+
+// stageCreds gives the session being built its credential, unwritten.
+func (s *Session) stageCreds(creds storedCreds) {
+	s.cred = &credential{creds: creds}
+}
+
+// stagedTokenSource is the Web API token source of a session being built: a
+// rotated refresh token is kept with the staged credential, and written only
+// once that credential has been.
+func (s *Session) stagedTokenSource(token *oauth2.Token) oauth2.TokenSource {
+	cred := s.cred
+	return &persistingTokenSource{
+		source:       spotifyOAuthConfig(s.clientID, oauthScopes).TokenSource(tokenContext(), token),
+		refreshToken: cred.creds.RefreshToken,
+		persist:      cred.rotate,
+	}
+}
+
+func (c *credential) rotate(refreshToken string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.creds.RefreshToken = refreshToken
+	if !c.committed {
+		return nil
+	}
+	return saveCreds(&c.creds)
+}
+
+// commit writes the credential: the session it belongs to has been taken.
+func (c *credential) commit() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.committed {
+		return
+	}
+	c.committed = true
+	if err := saveCreds(&c.creds); err != nil {
+		applog.UserError("spotify: failed to save credentials: %v", err)
+	}
+}
+
+// accept is called by the owner that takes a newly built session: it writes
+// the session's credential.
+func (s *Session) accept() {
+	s.mu.RLock()
+	cred := s.cred
+	s.mu.RUnlock()
+	cred.commit()
+}
+
+// generation is the sign-in the session is on.
+func (s *Session) generation() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.gen
+}
+
+// signInRefused reports whether Spotify has refused the sign-in the session
+// is on.
+func (s *Session) signInRefused() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.refusedLocked()
+}
+
+func (s *Session) refusedLocked() bool { return s.refused && s.refusedGen == s.gen }
+
+// refuseSignIn records that Spotify refused the sign-in gen. It reports
+// whether that is still the session's sign-in: a refusal of an earlier one
+// changes nothing.
+func (s *Session) refuseSignIn(gen uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if gen != s.gen {
+		return false
+	}
+	s.refused, s.refusedGen = true, gen
+	return true
+}
+
 // needsSignIn reports whether the session cannot call the Web API until the
 // user signs in again: Spotify refused its sign-in, or it has no token.
 func (s *Session) needsSignIn() bool {
-	if s.authDead.Load() {
-		return true
-	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.tokenSource == nil
+	return s.refusedLocked() || s.tokenSource == nil
+}
+
+// tokenStamp says which token a Web API call was made with.
+type tokenStamp struct{ gen, rev uint64 }
+
+// accessToken returns a Web API access token and the sign-in it belongs to.
+// A refresh that Spotify answers with invalid_grant refuses that sign-in and
+// is playlist.ErrNeedsAuth; when the user signed in again while the refresh
+// was in flight, its answer is about the old sign-in, and the new one is
+// asked instead, once.
+func (s *Session) accessToken() (string, tokenStamp, error) {
+	for attempt := 0; ; attempt++ {
+		s.mu.RLock()
+		ts, stamp, refused := s.tokenSource, tokenStamp{s.gen, s.tokenRev}, s.refusedLocked()
+		s.mu.RUnlock()
+		if ts == nil {
+			return "", stamp, fmt.Errorf("spotify: web api token unavailable, run '%s spotify reset' and sign in again: %w", appmeta.ClientName(), playlist.ErrNeedsAuth)
+		}
+		if refused {
+			return "", stamp, errSignInRefused
+		}
+		tok, err := ts.Token()
+		switch {
+		case err == nil:
+			return tok.AccessToken, stamp, nil
+		case !isInvalidGrant(err):
+			return "", stamp, fmt.Errorf("refresh access token: %w", err)
+		case s.refuseSignIn(stamp.gen):
+			return "", stamp, errSignInRefused
+		case attempt > 0:
+			return "", stamp, errors.New("spotify: the sign-in changed during the request; try again")
+		}
+	}
+}
+
+// renewToken gets a new Web API token from the stored refresh token, for the
+// sign-in and token of stamp: after a 401, or for a session that has none.
+// When the token has been replaced since stamp, there is nothing to do.
+// invalid_grant refuses the sign-in (playlist.ErrNeedsAuth, remembered); any
+// other failure is an outage. The credential is never deleted.
+func (s *Session) renewToken(ctx context.Context, stamp tokenStamp) error {
+	restoreMu.Lock()
+	defer restoreMu.Unlock()
+	s.mu.RLock()
+	current, refused, cred := tokenStamp{s.gen, s.tokenRev}, s.refusedLocked(), s.cred
+	s.mu.RUnlock()
+	if current.gen == stamp.gen && refused {
+		return errSignInRefused
+	}
+	if current != stamp {
+		return nil // a newer token is in place already
+	}
+	creds, err := s.renewalCreds(cred)
+	if err != nil || creds.RefreshToken == "" {
+		return playlist.ErrNeedsAuth
+	}
+	token, err := silentTokenRefresh(ctx, s.clientID, creds.RefreshToken)
+	if isInvalidGrant(err) {
+		s.refuseSignIn(stamp.gen)
+		return errSignInRefused
+	}
+	if err != nil {
+		return fmt.Errorf("spotify: web api token unavailable: %w", err)
+	}
+	if token.RefreshToken != "" && token.RefreshToken != creds.RefreshToken {
+		creds.RefreshToken = token.RefreshToken
+		if cred != nil {
+			err = cred.rotate(token.RefreshToken)
+		} else {
+			err = saveCreds(&creds)
+		}
+		if err != nil {
+			return fmt.Errorf("spotify: save rotated refresh token: %w", err)
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if (tokenStamp{s.gen, s.tokenRev}) != stamp {
+		return nil // signed in again meanwhile: that token stands
+	}
+	if cred != nil {
+		s.tokenSource = s.stagedTokenSource(token)
+	} else {
+		s.tokenSource = webAPITokenSource(s.clientID, token, creds)
+	}
+	s.tokenRev++
+	return nil
+}
+
+// renewalCreds is the credential a renewal refreshes from: the session's
+// own, or the stored one for a session built without it.
+func (s *Session) renewalCreds(cred *credential) (storedCreds, error) {
+	if cred != nil {
+		cred.mu.Lock()
+		defer cred.mu.Unlock()
+		return cred.creds, nil
+	}
+	creds, err := loadCreds()
+	if err != nil {
+		return storedCreds{}, err
+	}
+	return *creds, nil
+}
+
+// publish puts a newly built session's parts into s, in place, and reports
+// whether it did. The swap and the teardown of what it replaces happen under
+// the write lock, as upstream's reconnect did, so no stream is being opened
+// on the old player while it is closed.
+//
+// Nothing is published into a closed session, and a silent rebuild is not
+// published over a sign-in that finished after it began (from is the sign-in
+// it set out to renew): the session is renewed already, and the rebuild came
+// from the older credential. An unpublished session is closed once and its
+// credential is not written.
+func (s *Session) publish(fresh *Session, from uint64, silent bool) (bool, error) {
+	s.mu.Lock()
+	switch {
+	case s.closed:
+		s.mu.Unlock()
+		fresh.Close()
+		return false, errSessionClosed
+	case silent && s.gen != from:
+		s.mu.Unlock()
+		fresh.Close()
+		return false, nil
+	}
+	fresh.mu.Lock()
+	oldPlayer, oldSess := s.player, s.sess
+	s.sess, s.player, s.devID, s.tokenSource = fresh.sess, fresh.player, fresh.devID, fresh.tokenSource
+	s.cred = fresh.cred
+	s.gen++
+	s.tokenRev = 0
+	// What fresh held is s's now: its Close must not tear it down.
+	fresh.sess, fresh.player, fresh.closed = nil, nil, true
+	fresh.mu.Unlock()
+	s.cred.commit() // under the lock: the newest sign-in's credential is the last written
+	closeLibrespot(oldPlayer, oldSess)
+	s.mu.Unlock()
+	return true, nil
 }
 
 // signInCall is one interactive sign-in, shared by every caller that asks
@@ -70,15 +349,20 @@ type signInCall struct {
 
 // signIn is Authenticate. It signs in when there is no session, or when the
 // session needs it; a healthy session is left alone. One browser flow runs at
-// a time: a second caller waits for the first's result.
+// a time: a second caller waits for the first's result. A closed provider
+// starts nothing.
 //
 // A broken session is replaced in place (Session.ReconnectInteractive): the
 // new one is built first, so a sign-in that fails or is cancelled leaves the
-// old session, its auth-dead mark and the stored credential as they were, and
-// what a successful one replaces is closed at once. A stream opened before
-// the swap reads its audio over its own connection and is not cut.
+// old session, its refusal and the stored credential as they were, and what
+// a successful one replaces is closed at once. A stream opened before the
+// swap reads its audio over its own connection and is not cut.
 func (p *SpotifyProvider) signIn() error {
 	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return errProviderClosed
+	}
 	sess := p.session
 	if sess != nil && !sess.needsSignIn() {
 		p.mu.Unlock()
@@ -113,17 +397,38 @@ func (p *SpotifyProvider) signIn() error {
 	case call.err != nil:
 	case p.closed:
 		// Quit while the browser was open: keep nothing.
-		call.err = context.Canceled
-		if fresh != nil {
-			go fresh.Close()
-		}
+		call.err = errProviderClosed
 	default:
 		if fresh != nil {
 			p.session = fresh
+			fresh.accept()
+			fresh = nil
 		}
+		p.storedRefused = false
 		p.resetSessionScopedStateLocked()
 	}
 	p.mu.Unlock()
+	if fresh != nil {
+		fresh.Close() // built, and not taken
+	}
 	close(call.done)
 	return call.err
+}
+
+// unauthorized handles a 401 from the Web API for a call made with stamp. It
+// renews the token once. A read may then be sent again (retry); a write never
+// is, whatever the renewal did. A 401 the renewed token gets too means the
+// sign-in is refused.
+func (s *Session) unauthorized(ctx context.Context, method string, stamp tokenStamp, renewed bool) (retry bool, err error) {
+	if renewed {
+		s.refuseSignIn(stamp.gen)
+		return false, errSignInRefused
+	}
+	if err := s.renewToken(ctx, stamp); err != nil {
+		return false, err
+	}
+	if method != http.MethodGet && method != http.MethodHead {
+		return false, errors.New("spotify: the request was not authorised and has not been sent again; the sign-in has been renewed, so try once more")
+	}
+	return true, nil
 }

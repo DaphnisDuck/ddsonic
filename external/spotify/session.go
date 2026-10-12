@@ -21,7 +21,6 @@ import (
 	"github.com/bjarneo/cliamp/internal/appmeta" // ddsonic
 	"github.com/bjarneo/cliamp/internal/browser"
 	"github.com/bjarneo/cliamp/internal/fileutil"
-	"github.com/bjarneo/cliamp/playlist"
 
 	librespot "github.com/devgianlu/go-librespot"
 	librespotPlayer "github.com/devgianlu/go-librespot/player"
@@ -81,7 +80,7 @@ type Session struct {
 	devID       string
 	clientID    string             // Spotify Developer app client ID
 	tokenSource oauth2.TokenSource // auto-refreshing OAuth2 token source
-	authDead    atomic.Bool        // ddsonic: Spotify refused this sign-in (session_auth_ddsonic.go)
+	signInState                    // ddsonic: which sign-in this is, and what became of it (session_auth_ddsonic.go)
 }
 
 type streamContextTransport struct {
@@ -166,7 +165,7 @@ func newSessionFromStored(ctx context.Context, clientID string, creds *storedCre
 		devID = generateDeviceID()
 	}
 
-	sess, err := session.NewSessionFromOptions(ctx, &session.Options{
+	sess, err := newLibrespotSession(ctx, &session.Options{
 		Log:        &librespot.NullLogger{},
 		DeviceType: devicespb.DeviceType_COMPUTER,
 		DeviceId:   devID,
@@ -178,6 +177,8 @@ func newSessionFromStored(ctx context.Context, clientID string, creds *storedCre
 	if err != nil {
 		return nil, fmt.Errorf("spotify: stored auth: %w", err)
 	}
+
+	username, data := sessionIdentity(sess) // ddsonic: a variable, for tests
 
 	// For stored credentials, we need a fresh Web API token via OAuth2.
 	// The spclient's login5 token is NOT suitable for Web API calls.
@@ -196,18 +197,17 @@ func newSessionFromStored(ctx context.Context, clientID string, creds *storedCre
 	// ddsonic: a refresh cut short by the setup's deadline says nothing about
 	// the sign-in. The setup failed for now; the next call tries again.
 	if err := setupExpired(ctx, refreshErr); err != nil {
-		sess.Close()
+		closeLibrespot(nil, sess)
 		return nil, err
 	}
-	// Dead refresh tokens (invalid_grant) never recover — clear so we don't
-	// repeat the same failure on every launch.
+	// ddsonic: a refresh token Spotify refuses never recovers, but the
+	// credential is not ours to delete: it stays until a sign-in that worked
+	// replaces it. The caller remembers the refusal (errStoredSignInRefused)
+	// so that Spotify is not asked again. Upstream cleared the file here.
 	if isInvalidGrant(refreshErr) {
-		applog.UserError("spotify: stored refresh token is invalid; clearing credentials, please sign in again")
-		if _, err := DeleteCreds(); err != nil {
-			applog.Warn("spotify: failed to clear stored credentials: %v", err)
-		}
-		sess.Close()
-		return nil, fmt.Errorf("spotify: %w", playlist.ErrNeedsAuth)
+		applog.UserError("spotify: stored refresh token is no longer accepted; please sign in again")
+		closeLibrespot(nil, sess)
+		return nil, errStoredSignInRefused
 	}
 	if oauthToken == nil {
 		if silentOnly {
@@ -215,23 +215,22 @@ func newSessionFromStored(ctx context.Context, clientID string, creds *storedCre
 			// via spclient; new Web API calls will return ErrNeedsAuth.
 			applog.UserError("spotify: stored auth no longer valid; run '%s spotify reset' or sign in again to fix", appmeta.ClientName()) // ddsonic
 			s := &Session{sess: sess, devID: devID, clientID: clientID}
-			if err := saveCreds(&storedCreds{
-				Username:     sess.Username(),
-				Data:         sess.StoredCredentials(),
+			// ddsonic: staged, and written when the session is taken.
+			s.stageCreds(storedCreds{
+				Username:     username,
+				Data:         data,
 				DeviceID:     devID,
 				RefreshToken: creds.RefreshToken, // preserve for next attempt
-			}); err != nil {
-				applog.UserError("spotify: failed to save credentials: %v", err)
-			}
-			if err := s.initPlayer(); err != nil {
-				sess.Close()
+			})
+			if err := initSessionPlayer(s); err != nil {
+				closeLibrespot(nil, sess)
 				return nil, err
 			}
 			return s, nil
 		}
 		token, err := doWebAPIAuth(ctx, clientID)
 		if err != nil {
-			sess.Close()
+			closeLibrespot(nil, sess)
 			return nil, fmt.Errorf("stored session needs fresh Web API token: %w", err)
 		}
 		oauthToken = token
@@ -239,24 +238,20 @@ func newSessionFromStored(ctx context.Context, clientID string, creds *storedCre
 
 	// Re-save credentials (including refresh token for next launch).
 	stored := storedCreds{
-		Username:     sess.Username(),
-		Data:         sess.StoredCredentials(),
+		Username:     username,
+		Data:         data,
 		DeviceID:     devID,
 		RefreshToken: oauthToken.RefreshToken,
 	}
-	if err := saveCreds(&stored); err != nil {
-		applog.UserError("spotify: failed to save credentials: %v", err)
-	}
 
-	s := &Session{
-		sess:        sess,
-		devID:       devID,
-		clientID:    clientID,
-		tokenSource: webAPITokenSource(clientID, oauthToken, stored),
-	}
+	// ddsonic: the credential is staged, and written when the session is
+	// taken (stageCreds); upstream wrote it here, before the player started.
+	s := &Session{sess: sess, devID: devID, clientID: clientID}
+	s.stageCreds(stored)
+	s.tokenSource = s.stagedTokenSource(oauthToken)
 
-	if err := s.initPlayer(); err != nil {
-		sess.Close()
+	if err := initSessionPlayer(s); err != nil {
+		closeLibrespot(nil, sess)
 		return nil, err
 	}
 	return s, nil
@@ -471,7 +466,7 @@ func oauthCallbackHandler(pending []pendingOAuthFlow, callbackCh chan<- oauthCal
 
 // performOAuth2PKCE runs one OAuth2 PKCE flow and returns its token.
 func performOAuth2PKCE(ctx context.Context, clientID string, scopes []string) (*oauth2.Token, error) {
-	tokens, err := performOAuth2PKCEFlows(ctx, []oauthFlow{{name: "web api", clientID: clientID, scopes: scopes}})
+	tokens, err := interactiveTokens(ctx, []oauthFlow{{name: "web api", clientID: clientID, scopes: scopes}}) // ddsonic: a variable, for tests
 	if err != nil {
 		return nil, err
 	}
@@ -563,7 +558,7 @@ func interactiveOAuthFlows(clientID string) []oauthFlow {
 func newInteractiveSession(ctx context.Context, clientID string) (*Session, error) {
 	devID := generateDeviceID()
 
-	tokens, err := performOAuth2PKCEFlows(ctx, interactiveOAuthFlows(clientID))
+	tokens, err := interactiveTokens(ctx, interactiveOAuthFlows(clientID)) // ddsonic: a variable, for tests
 	if err != nil {
 		return nil, fmt.Errorf("spotify: %w", err)
 	}
@@ -574,7 +569,7 @@ func newInteractiveSession(ctx context.Context, clientID string) (*Session, erro
 	accessToken := playbackToken.AccessToken
 
 	// Create go-librespot session using the keymaster-issued playback token.
-	sess, err := session.NewSessionFromOptions(ctx, &session.Options{
+	sess, err := newLibrespotSession(ctx, &session.Options{
 		Log:        &librespot.NullLogger{},
 		DeviceType: devicespb.DeviceType_COMPUTER,
 		DeviceId:   devID,
@@ -588,24 +583,21 @@ func newInteractiveSession(ctx context.Context, clientID string) (*Session, erro
 	}
 
 	// Persist stored credentials + refresh token for future sessions.
+	username, data := sessionIdentity(sess) // ddsonic: a variable, for tests
 	stored := storedCreds{
-		Username:     sess.Username(),
-		Data:         sess.StoredCredentials(),
+		Username:     username,
+		Data:         data,
 		DeviceID:     devID,
 		RefreshToken: webToken.RefreshToken,
 	}
-	if err := saveCreds(&stored); err != nil {
-		applog.UserError("spotify: failed to save credentials: %v", err)
-	}
 
-	s := &Session{
-		sess:        sess,
-		devID:       devID,
-		clientID:    clientID,
-		tokenSource: webAPITokenSource(clientID, webToken, stored),
-	}
-	if err := s.initPlayer(); err != nil {
-		sess.Close()
+	// ddsonic: the credential is staged, and written when the session is
+	// taken (stageCreds); upstream wrote it here, before the player started.
+	s := &Session{sess: sess, devID: devID, clientID: clientID}
+	s.stageCreds(stored)
+	s.tokenSource = s.stagedTokenSource(webToken)
+	if err := initSessionPlayer(s); err != nil {
+		closeLibrespot(nil, sess)
 		return nil, err
 	}
 	return s, nil
@@ -670,25 +662,19 @@ func (s *Session) NewStream(ctx context.Context, spotID librespot.SpotifyId, bit
 // So if there is no OAuth2 token source, fail loudly with ErrNeedsAuth
 // rather than attempting the call with the wrong token.
 func (s *Session) webApiWithBody(ctx context.Context, method, path string, query url.Values, body io.Reader, contentType string) (*http.Response, error) {
-	s.mu.RLock()
-	ts := s.tokenSource
-	s.mu.RUnlock()
+	resp, _, err := s.webAPIStamped(ctx, method, path, query, body, contentType)
+	return resp, err
+}
 
-	if ts == nil {
-		return nil, fmt.Errorf("spotify: web api token unavailable, run '%s spotify reset' and sign in again: %w", appmeta.ClientName(), playlist.ErrNeedsAuth) // ddsonic
-	}
-	if s.authDead.Load() { // ddsonic: refused already; do not ask again
-		return nil, errSignInRefused
-	}
-	tok, err := ts.Token()
+// webAPIStamped is webApiWithBody, and says which sign-in and token the call
+// was made with. ddsonic: the token comes with the sign-in it belongs to, so
+// that a refusal, or a 401, is held against that one only
+// (session_auth_ddsonic.go). Upstream read the token source and asked it here.
+func (s *Session) webAPIStamped(ctx context.Context, method, path string, query url.Values, body io.Reader, contentType string) (*http.Response, tokenStamp, error) {
+	token, stamp, err := s.accessToken()
 	if err != nil {
-		if isInvalidGrant(err) { // ddsonic: the sign-in is gone, not the network
-			s.authDead.Store(true)
-			return nil, errSignInRefused
-		}
-		return nil, fmt.Errorf("refresh access token: %w", err)
+		return nil, stamp, err
 	}
-	token := tok.AccessToken
 
 	u, _ := url.Parse("https://api.spotify.com")
 	u = u.JoinPath(path)
@@ -698,7 +684,7 @@ func (s *Session) webApiWithBody(ctx context.Context, method, path string, query
 
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
 	if err != nil {
-		return nil, err
+		return nil, stamp, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
@@ -706,32 +692,32 @@ func (s *Session) webApiWithBody(ctx context.Context, method, path string, query
 		req.Header.Set("Content-Type", contentType)
 	}
 
-	return webHTTPClient.Do(req) // ddsonic: bounded
+	resp, err := webHTTPClient.Do(req) // ddsonic: bounded
+	return resp, stamp, err
 }
 
 // Close releases all session and player resources.
 func (s *Session) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.player != nil {
-		s.player.Close()
+	if s.closed { // ddsonic: once; a closed session takes no replacement
+		return
 	}
-	if s.sess != nil {
-		s.sess.Close()
-	}
+	s.closed = true
+	closeLibrespot(s.player, s.sess) // ddsonic: a variable, for tests
 }
 
 // Reconnect rebuilds the session from stored credentials (no browser).
 // Returns an error if stored credentials are missing or the refresh fails.
 func (s *Session) Reconnect(ctx context.Context) error {
-	return s.reconnect(ctx, NewSessionSilent)
+	return s.reconnect(ctx, NewSessionSilent, true) // ddsonic: gives way to a newer sign-in
 }
 
 // ReconnectInteractive forces a fresh browser-based OAuth2 flow.
 // Stored credentials are preserved until the new session succeeds —
 // newInteractiveSession overwrites them via saveCreds on success.
 func (s *Session) ReconnectInteractive(ctx context.Context) error {
-	return s.reconnect(ctx, buildInteractiveSession) // ddsonic: a variable, for tests
+	return s.reconnect(ctx, buildInteractiveSession, false) // ddsonic: a variable, for tests
 }
 
 // reconnect replaces the live session using the provided builder function.
@@ -742,35 +728,27 @@ func (s *Session) ReconnectInteractive(ctx context.Context) error {
 // any in-flight NewStream / webApi RLockers to drain. This guarantees that
 // oldPlayer.Close() is never called while a NewStream is still using the
 // old player pointer.
-func (s *Session) reconnect(ctx context.Context, build func(context.Context, string) (*Session, error)) error {
+//
+// ddsonic: silent says the rebuild came from the stored credential and not
+// from the user. Publication is conditional (publish, session_auth_ddsonic.go):
+// a closed session takes nothing, and a silent rebuild gives way to a sign-in
+// that finished while it ran. Upstream swapped unconditionally.
+func (s *Session) reconnect(ctx context.Context, build func(context.Context, string) (*Session, error), silent bool) error {
 	s.mu.RLock()
-	clientID := s.clientID
+	clientID, from, closed := s.clientID, s.gen, s.closed
 	s.mu.RUnlock()
+	if closed {
+		return errSessionClosed
+	}
 
 	newSess, err := build(ctx, clientID)
 	if err != nil {
 		return fmt.Errorf("spotify: reconnect: %w", err)
 	}
-
-	// Swap and tear down the old session under a single write lock so
-	// in-flight NewStream / webApi calls finish before oldPlayer.Close()
-	// runs. The expensive build() above happened lock-free.
-	s.mu.Lock()
-	oldPlayer := s.player
-	oldSess := s.sess
-	s.sess = newSess.sess
-	s.player = newSess.player
-	s.devID = newSess.devID
-	s.tokenSource = newSess.tokenSource
-	s.authDead.Store(false)            // ddsonic: a new sign-in
-	closeLibrespot(oldPlayer, oldSess) // ddsonic: a variable, for tests
-	s.mu.Unlock()
-
-	// Prevent newSess.Close() from tearing down the resources we just adopted.
-	newSess.mu.Lock()
-	newSess.sess = nil
-	newSess.player = nil
-	newSess.mu.Unlock()
+	published, err := s.publish(newSess, from, silent)
+	if !published {
+		return err
+	}
 
 	const reauthMsg = "spotify: re-authenticated successfully"
 	applog.Info(reauthMsg)

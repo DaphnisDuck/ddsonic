@@ -74,6 +74,9 @@ type SpotifyProvider struct {
 	authCancel context.CancelFunc // cancels any in-progress OAuth flow
 	signingIn  *signInCall        // ddsonic: the sign-in in flight, shared by its callers
 	closed     bool               // ddsonic: Close ran
+	// ddsonic: Spotify refused the stored sign-in at setup. It is not asked
+	// again until the user has signed in (session_auth_ddsonic.go).
+	storedRefused bool
 
 	// Playlist list cache to avoid redundant API calls on provider switch.
 	listCache   []playlist.PlaylistInfo
@@ -105,6 +108,16 @@ func (p *SpotifyProvider) ensureSession() error {
 		p.mu.Unlock()
 		return nil
 	}
+	// ddsonic: a closed provider builds nothing, and a stored sign-in that
+	// Spotify refused is not offered to it again.
+	if p.closed {
+		p.mu.Unlock()
+		return errProviderClosed
+	}
+	if p.storedRefused {
+		p.mu.Unlock()
+		return errStoredSignInRefused
+	}
 	clientID := p.clientID
 	p.mu.Unlock()
 
@@ -117,10 +130,21 @@ func (p *SpotifyProvider) ensureSession() error {
 	defer cancel()
 	sess, err := newSessionSilent(ctx, clientID)
 	if err != nil {
+		if errors.Is(err, errStoredSignInRefused) { // ddsonic: remembered
+			p.mu.Lock()
+			p.storedRefused = true
+			p.mu.Unlock()
+		}
 		return silentSessionError(err) // ddsonic: only credential failures need sign-in
 	}
 	p.mu.Lock()
+	if p.closed { // ddsonic: closed while it was built; not taken, not written
+		p.mu.Unlock()
+		sess.Close()
+		return errProviderClosed
+	}
 	p.session = sess
+	sess.accept() // ddsonic: taken, so its credential is written
 	p.resetSessionScopedStateLocked()
 	p.mu.Unlock()
 	return nil
@@ -712,6 +736,7 @@ func (p *SpotifyProvider) NewStreamer(uri string) (beep.StreamSeekCloser, beep.F
 		return nil, beep.Format{}, 0, fmt.Errorf("spotify: invalid URI %q: %w", uri, err)
 	}
 
+	gen := p.session.generation() // ddsonic: the sign-in this stream is opened under
 	tryStream := func() (*spotifyStreamer, error) {
 		ctx, setupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer setupCancel()
@@ -745,7 +770,7 @@ func (p *SpotifyProvider) NewStreamer(uri string) (beep.StreamSeekCloser, beep.F
 			return nil, beep.Format{}, 0, fmt.Errorf("spotify: stream auth error, silent reconnect failed: %w", reconnErr)
 		}
 		applog.UserWarn("spotify: silent reconnect failed (%v); sign-in required", reconnErr)
-		p.session.authDead.Store(true) // ddsonic: so a sign-in replaces this session
+		p.session.refuseSignIn(gen) // ddsonic: so a sign-in replaces this session
 		return nil, beep.Format{}, 0, fmt.Errorf("spotify: stream auth error, silent reconnect failed: %w", playlist.ErrNeedsAuth)
 	}
 
@@ -760,7 +785,7 @@ func (p *SpotifyProvider) NewStreamer(uri string) (beep.StreamSeekCloser, beep.F
 	// Still failing after a silent reconnect — surface ErrNeedsAuth so the
 	// UI can prompt the user to sign in. Do NOT open a browser from here.
 	applog.UserWarn("spotify: stream still failing after silent reconnect (%v); sign-in required", err)
-	p.session.authDead.Store(true) // ddsonic: so a sign-in replaces this session
+	p.session.refuseSignIn(p.session.generation()) // ddsonic: so a sign-in replaces this session
 	return nil, beep.Format{}, 0, fmt.Errorf("spotify: stream auth error after silent reconnect: %w", playlist.ErrNeedsAuth)
 }
 
@@ -785,6 +810,7 @@ func (p *SpotifyProvider) webAPIWithBody(ctx context.Context, method, path strin
 		}
 	}
 
+	renewed := false // ddsonic: the token was renewed after a 401
 	for attempt := range maxRetries {
 		var reqBody io.Reader
 		if bodyBytes != nil {
@@ -808,9 +834,21 @@ func (p *SpotifyProvider) webAPIWithBody(ctx context.Context, method, path strin
 		if err := sess.restoreWebAPIToken(); err != nil {
 			return nil, err
 		}
-		resp, err := sess.webApiWithBody(ctx, method, path, query, reqBody, contentType)
+		resp, stamp, err := sess.webAPIStamped(ctx, method, path, query, reqBody, contentType)
 		if err != nil {
 			return nil, err
+		}
+		// ddsonic: a 401 renews the token once; a read is then sent once
+		// more, a write never (session_auth_ddsonic.go). Upstream returned it
+		// as any other status, so nothing ever asked for the sign-in.
+		if resp.StatusCode == http.StatusUnauthorized {
+			resp.Body.Close()
+			retry, err := sess.unauthorized(ctx, method, stamp, renewed)
+			if !retry {
+				return nil, err
+			}
+			renewed = true
+			continue
 		}
 		if resp.StatusCode == http.StatusTooManyRequests {
 			resp.Body.Close()

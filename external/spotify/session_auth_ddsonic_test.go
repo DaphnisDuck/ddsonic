@@ -109,8 +109,8 @@ func TestWebAPIRefreshFailureClassification(t *testing.T) {
 			if err == nil || errors.Is(err, playlist.ErrNeedsAuth) != tt.needsAuth {
 				t.Fatalf("webApiWithBody() = %v, want an error, needing sign-in %v", err, tt.needsAuth)
 			}
-			if sess.authDead.Load() != tt.needsAuth {
-				t.Errorf("session marked auth-dead = %v, want %v", sess.authDead.Load(), tt.needsAuth)
+			if sess.signInRefused() != tt.needsAuth {
+				t.Errorf("session marked auth-dead = %v, want %v", sess.signInRefused(), tt.needsAuth)
 			}
 			if got := mustRead(t, path); got != before {
 				t.Errorf("stored credential changed after a failed refresh")
@@ -134,7 +134,7 @@ func TestEnsureWebAPIReportsDeadSession(t *testing.T) {
 	storeCreds(t)
 	calls := fakeTokenEndpoint(t, http.StatusOK, `{"access_token":"new","token_type":"Bearer","expires_in":3600}`)
 	sess := &Session{clientID: "client", tokenSource: tokenSourceFunc(goodToken)}
-	sess.authDead.Store(true)
+	sess.refuseSignIn(sess.generation())
 	p := New(sess, "client", 320)
 
 	if err := p.ensureWebAPI(); !errors.Is(err, playlist.ErrNeedsAuth) {
@@ -194,7 +194,7 @@ func TestHealthyAndRateLimitedCallsAreNotSignIn(t *testing.T) {
 	if _, ok := errors.AsType[*catalog.RateLimitError](err); !ok || errors.Is(err, playlist.ErrNeedsAuth) {
 		t.Errorf("webAPI() when rate limited = %v, want a RateLimitError and no sign-in", err)
 	}
-	if sess.authDead.Load() {
+	if sess.signInRefused() {
 		t.Error("session marked auth-dead by a healthy call or a rate limit")
 	}
 }
@@ -226,7 +226,7 @@ func TestAuthenticate(t *testing.T) {
 			old := &Session{clientID: "client"}
 			if broken == "refused sign-in" {
 				old.tokenSource = tokenSourceFunc(func() (*oauth2.Token, error) { return nil, errors.New("old source used") })
-				old.authDead.Store(true)
+				old.refuseSignIn(old.generation())
 			}
 			p := New(old, "client", 320)
 			p.userID, p.meFetched = "someone", true
@@ -237,8 +237,8 @@ func TestAuthenticate(t *testing.T) {
 			if f.builds.Load() != 1 || f.closes.Load() != 1 {
 				t.Errorf("sign-ins = %d, old sessions closed = %d, want 1 and 1", f.builds.Load(), f.closes.Load())
 			}
-			if p.session != old || old.authDead.Load() {
-				t.Errorf("session replaced in place = %v, still auth-dead = %v", p.session == old, old.authDead.Load())
+			if p.session != old || old.signInRefused() {
+				t.Errorf("session replaced in place = %v, still auth-dead = %v", p.session == old, old.signInRefused())
 			}
 			if old.tokenSource == nil {
 				t.Fatal("no web api token after the sign-in")
@@ -254,34 +254,42 @@ func TestAuthenticate(t *testing.T) {
 }
 
 // A sign-in that fails or is cancelled changes nothing: the session, its
-// auth-dead mark and the stored credential all stay.
+// refusal and the stored credential all stay. The builders are the real
+// ones, so a credential written too early would show here.
 func TestFailedSignInKeepsSessionAndCredentials(t *testing.T) {
 	path := storeCreds(t)
 	before := mustRead(t, path)
-	f := stubSignIn(t, func(context.Context) (*Session, error) { return nil, errors.New("user closed the tab") })
+	b := stubBuild(t)
+	fakeSpotifyHTTP(t, tokenRevoked, apiOK)
+	browser := interactiveTokens
+	interactiveTokens = func(context.Context, []oauthFlow) ([]*oauth2.Token, error) {
+		return nil, errors.New("user closed the tab")
+	}
 	oldSource := tokenSourceFunc(goodToken)
 	old := &Session{clientID: "client", tokenSource: oldSource}
-	old.authDead.Store(true)
+	old.refuseSignIn(old.generation())
 	p := New(old, "client", 320)
 
 	if err := p.Authenticate(); err == nil {
 		t.Fatal("Authenticate() = nil after a failed sign-in")
 	}
-	if p.session != old || !old.authDead.Load() || old.tokenSource == nil {
+	if p.session != old || !old.signInRefused() || old.tokenSource == nil {
 		t.Error("a failed sign-in changed the session")
 	}
-	if f.closes.Load() != 0 {
+	if b.disposals.Load() != 0 {
 		t.Error("a failed sign-in closed the old session")
 	}
 	if got := mustRead(t, path); got != before {
 		t.Error("a failed sign-in changed the stored credential")
 	}
-	// Still broken, so the next explicit sign-in runs again.
-	f.build = func(context.Context) (*Session, error) {
-		return &Session{clientID: "client", tokenSource: tokenSourceFunc(goodToken)}, nil
+	// Still broken, so the next explicit sign-in runs again, and this one
+	// replaces the credential.
+	interactiveTokens = browser
+	if err := p.Authenticate(); err != nil || old.signInRefused() {
+		t.Errorf("second Authenticate() = %v, refused %v, want a working session", err, old.signInRefused())
 	}
-	if err := p.Authenticate(); err != nil || old.authDead.Load() {
-		t.Errorf("second Authenticate() = %v, auth-dead %v, want a working session", err, old.authDead.Load())
+	if got := mustRead(t, path); got == before {
+		t.Error("the sign-in that worked did not replace the stored credential")
 	}
 }
 
@@ -320,30 +328,63 @@ func TestDuplicateSignInRequestsRunOneFlow(t *testing.T) {
 	}
 }
 
-// Quitting ends a sign-in in flight and installs no session afterwards.
-func TestCloseCancelsSignIn(t *testing.T) {
-	started := make(chan struct{})
-	stubSignIn(t, func(ctx context.Context) (*Session, error) {
-		close(started)
-		<-ctx.Done()
-		return nil, ctx.Err()
-	})
-	p := New(nil, "client", 320)
+// Quitting ends a sign-in in flight and installs no session afterwards,
+// whether the sign-in stops for the cancellation or has its session already.
+func TestCloseDuringSignIn(t *testing.T) {
+	for _, obeys := range []bool{true, false} {
+		name := map[bool]string{true: "the sign-in stops when cancelled", false: "the sign-in finishes anyway"}[obeys]
+		t.Run(name, func(t *testing.T) {
+			started, release := make(chan struct{}), make(chan struct{})
+			f := stubSignIn(t, func(ctx context.Context) (*Session, error) {
+				close(started)
+				if obeys {
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}
+				<-release
+				return &Session{clientID: "client", tokenSource: tokenSourceFunc(goodToken)}, nil
+			})
+			p := New(nil, "client", 320)
 
-	done := make(chan error, 1)
-	go func() { done <- p.Authenticate() }()
-	<-started
-	p.Close()
-	select {
-	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
-			t.Errorf("Authenticate() = %v after Close, want context.Canceled", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Authenticate() still running after Close")
-	}
-	if p.session != nil {
-		t.Error("a session was installed after Close")
+			done := make(chan error, 1)
+			go func() { done <- p.Authenticate() }()
+			<-started
+			p.Close()
+			select {
+			case err := <-done:
+				if obeys {
+					if !errors.Is(err, context.Canceled) {
+						t.Errorf("Authenticate() = %v after Close, want context.Canceled", err)
+					}
+				} else {
+					t.Fatalf("Authenticate() returned %v before its sign-in had finished", err)
+				}
+			case <-time.After(100 * time.Millisecond):
+				if obeys {
+					t.Fatal("Authenticate() still running after Close")
+				}
+			}
+			if !obeys {
+				close(release)
+				select {
+				case err := <-done:
+					if !errors.Is(err, context.Canceled) {
+						t.Errorf("Authenticate() = %v for a session that arrived after Close, want context.Canceled", err)
+					}
+				case <-time.After(2 * time.Second):
+					t.Fatal("Authenticate() never returned")
+				}
+				if f.closes.Load() != 1 {
+					t.Errorf("the session that arrived after Close was closed %d times, want 1", f.closes.Load())
+				}
+			}
+			if p.session != nil {
+				t.Error("a session was installed after Close")
+			}
+			if err := p.Authenticate(); err == nil || f.builds.Load() != 1 {
+				t.Errorf("Authenticate() on the closed provider = %v after %d sign-ins, want an error and no new sign-in", err, f.builds.Load())
+			}
+		})
 	}
 }
 
@@ -406,8 +447,8 @@ func TestPlaybackReconnectClassification(t *testing.T) {
 			if err == nil || errors.Is(err, playlist.ErrNeedsAuth) != tt.needsAuth {
 				t.Fatalf("NewStreamer() = %v, want an error, needing sign-in %v", err, tt.needsAuth)
 			}
-			if sess.authDead.Load() != tt.needsAuth {
-				t.Errorf("session marked auth-dead = %v, want %v", sess.authDead.Load(), tt.needsAuth)
+			if sess.signInRefused() != tt.needsAuth {
+				t.Errorf("session marked auth-dead = %v, want %v", sess.signInRefused(), tt.needsAuth)
 			}
 			if reconnects.Load() != 1 {
 				t.Errorf("silent reconnects = %d, want 1", reconnects.Load())
@@ -425,9 +466,9 @@ func TestPlaybackNetworkFailureIsNotAuth(t *testing.T) {
 		p := New(sess, "client", 320)
 
 		_, _, _, err := p.NewStreamer(testTrackURI)
-		if err == nil || errors.Is(err, playlist.ErrNeedsAuth) || sess.authDead.Load() || reconnects.Load() != 0 {
+		if err == nil || errors.Is(err, playlist.ErrNeedsAuth) || sess.signInRefused() || reconnects.Load() != 0 {
 			t.Errorf("NewStreamer() after %v = %v (auth-dead %v, reconnects %d), want a plain error",
-				openErr, err, sess.authDead.Load(), reconnects.Load())
+				openErr, err, sess.signInRefused(), reconnects.Load())
 		}
 	}
 }
@@ -454,7 +495,29 @@ func TestSessionReplacementUnderOpenStream(t *testing.T) {
 		t.Fatalf("Stream() before the sign-in = %d, %v", n, ok)
 	}
 
-	sess.authDead.Store(true) // Spotify refuses the sign-in mid-track
+	// A Web API call made under the old sign-in is still waiting for its
+	// token when the user signs in again, and is refused afterwards.
+	oldEntered, oldRelease := make(chan struct{}), make(chan struct{})
+	var oldCalls atomic.Int32
+	sess.tokenSource = tokenSourceFunc(func() (*oauth2.Token, error) {
+		if oldCalls.Add(1) == 1 {
+			close(oldEntered)
+			<-oldRelease
+		}
+		return nil, &oauth2.RetrieveError{ErrorCode: "invalid_grant"}
+	})
+	fakeSpotifyHTTP(t, tokenOK, apiOK)
+	late := make(chan error, 1)
+	go func() {
+		resp, err := sess.webApiWithBody(context.Background(), "GET", "/v1/me", nil, nil, "")
+		if resp != nil {
+			resp.Body.Close()
+		}
+		late <- err
+	}()
+	<-oldEntered
+
+	sess.refuseSignIn(sess.generation()) // Spotify refuses the sign-in mid-track
 	// Reading goes on while the sign-in replaces the session.
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -483,8 +546,12 @@ func TestSessionReplacementUnderOpenStream(t *testing.T) {
 	if n, ok := playing.Stream(samples); !ok || n != len(samples) || playing.Err() != nil {
 		t.Errorf("Stream() after the sign-in = %d, %v, err %v, want it to keep playing", n, ok, playing.Err())
 	}
-	if p.session != sess || sess.authDead.Load() {
+	if p.session != sess || sess.signInRefused() {
 		t.Error("the provider is not on a working session after the sign-in")
+	}
+	close(oldRelease) // the old sign-in's refusal arrives after the swap
+	if err := <-late; err != nil || sess.signInRefused() {
+		t.Errorf("the call made under the old sign-in = %v, session refused = %v; want it through on the new one", err, sess.signInRefused())
 	}
 	next, _, _, err := p.NewStreamer(testTrackURI)
 	if err != nil || opens.Load() != 2 {
