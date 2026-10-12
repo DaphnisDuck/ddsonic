@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/bjarneo/cliamp/catalog"
-	"github.com/bjarneo/cliamp/playlist"
 	"github.com/bjarneo/cliamp/provider"
 )
 
@@ -286,13 +285,9 @@ func (p *SpotifyProvider) webAPIOnce(ctx context.Context, method, path string, q
 	if err := p.rateLimited(); err != nil {
 		return nil, err
 	}
-	p.mu.Lock()
-	sess := p.session
-	p.mu.Unlock()
-	if sess == nil {
-		return nil, playlist.ErrNeedsAuth
-	}
-	resp, err := sess.webApiWithBody(ctx, method, path, query, nil, "")
+	// The request and what its answer says about the sign-in are the shared
+	// path's (authorized); only the rule for rate limits below is this one's.
+	resp, err := p.authorized(ctx, method, path, query, nil, "", nil)
 	if err != nil {
 		return nil, err
 	}

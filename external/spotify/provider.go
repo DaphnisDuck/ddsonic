@@ -801,7 +801,6 @@ func (p *SpotifyProvider) webAPIWithBody(ctx context.Context, method, path strin
 		}
 	}
 
-	var renewed *uint64 // ddsonic: the sign-in whose token was renewed after a 401
 	// ddsonic: the sign-in a write belongs to, fixed before the first wait
 	// here: the caller's action (WithSignIn), or this request's own.
 	var pin *signInPin
@@ -809,50 +808,17 @@ func (p *SpotifyProvider) webAPIWithBody(ctx context.Context, method, path strin
 		pin = p.signInPinFrom(ctx)
 	}
 	for attempt := range maxRetries {
-		var reqBody io.Reader
-		if bodyBytes != nil {
-			reqBody = bytes.NewReader(bodyBytes)
-		}
-
 		if err := p.rateLimited(); err != nil { // ddsonic: blocked, do not ask
 			return nil, err
 		}
-		// ddsonic: read the session under the lock; the catalog sync calls
-		// this from a background goroutine while Close may clear it.
-		p.mu.Lock()
-		sess := p.session
-		p.mu.Unlock()
-		if sess == nil {
-			return nil, playlist.ErrNeedsAuth
-		}
-		// ddsonic: a write stays with the sign-in it was asked under, through
-		// every wait and retry here, and across the requests of one action
-		// (WithSignIn). Under another sign-in it is not sent.
-		if pin != nil && !pin.holds(sess) {
-			return nil, errSignInChanged
-		}
-		// ddsonic: a session whose token refresh failed for a passing reason
-		// tries its stored refresh token again, as the catalog sync does, so
-		// an outage does not read as "sign in again" in search or the picker.
-		if err := sess.restoreWebAPIToken(); err != nil {
-			return nil, err
-		}
-		resp, stamp, err := sess.webAPIStamped(ctx, method, path, query, reqBody, contentType, pin)
+		// ddsonic: the request is sent, and what its answer says about the
+		// sign-in dealt with, in the one place every Web API call shares
+		// (authorized, session_auth_ddsonic.go). What is left here is this
+		// helper's own rule for rate limits. Upstream read the session and
+		// sent the request here, and returned a 401 as any other status.
+		resp, err := p.authorized(ctx, method, path, query, bodyBytes, contentType, pin)
 		if err != nil {
 			return nil, err
-		}
-		// ddsonic: a 401 renews the token once for its sign-in; a read is
-		// then sent once more, a write never (session_auth_ddsonic.go).
-		// Upstream returned it as any other status, so nothing ever asked
-		// for the sign-in.
-		if resp.StatusCode == http.StatusUnauthorized {
-			resp.Body.Close()
-			retry, err := sess.unauthorized(ctx, method, stamp, renewed != nil && *renewed == stamp.gen)
-			if !retry {
-				return nil, err
-			}
-			renewed = &stamp.gen
-			continue
 		}
 		if resp.StatusCode == http.StatusTooManyRequests {
 			resp.Body.Close()

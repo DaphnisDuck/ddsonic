@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bjarneo/cliamp/internal/appmeta" // ddsonic
 	"github.com/bjarneo/cliamp/lyrics"
 	"github.com/bjarneo/cliamp/playlist"
 )
@@ -52,15 +51,12 @@ func (s *Session) trackLyrics(ctx context.Context, trackID string) ([]lyrics.Lin
 		return nil, lyrics.ErrNotFound
 	}
 
-	s.mu.RLock()
-	ts := s.tokenSource
-	s.mu.RUnlock()
-	if ts == nil {
-		return nil, fmt.Errorf("spotify: web api token unavailable, run '%s spotify reset' and sign in again: %w", appmeta.ClientName(), playlist.ErrNeedsAuth) // ddsonic
-	}
-	tok, err := ts.Token()
+	// ddsonic: the token comes from the one place every call gets it, so a
+	// refusal here is held against the right sign-in and token
+	// (accessToken, session_auth_ddsonic.go). Upstream asked the source here.
+	accessToken, _, err := s.accessToken(false, nil)
 	if err != nil {
-		return nil, fmt.Errorf("refresh access token: %w", err)
+		return nil, err
 	}
 
 	u := "https://spclient.wg.spotify.com/color-lyrics/v2/track/" + url.PathEscape(trackID)
@@ -69,7 +65,7 @@ func (s *Session) trackLyrics(ctx context.Context, trackID string) ([]lyrics.Lin
 		return nil, fmt.Errorf("build spotify lyrics request: %w", err)
 	}
 	// The color-lyrics endpoint rejects tokens without this platform marker.
-	req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("app-platform", "WebPlayer")
 	req.Header.Set("Accept", "application/json")
 

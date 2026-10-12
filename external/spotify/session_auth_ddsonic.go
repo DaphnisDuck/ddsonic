@@ -24,10 +24,13 @@ package spotify
 //     credential is not written.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"sync"
 	"testing"
 	"time"
@@ -115,8 +118,10 @@ type signInState struct {
 	refusedRev   uint64
 	refusedWhole bool
 	closed       bool
-	// cred is the credential that belongs to this sign-in.
-	cred *credential
+	// cred is the credential that belongs to this sign-in, and source the
+	// identity of the token source that may rotate it.
+	cred   *credential
+	source *sourceID
 }
 
 // credMu guards every credential, and with it every write of the credential
@@ -147,13 +152,69 @@ func (s *Session) stageCreds(creds storedCreds) {
 // rotated refresh token is kept with it, and written only once the credential
 // has been, and only while it is the session's. The caller owns s (it is
 // building it, or holds s.mu).
+//
+// A token source writes only while it is its session's: the one made for the
+// session's sign-in and token revision as they are now. Each source carries
+// that identity (sourceID), and its rotation is checked against the session
+// under the session's lock, which a renewal or a sign-in takes to put a new
+// source in place. One that has been replaced holds an older answer, and
+// writes nothing when it arrives.
 func (s *Session) stagedTokenSource(token *oauth2.Token) oauth2.TokenSource {
 	cred := s.cred
+	id := &sourceID{owner: s, stamp: tokenStamp{s.gen, s.tokenRev}}
+	s.source = id
 	return &persistingTokenSource{
 		source:       spotifyOAuthConfig(s.clientID, oauthScopes).TokenSource(tokenContext(), token),
 		refreshToken: cred.snapshot().RefreshToken,
-		persist:      cred.rotate,
+		persist:      func(refreshToken string) error { return id.rotate(cred, refreshToken) },
 	}
+}
+
+// sourceID says whose token source one is: the session that owns it, and
+// the sign-in and token revision it was made for. A source built with a
+// session that a sign-in then publishes into another passes to that one.
+type sourceID struct {
+	mu    sync.Mutex
+	owner *Session
+	stamp tokenStamp
+}
+
+func (id *sourceID) get() (*Session, tokenStamp) {
+	id.mu.Lock()
+	defer id.mu.Unlock()
+	return id.owner, id.stamp
+}
+
+// adopt passes the source to owner, as its source for stamp.
+func (id *sourceID) adopt(owner *Session, stamp tokenStamp) {
+	if id == nil {
+		return
+	}
+	id.mu.Lock()
+	defer id.mu.Unlock()
+	id.owner, id.stamp = owner, stamp
+}
+
+// rotate records a refresh token this source was given, if the source is
+// still its session's and cred still the session's credential; otherwise it
+// does nothing. The check and the write are under the session's lock.
+func (id *sourceID) rotate(cred *credential, refreshToken string) error {
+	for range 2 { // once more if the source changed hands meanwhile
+		owner, stamp := id.get()
+		owner.mu.RLock()
+		if again, _ := id.get(); again != owner {
+			owner.mu.RUnlock()
+			continue
+		}
+		current := !owner.closed && owner.gen == stamp.gen && owner.tokenRev == stamp.rev && owner.cred == cred && owner.source == id
+		var err error
+		if current {
+			err = cred.rotate(refreshToken)
+		}
+		owner.mu.RUnlock()
+		return err
+	}
+	return nil
 }
 
 func (c *credential) snapshot() storedCreds {
@@ -459,8 +520,10 @@ func (s *Session) renewToken(ctx context.Context, stamp tokenStamp) error {
 			return fmt.Errorf("spotify: save rotated refresh token: %w", err)
 		}
 	}
-	s.tokenSource = s.stagedTokenSource(token)
+	// The new source is made for the new revision: the one it replaces is
+	// no longer the session's from here, and its rotations write nothing.
 	s.tokenRev++
+	s.tokenSource = s.stagedTokenSource(token)
 	return nil
 }
 
@@ -508,8 +571,12 @@ func (s *Session) publish(fresh *Session, from uint64, silent bool, published fu
 	s.cred = fresh.cred
 	s.gen++
 	s.tokenRev = 0
+	// The built session's token source is this session's now, for the new
+	// sign-in; the one it replaces is not.
+	s.source = fresh.source
+	s.source.adopt(s, tokenStamp{s.gen, 0})
 	// What fresh held is s's now: its Close must not tear it down.
-	fresh.sess, fresh.player, fresh.cred, fresh.closed = nil, nil, nil, true
+	fresh.sess, fresh.player, fresh.cred, fresh.source, fresh.closed = nil, nil, nil, nil, true
 	fresh.mu.Unlock()
 	if published != nil {
 		published() // with the swap, as one step for whoever reads both
@@ -758,4 +825,58 @@ func (guardedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 func init() {
 	tokenHTTPClient.Transport = guardedTransport{}
 	webHTTPClient.Transport = guardedTransport{}
+}
+
+// authorized sends one Web API request with the session's token and deals
+// with what the answer says about the sign-in. Every Web API call goes
+// through it: the helper that waits out rate limits (webAPIWithBody) and the
+// one that does not (webAPIOnce) differ only in what they do with a 429.
+//
+// It reads the session, keeps a write to its action's sign-in (pin), restores
+// a token that was lost to a passing failure, and sends. A 401 is handled
+// here, once per sign-in (unauthorized): the token is renewed and a read sent
+// once more; a write is not sent again; a 401 the renewed token gets too is
+// playlist.ErrNeedsAuth. Any other answer, a 429 included, is returned as it
+// came, for the caller's own policy.
+func (p *SpotifyProvider) authorized(ctx context.Context, method, path string, query url.Values, body []byte, contentType string, pin *signInPin) (*http.Response, error) {
+	var renewed *uint64 // the sign-in whose token was renewed after a 401
+	// A 401 costs one renewal and one more request per sign-in; the bound is
+	// against sign-ins changing under the call, which each cost a round.
+	for range 4 {
+		// Read under the lock: the catalog sync calls this from a
+		// background goroutine while Close may clear the session.
+		p.mu.Lock()
+		sess := p.session
+		p.mu.Unlock()
+		if sess == nil {
+			return nil, playlist.ErrNeedsAuth
+		}
+		if pin != nil && !pin.holds(sess) {
+			return nil, errSignInChanged
+		}
+		// A session whose token refresh failed for a passing reason tries
+		// its stored refresh token again, so an outage does not read as
+		// "sign in again".
+		if err := sess.restoreWebAPIToken(); err != nil {
+			return nil, err
+		}
+		var reqBody io.Reader
+		if body != nil {
+			reqBody = bytes.NewReader(body)
+		}
+		resp, stamp, err := sess.webAPIStamped(ctx, method, path, query, reqBody, contentType, pin)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusUnauthorized {
+			return resp, nil
+		}
+		resp.Body.Close()
+		retry, err := sess.unauthorized(ctx, method, stamp, renewed != nil && *renewed == stamp.gen)
+		if !retry {
+			return nil, err
+		}
+		renewed = &stamp.gen
+	}
+	return nil, errors.New("spotify: the Spotify session kept changing during the request; try again")
 }

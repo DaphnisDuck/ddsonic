@@ -728,7 +728,11 @@ func TestCredentialSnapshotsAreLocked(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := range 50 {
 		wg.Go(func() { _ = cred.rotate(fmt.Sprintf("rotated-%d", i)) })
-		wg.Go(func() { _ = sess.stagedTokenSource(&oauth2.Token{AccessToken: "a", Expiry: time.Now().Add(time.Hour)}) })
+		wg.Go(func() {
+			sess.mu.Lock() // as its callers hold it: the source is the session's
+			defer sess.mu.Unlock()
+			_ = sess.stagedTokenSource(&oauth2.Token{AccessToken: "a", Expiry: time.Now().Add(time.Hour)})
+		})
 		wg.Go(func() { _, _ = sess.renewalCreds(cred) })
 	}
 	wg.Wait()
@@ -1512,6 +1516,253 @@ func TestRefusedWriteStaysNotAppliedThroughAnOutage(t *testing.T) {
 		err := post(New(sess, "client", 320))
 		if err == nil || api.sent("POST") != 1 || errors.Is(err, playlist.ErrNeedsAuth) || !provider.NotApplied(err) {
 			t.Errorf("the write = %v after %d writes; want one write, no sign-in, and not applied", err, api.sent("POST"))
+		}
+	})
+}
+
+// expiredStagedSession is a session through acceptance on the real staged
+// token source, its access token run out, so its next call refreshes.
+func expiredStagedSession(t *testing.T) *Session {
+	t.Helper()
+	s := &Session{clientID: "client"}
+	s.stageCreds(storedCreds{Username: "user", Data: []byte("blob"), DeviceID: "dev", RefreshToken: "original"})
+	s.accept()
+	s.tokenSource = s.stagedTokenSource(&oauth2.Token{AccessToken: "expired", RefreshToken: "original", Expiry: time.Now().Add(-time.Hour)})
+	return s
+}
+
+func storedRefreshToken(t *testing.T) string {
+	t.Helper()
+	creds, err := loadCreds()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return creds.RefreshToken
+}
+
+func tokenAnswer(access, refresh string) (int, string) {
+	return http.StatusOK, fmt.Sprintf(`{"access_token":%q,"token_type":"Bearer","refresh_token":%q,"expires_in":3600}`, access, refresh)
+}
+
+// A token source writes the refresh token Spotify rotates only while it is
+// the session's token source. One that a renewal has replaced holds an older
+// answer: when that answer arrives late, the newer credential on disk and in
+// memory stays. (The first case is adapted from the reviewer's round-7
+// probe, on the real staged token source.)
+func TestObsoleteTokenSourceDoesNotRewriteCredential(t *testing.T) {
+	t.Run("its answer arrives after the renewal", func(t *testing.T) {
+		storeCreds(t)
+		entered, release := make(chan struct{}), make(chan struct{})
+		fakeSpotifyHTTP(t, func(n int) (int, string) {
+			if n == 1 { // the token source's own refresh: issued first, delivered last
+				close(entered)
+				<-release
+				return tokenAnswer("auto-access", "auto-issued-earlier")
+			}
+			return tokenAnswer("standing-access", "forced-issued-later")
+		}, apiOK)
+		s := expiredStagedSession(t)
+		p := New(s, "client", 320)
+
+		done := make(chan error, 1)
+		go func() {
+			resp, err := p.webAPI(context.Background(), "GET", "/v1/me", nil)
+			if resp != nil {
+				resp.Body.Close()
+			}
+			done <- err
+		}()
+		<-entered
+		if err := s.renewToken(context.Background(), tokenStamp{}); err != nil {
+			t.Fatal(err)
+		}
+		if got := storedRefreshToken(t); got != "forced-issued-later" {
+			t.Fatalf("the renewal stored %q, want its own refresh token", got)
+		}
+		close(release)
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		if got := storedRefreshToken(t); got != "forced-issued-later" {
+			t.Errorf("the replaced token source rewrote the stored credential to %q", got)
+		}
+		if got := s.cred.snapshot().RefreshToken; got != "forced-issued-later" {
+			t.Errorf("the replaced token source rewrote the credential in memory to %q", got)
+		}
+	})
+	t.Run("the session's own token source still rotates", func(t *testing.T) {
+		storeCreds(t)
+		fakeSpotifyHTTP(t, func(int) (int, string) { return tokenAnswer("auto-access", "rotated-by-the-source") }, apiOK)
+		s := expiredStagedSession(t)
+		resp, err := New(s, "client", 320).webAPI(context.Background(), "GET", "/v1/me", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if got := storedRefreshToken(t); got != "rotated-by-the-source" {
+			t.Errorf("stored refresh token = %q, want the one the standing source was given", got)
+		}
+	})
+	t.Run("a session published by a sign-in rotates as itself", func(t *testing.T) {
+		t.Setenv("CLIAMP_CONFIG_DIR", t.TempDir())
+		stubBuild(t)
+		fakeSpotifyHTTP(t, func(int) (int, string) { return tokenAnswer("auto-access", "rotated-after-sign-in") }, apiOK)
+		old := brokenSession()
+		p := New(old, "client", 320)
+		if err := p.Authenticate(); err != nil { // the built session's source is adopted by old
+			t.Fatal(err)
+		}
+		// The adopted token runs out; its source refreshes and rotates.
+		old.mu.Lock()
+		old.tokenSource = old.stagedTokenSource(&oauth2.Token{AccessToken: "expired", RefreshToken: "new-refresh", Expiry: time.Now().Add(-time.Hour)})
+		old.mu.Unlock()
+		resp, err := p.webAPI(context.Background(), "GET", "/v1/me", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if got := storedRefreshToken(t); got != "rotated-after-sign-in" {
+			t.Errorf("stored refresh token = %q, want the adopted source's rotation", got)
+		}
+	})
+	t.Run("a token source whose session was closed or replaced writes nothing", func(t *testing.T) {
+		for _, ending := range []string{"closed", "replaced by a sign-in"} {
+			t.Setenv("CLIAMP_CONFIG_DIR", t.TempDir())
+			stubBuild(t)
+			entered, release := make(chan struct{}), make(chan struct{})
+			fakeSpotifyHTTP(t, func(n int) (int, string) {
+				if n == 1 {
+					close(entered)
+					<-release
+				}
+				return tokenAnswer("late-access", "late-rotation")
+			}, apiOK)
+			p, s := signedInSession(t)
+			s.mu.Lock()
+			s.tokenSource = s.stagedTokenSource(&oauth2.Token{AccessToken: "expired", RefreshToken: "new-refresh", Expiry: time.Now().Add(-time.Hour)})
+			source := s.tokenSource
+			s.mu.Unlock()
+
+			done := make(chan struct{})
+			go func() { _, _ = source.Token(); close(done) }()
+			<-entered
+			if ending == "closed" {
+				p.Close()
+			} else {
+				s.refuseSignIn(s.generation())
+				if err := p.Authenticate(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := storedRefreshToken(t)
+			close(release)
+			<-done
+			if got := storedRefreshToken(t); got != before || got == "late-rotation" {
+				t.Errorf("%s: the old token source rewrote the stored credential to %q", ending, got)
+			}
+		}
+	})
+}
+
+// The catalog's background album read answers a 401 as every read does: the
+// token is renewed once and the read sent once more; a 401 the renewed token
+// gets too is sign-in required. It keeps its own rule for rate limits: none
+// is waited for. (The first case is adapted from the reviewer's round-7
+// probe.)
+func TestBackgroundAlbumReadRecoversFrom401(t *testing.T) {
+	read := func(p *SpotifyProvider) error {
+		_, err := p.AlbumTrackRecordsOnce(context.Background(), "album")
+		return err
+	}
+	healthy := func() (*SpotifyProvider, *Session) {
+		s := &Session{clientID: "client", tokenSource: tokenSourceFunc(goodToken)}
+		return New(s, "client", 320), s
+	}
+	always := func(status int, header http.Header) func(int, *http.Request) (int, http.Header) {
+		return func(int, *http.Request) (int, http.Header) { return status, header }
+	}
+
+	t.Run("a 401 that survives the renewal needs sign-in", func(t *testing.T) {
+		storeCreds(t)
+		h := fakeSpotifyHTTP(t, tokenOK, always(http.StatusUnauthorized, nil))
+		p, s := healthy()
+		err := read(p)
+		if !errors.Is(err, playlist.ErrNeedsAuth) || !s.signInRefused() {
+			t.Fatalf("the read = %v (refused %v), want ErrNeedsAuth and the session refused", err, s.signInRefused())
+		}
+		if h.apiCalls.Load() != 2 || h.tokenCalls.Load() != 1 {
+			t.Errorf("requests = %d, renewals = %d; want 2 and 1", h.apiCalls.Load(), h.tokenCalls.Load())
+		}
+	})
+	t.Run("a first 401 alone refuses nothing: the renewed token is tried", func(t *testing.T) {
+		storeCreds(t)
+		h := fakeSpotifyHTTP(t, tokenOK, func(n int, _ *http.Request) (int, http.Header) {
+			if n == 1 {
+				return http.StatusUnauthorized, nil
+			}
+			return http.StatusOK, nil
+		})
+		p, s := healthy()
+		err := read(p)
+		if errors.Is(err, playlist.ErrNeedsAuth) || s.signInRefused() {
+			t.Fatalf("the read = %v (refused %v): one 401 was taken for a revoked sign-in", err, s.signInRefused())
+		}
+		if h.apiCalls.Load() < 2 || h.tokenCalls.Load() != 1 {
+			t.Errorf("requests = %d, renewals = %d; want the read sent again after one renewal", h.apiCalls.Load(), h.tokenCalls.Load())
+		}
+	})
+	t.Run("403, 503 and an outage are what they were", func(t *testing.T) {
+		for _, status := range []int{http.StatusForbidden, http.StatusServiceUnavailable} {
+			storeCreds(t)
+			h := fakeSpotifyHTTP(t, tokenOK, always(status, nil))
+			p, s := healthy()
+			err := read(p)
+			var se *StatusError
+			if !errors.As(err, &se) || errors.Is(err, playlist.ErrNeedsAuth) || s.signInRefused() || h.apiCalls.Load() != 1 || h.tokenCalls.Load() != 0 {
+				t.Errorf("%d: the read = %v after %d requests and %d renewals (refused %v); want a status error, 1 and 0", status, err, h.apiCalls.Load(), h.tokenCalls.Load(), s.signInRefused())
+			}
+		}
+		storeCreds(t)
+		fakeSpotifyHTTP(t, func(int) (int, string) { return http.StatusServiceUnavailable, "unavailable" }, always(http.StatusUnauthorized, nil))
+		p, s := healthy()
+		if err := read(p); err == nil || errors.Is(err, playlist.ErrNeedsAuth) || s.signInRefused() {
+			t.Errorf("a renewal that cannot reach Spotify: the read = %v (refused %v), want an outage", err, s.signInRefused())
+		}
+	})
+	t.Run("a rate limit is not waited for", func(t *testing.T) {
+		storeCreds(t)
+		h := fakeSpotifyHTTP(t, tokenOK, always(http.StatusTooManyRequests, http.Header{"Retry-After": {"1"}}))
+		p, s := healthy()
+		start := time.Now()
+		err := read(p)
+		if _, ok := errors.AsType[*catalog.RateLimitError](err); !ok || h.apiCalls.Load() != 1 || time.Since(start) > 500*time.Millisecond || s.signInRefused() {
+			t.Errorf("the read = %v after %d requests in %v; want a RateLimitError at once, after 1", err, h.apiCalls.Load(), time.Since(start))
+		}
+	})
+	t.Run("a 401 for the old sign-in, after the user signed in again", func(t *testing.T) {
+		storeCreds(t)
+		stubBuild(t)
+		entered, release := make(chan struct{}), make(chan struct{})
+		var n atomic.Int32
+		fakeSpotifyHTTP(t, tokenOK, func(int, *http.Request) (int, http.Header) {
+			if n.Add(1) == 1 {
+				close(entered)
+				<-release
+				return http.StatusUnauthorized, nil
+			}
+			return http.StatusOK, nil
+		})
+		p, s := healthy()
+		done := make(chan error, 1)
+		go func() { done <- read(p) }()
+		<-entered
+		s.refuseSignIn(s.generation())
+		if err := p.Authenticate(); err != nil {
+			t.Fatal(err)
+		}
+		close(release)
+		if err := <-done; errors.Is(err, playlist.ErrNeedsAuth) || s.signInRefused() {
+			t.Errorf("the read = %v (refused %v): the old sign-in's 401 reached the new one", err, s.signInRefused())
 		}
 	})
 }
