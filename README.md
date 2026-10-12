@@ -103,7 +103,7 @@ ddsonic setup             # Spotify, YouTube Music and your music folder; each i
 ddsonic                   # open the library
 ```
 
-With nothing set up, ddsonic still opens with Local (your `~/Music` folder) and Radio. Opening Spotify for the first time asks you to press `Enter` and sign in in your browser.
+With nothing set up, ddsonic still opens with Local (your `~/Music` folder) and Radio. With Spotify set up and not signed in yet, the library's heading reads `Spotify sign-in required`: open **Spotify**, press `Enter` on **Sign in to Spotify**, and finish in your browser. Your library syncs as soon as you have signed in.
 
 In the library:
 

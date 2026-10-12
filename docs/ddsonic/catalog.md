@@ -45,7 +45,7 @@ A sync either applies completely or changes nothing:
 
 - **Spotify:** if any page of a collection fails, or the library changes while it's being read, that collection keeps what it had.
 - **Local:** if the music folder is missing, or is empty while the catalog holds files (an unmounted drive, for example), the index is left as it is. Files under a folder ddsonic can't read are kept too.
-- **Sign-in:** a Spotify sign-in that fails because Spotify is unreachable or down is reported as that error, not as "sign-in required". The sync retries by itself.
+- **Sign-in:** a Spotify sign-in that fails because Spotify is unreachable or down is reported as that error, not as "sign-in required". The sync retries by itself. When the sync does need you to sign in (never signed in, reset, or revoked by Spotify), the heading reads `Spotify sign-in required` and Spotify's menu offers **Sign in to Spotify** ([navigation.md](navigation.md)); the catalog keeps what it had. A sign-in Spotify revokes while ddsonic runs is noticed at the next call; the stored credential is replaced only when you have signed in again.
 
 ## Settings
 
