@@ -68,3 +68,25 @@ func TestDaemonAddManyIsOneAction(t *testing.T) {
 		t.Errorf("the error %q does not say that 1 of 3 tracks was added, and why it stopped", resp.Error)
 	}
 }
+
+func (w *daemonActionWriter) CreatePlaylist(ctx context.Context, _ string) (string, error) {
+	w.adds = append(w.adds, ctx.Value(daemonActionKey{}))
+	return "pl-new", nil
+}
+
+// The daemon's single playlist.create and playlist.add are actions too, with
+// their action context obtained once, as the request is taken up.
+func TestDaemonSingleWritesAreActions(t *testing.T) {
+	for _, op := range []string{"playlist.create", "playlist.add"} {
+		w := &daemonActionWriter{}
+		d := &daemon{providers: []model.ProviderEntry{{Key: "spotify", Name: "Spotify", Provider: w}}}
+		reply := make(chan ipc.Response, 1)
+		d.handleLibrary(ipc.LibraryRequestMsg{Op: op, Provider: "spotify", Playlist: "pl", Track: &ipc.TrackInfo{Path: "spotify:track:1"}, Reply: reply})
+		if resp := <-reply; !resp.OK {
+			t.Fatalf("%s = %+v", op, resp)
+		}
+		if w.actions != 1 || len(w.adds) != 1 || w.adds[0] != 1 {
+			t.Errorf("%s: action contexts obtained = %d, carried by the write as %v; want one, carried", op, w.actions, w.adds)
+		}
+	}
+}

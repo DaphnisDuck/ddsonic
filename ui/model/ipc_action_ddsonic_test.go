@@ -160,3 +160,60 @@ func TestCreateAndAddReportsWhatIsKnown(t *testing.T) {
 		wantView(t, "the overlay", m, []string{`Created "New"`, "may or may not have been added", "check the playlist"}, "was not added", "Create failed")
 	})
 }
+
+// Every way an action on the account can begin fixes its action context when
+// the request arrives, before the work is run: the single playlist.create
+// and playlist.add over IPC, the search overlay's add, and its
+// create-and-add. A sign-in that completes between the request and its first
+// write then finds the action already begun.
+func TestActionContextIsFixedWhenTheRequestArrives(t *testing.T) {
+	track := &ipc.TrackInfo{Path: "spotify:track:1"}
+	for _, op := range []string{"playlist.create", "playlist.add", "playlist.add_many"} {
+		t.Run("IPC "+op, func(t *testing.T) {
+			w := &actionWriter{}
+			m := Model{providers: []ProviderEntry{{Key: "spotify", Name: "Spotify", Provider: w}}}
+			reply := make(chan ipc.Response, 1)
+			cmd := m.handleIPCLibrary(ipc.LibraryRequestMsg{Op: op, Provider: "spotify", Playlist: "pl", Track: track, Tracks: threeTracks(), Reply: reply})
+			if cmd == nil {
+				t.Fatalf("%s returned no command", op)
+			}
+			if w.actions != 1 {
+				t.Fatalf("action contexts obtained before the work ran = %d, want 1", w.actions)
+			}
+			cmd()
+			if resp := <-reply; !resp.OK {
+				t.Fatalf("%s = %+v", op, resp)
+			}
+			if w.actions != 1 {
+				t.Errorf("action contexts obtained in all = %d, want the one", w.actions)
+			}
+			for i, a := range w.adds {
+				if a != 1 {
+					t.Errorf("write %d carried action %v, want the request's", i+1, a)
+				}
+			}
+		})
+	}
+	t.Run("the overlay's add", func(t *testing.T) {
+		w := &actionWriter{}
+		cmd := addToSpotPlaylistCmd(context.Background(), w, "pl", playlist.Track{Path: "spotify:track:1"}, "Spotify", "Mine", 1)
+		if w.actions != 1 {
+			t.Fatalf("action contexts obtained before the work ran = %d, want 1", w.actions)
+		}
+		cmd()
+		if w.actions != 1 || len(w.adds) != 1 || w.adds[0] != 1 {
+			t.Errorf("action contexts = %d, carried as %v; want the one", w.actions, w.adds)
+		}
+	})
+	t.Run("the overlay's create-and-add", func(t *testing.T) {
+		w := &actionWriter{}
+		cmd := createSpotPlaylistCmd(context.Background(), w, w, "Spotify", "New", playlist.Track{Path: "spotify:track:1"}, 1)
+		if w.actions != 1 {
+			t.Fatalf("action contexts obtained before the work ran = %d, want 1", w.actions)
+		}
+		cmd()
+		if w.actions != 1 || len(w.adds) != 2 {
+			t.Errorf("action contexts = %d for %d writes; want the one for both", w.actions, len(w.adds))
+		}
+	})
+}

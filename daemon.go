@@ -678,7 +678,8 @@ func (d *daemon) handleLibrary(m ipc.LibraryRequestMsg) {
 			reply(m.Reply, ipc.Response{OK: false, Error: "provider does not support playlist creation"})
 			return
 		}
-		_, err := creator.CreatePlaylist(context.Background(), m.Playlist)
+		// ddsonic: an action from here (provider.ActionContext).
+		_, err := creator.CreatePlaylist(providerapi.ActionContext(context.Background(), creator), m.Playlist)
 		replyError(m.Reply, err)
 	case "playlist.rename":
 		renamer, ok := entry.Provider.(providerapi.PlaylistRenamer)
@@ -711,7 +712,8 @@ func (d *daemon) handleLibrary(m ipc.LibraryRequestMsg) {
 			reply(m.Reply, ipc.Response{OK: false, Error: "provider does not support adding tracks"})
 			return
 		}
-		replyError(m.Reply, writer.AddTrackToPlaylist(context.Background(), m.Playlist, trackFromInfo(*m.Track)))
+		// ddsonic: an action from here (provider.ActionContext).
+		replyError(m.Reply, writer.AddTrackToPlaylist(providerapi.ActionContext(context.Background(), writer), m.Playlist, trackFromInfo(*m.Track)))
 	case "playlist.add_many":
 		if len(m.Tracks) == 0 {
 			reply(m.Reply, ipc.Response{OK: false, Error: "tracks are required"})
@@ -736,7 +738,7 @@ func (d *daemon) handleLibrary(m ipc.LibraryRequestMsg) {
 			return
 		}
 		// ddsonic: one action for the provider (provider.AddTracks).
-		if err := providerapi.AddTracks(context.Background(), writer, m.Playlist, tracks); err != nil {
+		if err := providerapi.AddTracks(providerapi.ActionContext(context.Background(), writer), writer, m.Playlist, tracks); err != nil {
 			replyError(m.Reply, err)
 			return
 		}

@@ -616,6 +616,7 @@ func fetchSpotPlaylistsCmd(prov playlist.Provider, gen uint64) tea.Cmd {
 }
 
 func addToSpotPlaylistCmd(ctx context.Context, w provider.PlaylistWriter, playlistID string, track playlist.Track, providerName, name string, gen uint64) tea.Cmd {
+	ctx = provider.ActionContext(ctx, w) // ddsonic: an action from the key press, before the command runs
 	return func() tea.Msg {
 		err := w.AddTrackToPlaylist(ctx, playlistID, track)
 		return spotAddedMsg{name: name, err: err, providerName: providerName, gen: gen}
@@ -623,10 +624,11 @@ func addToSpotPlaylistCmd(ctx context.Context, w provider.PlaylistWriter, playli
 }
 
 func createSpotPlaylistCmd(ctx context.Context, c provider.PlaylistCreator, w provider.PlaylistWriter, providerName, name string, track playlist.Track, gen uint64) tea.Cmd {
+	// ddsonic: creating and adding are one action, from the key press, before
+	// the command runs; neither request is sent under a sign-in that replaced
+	// the one that stood then.
+	ctx = provider.ActionContext(ctx, c)
 	return func() tea.Msg {
-		// ddsonic: creating and adding are one action; neither request is
-		// sent under a sign-in that replaced the one it was asked on.
-		ctx := provider.ActionContext(ctx, c)
 		id, err := c.CreatePlaylist(ctx, name)
 		if err != nil {
 			return spotCreatedMsg{name: name, err: err, providerName: providerName, gen: gen}
