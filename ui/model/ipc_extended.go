@@ -341,12 +341,8 @@ func (m *Model) handleIPCLibrary(request ipc.LibraryRequestMsg) tea.Cmd {
 			return nil
 		}
 		return ipcMutationCmd(request.Context, request.Reply, func() error {
-			for _, track := range tracks {
-				if err := writer.AddTrackToPlaylist(requestContext(request.Context), request.Playlist, track); err != nil {
-					return err
-				}
-			}
-			return nil
+			// ddsonic: one action for the provider (provider.AddTracks).
+			return provider.AddTracks(requestContext(request.Context), writer, request.Playlist, tracks)
 		})
 	case "playlist.replace":
 		saver, ok := entry.Provider.(provider.PlaylistSaver)

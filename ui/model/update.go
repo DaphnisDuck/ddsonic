@@ -999,7 +999,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spotSearch.loading = false
 		if msg.err != nil {
 			if !m.spotSearchNeedsSignIn(msg.err) { // ddsonic: else the sign-in prompt; nothing is added again
-				m.setSpotSearchError("Create failed: " + msg.err.Error())
+				if msg.created { // ddsonic: the playlist stays; only the add did not happen
+					m.setSpotSearchError(fmt.Sprintf("Created %q, but the track was not added: %s", msg.name, msg.err))
+				} else {
+					m.setSpotSearchError("Create failed: " + msg.err.Error())
+				}
 			}
 			return m, nil
 		}

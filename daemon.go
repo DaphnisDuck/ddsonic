@@ -735,11 +735,10 @@ func (d *daemon) handleLibrary(m ipc.LibraryRequestMsg) {
 			reply(m.Reply, ipc.Response{OK: false, Error: "provider does not support adding tracks"})
 			return
 		}
-		for _, track := range tracks {
-			if err := writer.AddTrackToPlaylist(context.Background(), m.Playlist, track); err != nil {
-				replyError(m.Reply, err)
-				return
-			}
+		// ddsonic: one action for the provider (provider.AddTracks).
+		if err := providerapi.AddTracks(context.Background(), writer, m.Playlist, tracks); err != nil {
+			replyError(m.Reply, err)
+			return
 		}
 		reply(m.Reply, ipc.Response{OK: true, Total: len(tracks)})
 	case "playlist.replace":

@@ -584,8 +584,10 @@ type spotAddedMsg struct {
 }
 
 type spotCreatedMsg struct {
-	name         string
-	err          error
+	name string
+	err  error
+	// created: the playlist exists; err, if any, is the add's (ddsonic).
+	created      bool
 	providerName string
 	gen          uint64
 }
@@ -624,16 +626,12 @@ func createSpotPlaylistCmd(ctx context.Context, c provider.PlaylistCreator, w pr
 	return func() tea.Msg {
 		// ddsonic: creating and adding are one action; neither request is
 		// sent under a sign-in that replaced the one it was asked on.
-		if pinner, ok := c.(interface {
-			WithSignIn(context.Context) context.Context
-		}); ok {
-			ctx = pinner.WithSignIn(ctx)
-		}
+		ctx := provider.ActionContext(ctx, c)
 		id, err := c.CreatePlaylist(ctx, name)
 		if err != nil {
 			return spotCreatedMsg{name: name, err: err, providerName: providerName, gen: gen}
 		}
 		err = w.AddTrackToPlaylist(ctx, id, track)
-		return spotCreatedMsg{name: name, err: err, providerName: providerName, gen: gen}
+		return spotCreatedMsg{name: name, err: err, created: true, providerName: providerName, gen: gen}
 	}
 }
