@@ -45,10 +45,16 @@ type libraryState struct {
 	authGen   uint64
 	signingIn bool
 	authURL   string
+	// signInProvider is the synced source signing in (library_signin.go), or
+	// "" when the top level signs in for itself.
+	signInProvider string
 
 	// Catalog sync status per provider, and the action behind "r".
 	sync    map[string]*libSync
 	refresh func(provider string)
+	// auth is who signs in for each synced source that can be signed in to
+	// from the library (library_signin.go).
+	auth map[string]playlist.Authenticator
 
 	// Search: whether the search frame's input has focus (else its
 	// results), the last query (kept when search reopens), and the
@@ -71,6 +77,9 @@ type libSync struct {
 	running     bool
 	lastSuccess time.Time
 	lastErr     string
+	// needsAuth: the source asked for sign-in, in a sync, in playback or in
+	// its own search (library_signin.go).
+	needsAuth bool
 }
 
 // CatalogSyncPhase is the stage a CatalogSyncMsg reports.
@@ -193,6 +202,9 @@ type libraryPlayMsg struct {
 type libraryAuthDoneMsg struct {
 	gen uint64
 	err error
+	// provider is the synced source that signed in (library_signin.go), or
+	// "" when a level signed in for itself.
+	provider string
 }
 
 // SetLibrary makes the library the main screen, starting at root. root must
@@ -274,7 +286,9 @@ func (m *Model) libraryPop() tea.Cmd {
 		f.cancel()
 	}
 	m.lib.stack = m.lib.stack[:len(m.lib.stack)-1]
-	m.libEndSignIn()
+	if m.lib.signInProvider == "" { // a source's sign-in outlives the screen that started it
+		m.libEndSignIn()
+	}
 	if f := m.libTop(); f.stale {
 		return m.libraryRefreshTop()
 	}
@@ -404,6 +418,7 @@ func (m *Model) handleLibraryMsg(msg tea.Msg) (tea.Cmd, bool) {
 					}
 				}
 			}
+			m.libApplySignInRow(f)
 			if f == m.libTop() {
 				m.libAdjustScroll()
 			}
@@ -428,6 +443,7 @@ func (m *Model) handleLibraryMsg(msg tea.Msg) (tea.Cmd, bool) {
 			case !errors.Is(msg.Err, context.Canceled):
 				st.lastErr = msg.Err.Error()
 			}
+			m.libSyncEndedAuth(msg.Provider, msg.Err)
 			// The sync's final sweep may have deleted rows the collections'
 			// rereads still found; reread after it (failed collections
 			// included: the sweep runs after those too).
@@ -461,6 +477,9 @@ func (m *Model) handleLibraryMsg(msg tea.Msg) (tea.Cmd, bool) {
 	case libraryAuthDoneMsg:
 		if msg.gen != m.lib.authGen || !m.libraryEnabled() {
 			return nil, true
+		}
+		if msg.provider != "" {
+			return m.librarySignedIn(msg), true
 		}
 		m.libEndSignIn()
 		if msg.err != nil {
@@ -583,7 +602,13 @@ func (m *Model) handleLibraryKey(msg tea.KeyPressMsg) (cmd tea.Cmd, handled bool
 // On an error screen it signs in or retries instead.
 func (m *Model) libraryActivate() tea.Cmd {
 	f := m.libTop()
-	if f.loading() || m.lib.signingIn {
+	if f.loading() || m.libSigningInHere(f) {
+		return nil
+	}
+	if provider, ok := m.libPending(f); ok {
+		if m.libSyncState(provider).needsAuth {
+			return m.librarySignInProvider(provider)
+		}
 		return nil
 	}
 	if f.err != nil {
@@ -619,6 +644,8 @@ func (m *Model) libraryActivate() tea.Cmd {
 			tracks, err := play(ctx)
 			return libraryPlayMsg{gen: gen, title: title, source: source, tracks: tracks, err: err}
 		}
+	case e.Intent == library.IntentSignIn:
+		return m.librarySignInProvider(e.Source)
 	case e.Intent == library.IntentFolders:
 		m.openFileBrowser()
 	case e.Intent == library.IntentSearch:
@@ -651,6 +678,7 @@ func (m *Model) skipByUser(next bool) tea.Cmd {
 func (m *Model) libEndSignIn() {
 	m.lib.signingIn = false
 	m.lib.authURL = ""
+	m.lib.signInProvider = ""
 }
 
 func (m *Model) librarySignIn() tea.Cmd {
@@ -659,6 +687,9 @@ func (m *Model) librarySignIn() tea.Cmd {
 		return nil
 	}
 	auth := al.Authenticator()
+	if provider, ok := m.libAuthProviderOf(auth); ok {
+		return m.librarySignInProvider(provider)
+	}
 	gen := nextRequest(&m.lib.gen)
 	m.lib.authGen = gen
 	m.lib.signingIn = true

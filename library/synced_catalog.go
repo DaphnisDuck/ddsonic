@@ -138,8 +138,16 @@ func SyncedMenu(cat catalog.Catalog, src SyncedSource) Level {
 			entries = append(entries, l.entry)
 		}
 	}
-	return Menu(src.Title, entries...)
+	return &sourceMenu{Menu(src.Title, entries...), src.Provider}
 }
+
+// sourceMenu is a synced source's menu (SourceMenu).
+type sourceMenu struct {
+	Level
+	provider string
+}
+
+func (m *sourceMenu) SourceProvider() string { return m.provider }
 
 func syncedBrowser(cat catalog.Catalog, src SyncedSource) *catalogBrowser {
 	return &catalogBrowser{cat: cat, prov: src.Player, provider: src.Provider, partialAlbums: src.PartialAlbums,
@@ -240,7 +248,7 @@ func (b *catalogBrowser) syncingPlaceholder(ctx context.Context, entries []Entry
 			return entries, nil
 		}
 	}
-	return []Entry{{Title: b.pending}}, nil
+	return []Entry{{Title: b.pending, Intent: IntentPending, Source: b.provider}}, nil
 }
 
 func (b *catalogBrowser) albums(ctx context.Context) ([]Entry, error) {

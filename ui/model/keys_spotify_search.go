@@ -17,6 +17,9 @@ func (m *Model) handleSpotSearchKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.closeSpotSearch()
 		return m.quit()
 	}
+	if cmd, ok := m.spotSearchSignInKey(msg); ok { // ddsonic: library_signin.go
+		return cmd
+	}
 
 	switch m.spotSearch.screen {
 	case spotSearchInput:

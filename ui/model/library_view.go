@@ -126,7 +126,7 @@ const libNoteIndent = "  "
 // qualifies is the reason it is there.
 func (m *Model) libNote() []string {
 	nl, ok := m.libTop().level.(library.NotedLevel)
-	if !ok || m.lib.signingIn {
+	if !ok || m.libSigningInHere(m.libTop()) {
 		return nil
 	}
 	width, rows := m.bodySize()
@@ -165,7 +165,7 @@ func (m *Model) libHeaderLine() string {
 	if badge := m.libSyncBadge(); badge != "" {
 		label += "  " + badge
 	}
-	if (f.loading() && len(f.entries) == 0) || f.err != nil {
+	if _, pending := m.libPending(f); (f.loading() && len(f.entries) == 0) || f.err != nil || pending {
 		return sepHeader(label)
 	}
 	return sepHeaderN(label, f.cursor+1, len(f.entries))
@@ -180,10 +180,15 @@ func (m *Model) libSyncBadge() string {
 		st := m.lib.sync[provider]
 		var badge string
 		switch {
+		case st.needsAuth:
+			// Always named: it is the one badge that asks for something.
+			badge = library.SourceLabel(provider) + " sign-in required" + m.libCachedSuffix(provider)
+			badges = append(badges, badge)
+			continue
 		case st.running:
 			badge = "↻ syncing"
 		case st.lastErr != "":
-			badge = "sync failed · cached"
+			badge = "sync failed" + m.libCachedSuffix(provider)
 		case !st.lastSuccess.IsZero():
 			badge = "✓ synced " + syncAge(time.Since(st.lastSuccess))
 		default:
@@ -218,7 +223,7 @@ func (m *Model) libHelpLine() string {
 }
 
 func (m *Model) renderLibraryBody() string {
-	if sl, ok := m.libSearchLevel(); ok && !m.lib.signingIn {
+	if sl, ok := m.libSearchLevel(); ok && !m.libSigningInHere(m.libTop()) {
 		budget := m.libListBudget()
 		body := m.renderLibraryList(budget)
 		if sl.Query() == "" {
@@ -242,8 +247,8 @@ func (m *Model) renderLibraryBody() string {
 func (m *Model) renderLibraryList(budget int) string {
 	f := m.libTop()
 	switch {
-	case m.lib.signingIn:
-		lines := []string{loadingLine("Signing in — finish in your browser…")}
+	case m.libSigningInHere(f):
+		lines := []string{loadingLine(libSigningIn)}
 		if m.lib.authURL != "" {
 			lines = append(lines, dimStyle.Render("  If no browser opened, visit:"), dimStyle.Render("  "+truncate(m.lib.authURL, ui.PanelWidth-4)))
 		}
@@ -259,6 +264,9 @@ func (m *Model) renderLibraryList(budget int) string {
 		}, budget)
 	case len(f.entries) == 0:
 		return bodyMessage("Nothing here.", budget)
+	}
+	if provider, ok := m.libPending(f); ok {
+		return bodyMessage(m.libPendingText(provider), budget)
 	}
 
 	panel := ui.PanelWidth

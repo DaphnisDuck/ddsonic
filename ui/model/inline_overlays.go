@@ -614,7 +614,8 @@ func (m Model) spotSearchHelpLine() string {
 
 func (m Model) renderSpotSearchBody() string {
 	budget := m.effectivePlaylistVisible()
-	showError := m.spotSearch.err != "" && m.spotSearch.screen != spotSearchPlaylist
+	// ddsonic: the picker shows no errors, but the sign-in prompt asks for a key.
+	showError := m.spotSearch.err != "" && (m.spotSearch.screen != spotSearchPlaylist || m.spotSearchAsksSignIn())
 	bodyBudget := budget
 	if showError {
 		bodyBudget = max(0, bodyBudget-1)
@@ -632,7 +633,7 @@ func (m Model) renderSpotSearchBody() string {
 		}
 	case spotSearchPlaylist:
 		if m.spotSearch.loading {
-			body = bodyLines([]string{loadingLine("Loading playlists…")}, budget)
+			body = bodyLines([]string{loadingLine("Loading playlists…")}, bodyBudget)
 			break
 		}
 		track := m.spotSearch.selTrack
@@ -646,7 +647,7 @@ func (m Model) renderSpotSearchBody() string {
 				items[i] = "+ New Playlist..."
 			}
 		}
-		list := windowList(items, m.spotSearch.cursor, m.spotSearch.scroll, max(0, budget-1))
+		list := windowList(items, m.spotSearch.cursor, m.spotSearch.scroll, max(0, bodyBudget-1))
 		body = strings.Join([]string{head, list}, "\n")
 	case spotSearchNewName:
 		body = bodyMessage("Enter a name for the new playlist above.", bodyBudget)

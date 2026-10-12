@@ -290,6 +290,20 @@ cases:
     gate: required
     implemented: true
     since: v1.0.0-rc.4
+  - id: SPOT-004
+    area: Spotify
+    title: A home never signed in to Spotify offers the sign-in in the library, syncs at once when it succeeds, and asks for nothing after a restart
+    semantics: spotify/albums
+    tier: deterministic
+    driver: scripted
+    lane: go
+    runner: .:TestAcceptanceSpotifyFirstRunSignIn
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.5
+    regression_of: LIVE-SPOT-001 failing on v1.0.0-rc.4 (no reachable sign-in with an empty synced catalog; since 9df1c0c)
   - id: YTM-DER-003
     area: YouTube Music
     title: Rows of the derived lists say "from tracks" in All Music and in search

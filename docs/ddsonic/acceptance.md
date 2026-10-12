@@ -18,7 +18,7 @@ This is the first slice. Read the three columns as three different things.
 
 | | State |
 |---|---|
-| **Executed by the tooling** | The scripted cases: 11 on the binary under test, 12 in-process. `make acceptance` runs them on a local build |
+| **Executed by the tooling** | The scripted cases: 11 on the binary under test, 13 in-process. `make acceptance` runs them on a local build |
 | **Tooling built, not yet used on a release** | Release mode: identifying a draft release's archive and running the cases on the binary extracted from it. It is covered by tests on synthetic archives. **No release run has been made**; the first is rc.4's |
 | **Cataloged, executed by hand** | 2 manual deterministic cases, 10 live-provider cases, 4 human cases. Runbooks exist. **None has been executed** as part of building this |
 
