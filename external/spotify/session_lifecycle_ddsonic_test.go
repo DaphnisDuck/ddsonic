@@ -26,22 +26,6 @@ import (
 	"github.com/bjarneo/cliamp/playlist"
 )
 
-// No test in this package may reach Spotify or open a browser: a test that
-// forgets its stand-in fails here instead. Each test that expects a call
-// installs its own (stubBuild, fakeSpotifyHTTP, fakeTokenEndpoint).
-func init() {
-	interactiveTokens = func(context.Context, []oauthFlow) ([]*oauth2.Token, error) {
-		return nil, errors.New("test: a browser sign-in was started without a stand-in")
-	}
-	real := http.DefaultTransport
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if strings.Contains(req.URL.Host, "spotify.com") || strings.Contains(req.URL.Host, "scdn.co") {
-			return nil, fmt.Errorf("test: a request to %s was made without a stand-in", req.URL.Host)
-		}
-		return real.RoundTrip(req)
-	})
-}
-
 // build stands in for Spotify under the real session builders.
 type build struct {
 	browserFlows, librespotSessions, playerInits, disposals atomic.Int32
@@ -533,8 +517,9 @@ func TestWebAPIUnauthorized(t *testing.T) {
 		p, sess := newProvider()
 		_, err := p.webAPIWithBody(context.Background(), "POST", "/v1/playlists/pl/tracks", nil,
 			strings.NewReader(`{"uris":["spotify:track:1"]}`), "application/json", http.StatusCreated)
-		if err == nil || h.apiCalls.Load() != 1 {
-			t.Fatalf("the write = %v after %d requests, want an error and exactly 1 request", err, h.apiCalls.Load())
+		// One write, and one read-only check of the renewed token.
+		if err == nil || h.apiCalls.Load() != 2 {
+			t.Fatalf("the write = %v after %d requests, want an error after the write and one check", err, h.apiCalls.Load())
 		}
 		if errors.Is(err, playlist.ErrNeedsAuth) || sess.signInRefused() {
 			t.Errorf("the write = %v (refused %v): the token was refreshed, so this is not a sign-in", err, sess.signInRefused())
@@ -542,7 +527,7 @@ func TestWebAPIUnauthorized(t *testing.T) {
 		// Asked again by the user, it goes through on the refreshed token.
 		resp, err := p.webAPIWithBody(context.Background(), "POST", "/v1/playlists/pl/tracks", nil,
 			strings.NewReader(`{"uris":["spotify:track:1"]}`), "application/json", http.StatusOK)
-		if err != nil || h.apiCalls.Load() != 2 {
+		if err != nil || h.apiCalls.Load() != 3 {
 			t.Fatalf("the write, asked again = %v after %d requests", err, h.apiCalls.Load())
 		}
 		resp.Body.Close()
@@ -602,5 +587,246 @@ func TestSignInConcurrentWithRequests(t *testing.T) {
 		t.Errorf("a read after the sign-ins = %v", err)
 	} else {
 		resp.Body.Close()
+	}
+}
+
+// signedInSession is a session built and taken through the real builders,
+// with its credential on disk.
+func signedInSession(t *testing.T) (*SpotifyProvider, *Session) {
+	t.Helper()
+	p := New(nil, "client", 320)
+	if err := p.Authenticate(); err != nil {
+		t.Fatal(err)
+	}
+	return p, p.session
+}
+
+// Work that belongs to a sign-in the user has since replaced must not write
+// the credential: neither a renewal that was still waiting for Spotify, nor
+// the old token source's rotation callback.
+func TestRetiredSignInCannotWriteCredential(t *testing.T) {
+	t.Setenv("CLIAMP_CONFIG_DIR", t.TempDir())
+	path, _ := CredsPath()
+	stubBuild(t)
+	entered, release := make(chan struct{}), make(chan struct{})
+	fakeSpotifyHTTP(t, func(n int) (int, string) {
+		if n == 1 {
+			close(entered)
+			<-release // the old sign-in's renewal, held at Spotify
+		}
+		return http.StatusOK, `{"access_token":"late","token_type":"Bearer","refresh_token":"stale-rotation","expires_in":3600}`
+	}, apiOK)
+	p, sess := signedInSession(t)
+	oldCred := sess.cred
+	stamp := tokenStamp{sess.generation(), 0}
+
+	renewal := make(chan error, 1)
+	go func() { renewal <- sess.renewToken(context.Background(), stamp) }()
+	<-entered
+
+	sess.refuseSignIn(sess.generation())
+	if err := p.Authenticate(); err != nil { // the user signs in again
+		t.Fatal(err)
+	}
+	signedIn := mustRead(t, path)
+
+	close(release) // the old renewal's answer, with a rotated refresh token
+	if err := <-renewal; err != nil {
+		t.Errorf("the overtaken renewal = %v, want nil: a newer sign-in stands", err)
+	}
+	if got := mustRead(t, path); got != signedIn || strings.Contains(got, "stale-rotation") {
+		t.Errorf("the old sign-in's renewal rewrote the credential:\n was %q\n now %q", signedIn, got)
+	}
+	if err := oldCred.rotate("stale-callback"); err != nil {
+		t.Errorf("the retired credential's rotation = %v", err)
+	}
+	if got := mustRead(t, path); got != signedIn {
+		t.Errorf("the old token source's rotation rewrote the credential: %q", got)
+	}
+	if tok, err := sess.tokenSource.Token(); err != nil || tok.AccessToken != "signed-in" {
+		t.Errorf("token after the overtaken renewal = %v, %v, want the new sign-in's", tok, err)
+	}
+
+	// A closed session's credential writes nothing either.
+	live := sess.cred
+	p.Close()
+	if err := live.rotate("after-close"); err != nil || mustRead(t, path) != signedIn {
+		t.Errorf("a rotation after Close = %v and changed the credential: %v", err, mustRead(t, path) != signedIn)
+	}
+}
+
+// A write that was waiting for its token when the user signed in again is
+// not sent under the new sign-in: the user did not ask for it there. It ends
+// with an error that is not a sign-in request, whether the old token request
+// was refused or answered late. A read may go through.
+func TestPendingWriteIsNotSentAfterSignIn(t *testing.T) {
+	for _, late := range []string{"refused", "answered"} {
+		t.Run("the old token request is "+late, func(t *testing.T) {
+			storeCreds(t)
+			stubBuild(t)
+			h := fakeSpotifyHTTP(t, tokenOK, apiOK)
+			entered, release := make(chan struct{}), make(chan struct{})
+			var calls atomic.Int32
+			sess := &Session{clientID: "client", tokenSource: tokenSourceFunc(func() (*oauth2.Token, error) {
+				if calls.Add(1) == 1 {
+					close(entered)
+					<-release
+					if late == "answered" {
+						return goodToken()
+					}
+				}
+				return nil, &oauth2.RetrieveError{ErrorCode: "invalid_grant"}
+			})}
+			p := New(sess, "client", 320)
+
+			write := make(chan error, 1)
+			go func() {
+				resp, err := p.webAPIWithBody(context.Background(), "POST", "/v1/playlists/pl/tracks", nil,
+					strings.NewReader(`{"uris":["spotify:track:1"]}`), "application/json", http.StatusOK, http.StatusCreated)
+				if resp != nil {
+					resp.Body.Close()
+				}
+				write <- err
+			}()
+			<-entered
+			sess.refuseSignIn(sess.generation())
+			if err := p.Authenticate(); err != nil {
+				t.Fatal(err)
+			}
+
+			close(release)
+			err := <-write
+			if h.apiCalls.Load() != 0 {
+				t.Fatalf("the pending write was sent %d times under the new sign-in, want 0", h.apiCalls.Load())
+			}
+			if err == nil || errors.Is(err, playlist.ErrNeedsAuth) || !errors.Is(err, errSignInChanged) {
+				t.Errorf("the pending write = %v, want errSignInChanged and no sign-in request", err)
+			}
+			if sess.signInRefused() {
+				t.Error("the new sign-in is refused")
+			}
+			// Asked again by the user, it is sent, once.
+			resp, err := p.webAPIWithBody(context.Background(), "POST", "/v1/playlists/pl/tracks", nil,
+				strings.NewReader(`{}`), "application/json", http.StatusOK)
+			if err != nil || h.apiCalls.Load() != 1 {
+				t.Fatalf("the write, asked again = %v after %d requests", err, h.apiCalls.Load())
+			}
+			resp.Body.Close()
+		})
+	}
+}
+
+// The credential is read and rotated under one lock (for the race detector).
+func TestCredentialSnapshotsAreLocked(t *testing.T) {
+	t.Setenv("CLIAMP_CONFIG_DIR", t.TempDir())
+	stubBuild(t)
+	fakeSpotifyHTTP(t, tokenOK, apiOK)
+	_, sess := signedInSession(t)
+	cred := sess.cred
+
+	var wg sync.WaitGroup
+	for i := range 50 {
+		wg.Go(func() { _ = cred.rotate(fmt.Sprintf("rotated-%d", i)) })
+		wg.Go(func() { _ = sess.stagedTokenSource(&oauth2.Token{AccessToken: "a", Expiry: time.Now().Add(time.Hour)}) })
+		wg.Go(func() { _, _ = sess.renewalCreds(cred) })
+	}
+	wg.Wait()
+}
+
+// apiByMethod answers each method by its own request count, and counts them.
+type apiByMethod struct {
+	mu     sync.Mutex
+	counts map[string]int
+	answer func(method string, n int) int
+}
+
+func (a *apiByMethod) handle(_ int, req *http.Request) (int, http.Header) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.counts == nil {
+		a.counts = map[string]int{}
+	}
+	a.counts[req.Method]++
+	return a.answer(req.Method, a.counts[req.Method]), nil
+}
+
+func (a *apiByMethod) sent(method string) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.counts[method]
+}
+
+// A write that gets a 401 is never sent again, and it still finds out what
+// the 401 meant: the renewed token is tried on one read. If that is refused
+// too, the write reports sign-in required, at once, not at some later read.
+func TestWriteUnauthorizedFindsOutWithoutReplay(t *testing.T) {
+	tests := []struct {
+		name      string
+		probe     int // what the read-only check gets
+		needsAuth bool
+	}{
+		{"the renewed token is refused too", http.StatusUnauthorized, true},
+		{"the renewed token works", http.StatusOK, false},
+		{"the check cannot reach Spotify", http.StatusServiceUnavailable, false},
+		{"the check is rate limited", http.StatusTooManyRequests, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := storeCreds(t)
+			api := &apiByMethod{answer: func(method string, _ int) int {
+				if method == http.MethodPost {
+					return http.StatusUnauthorized
+				}
+				return tt.probe
+			}}
+			h := fakeSpotifyHTTP(t, tokenOK, api.handle)
+			sess := &Session{clientID: "client", tokenSource: tokenSourceFunc(goodToken)}
+			p := New(sess, "client", 320)
+
+			_, err := p.webAPIWithBody(context.Background(), "POST", "/v1/playlists/pl/tracks", nil,
+				strings.NewReader(`{"uris":["spotify:track:1"]}`), "application/json", http.StatusCreated)
+			if err == nil || errors.Is(err, playlist.ErrNeedsAuth) != tt.needsAuth || sess.signInRefused() != tt.needsAuth {
+				t.Fatalf("the write = %v (refused %v), want an error, needing sign-in %v", err, sess.signInRefused(), tt.needsAuth)
+			}
+			if api.sent(http.MethodPost) != 1 {
+				t.Errorf("the write was sent %d times, want 1", api.sent(http.MethodPost))
+			}
+			if api.sent(http.MethodGet) != 1 || h.tokenCalls.Load() != 1 {
+				t.Errorf("read-only checks = %d, renewals = %d; want 1 and 1: bounded", api.sent(http.MethodGet), h.tokenCalls.Load())
+			}
+			if !credsExist(t, path) {
+				t.Error("the credential was deleted")
+			}
+		})
+	}
+}
+
+// A sign-in that was published and whose credential was written has
+// succeeded, and says so, even when ddsonic quits the moment after.
+func TestSignInThatCommittedReportsSuccess(t *testing.T) {
+	path := storeCreds(t)
+	b := stubBuild(t)
+	fakeSpotifyHTTP(t, tokenRevoked, apiOK)
+	sess := brokenSession()
+	p := New(sess, "client", 320)
+	// Close arrives while the old session is being torn down: after the
+	// replacement is in place and its credential written.
+	closing := make(chan struct{})
+	teardown := closeLibrespot
+	closeLibrespot = func(pl *librespotPlayer.Player, s *session.Session) {
+		teardown(pl, s)
+		if b.disposals.Load() == 1 {
+			go func() { close(closing); p.Close() }()
+			<-closing
+			time.Sleep(20 * time.Millisecond) // Close now waits for the swap to finish
+		}
+	}
+
+	err := p.Authenticate()
+	if !strings.Contains(mustRead(t, path), "new-refresh") {
+		t.Fatal("the sign-in's credential was not written; the test did not reach the case")
+	}
+	if err != nil {
+		t.Errorf("Authenticate() = %v for a sign-in that was published and stored", err)
 	}
 }

@@ -671,7 +671,7 @@ func (s *Session) webApiWithBody(ctx context.Context, method, path string, query
 // that a refusal, or a 401, is held against that one only
 // (session_auth_ddsonic.go). Upstream read the token source and asked it here.
 func (s *Session) webAPIStamped(ctx context.Context, method, path string, query url.Values, body io.Reader, contentType string) (*http.Response, tokenStamp, error) {
-	token, stamp, err := s.accessToken()
+	token, stamp, err := s.accessToken(isWrite(method))
 	if err != nil {
 		return nil, stamp, err
 	}
@@ -704,6 +704,7 @@ func (s *Session) Close() {
 		return
 	}
 	s.closed = true
+	s.cred.retire()                  // ddsonic: a closed session writes no credential
 	closeLibrespot(s.player, s.sess) // ddsonic: a variable, for tests
 }
 
