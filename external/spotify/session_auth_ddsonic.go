@@ -286,47 +286,59 @@ func (s *Session) accessToken(write bool, pin *signInPin) (string, tokenStamp, e
 	}
 }
 
-// signInPin is the sign-in a write belongs to: the session it was asked on,
-// and the sign-in that session was on then.
+// signInPin is the sign-in an action on the account belongs to: the session
+// its first write was made on, and the sign-in that session was on then. An
+// action that began before the provider had a session is bound by its first
+// write, to the session that write is made on, and to no other after that.
 type signInPin struct {
-	sess *Session
-	gen  uint64
+	mu    sync.Mutex
+	bound bool
+	sess  *Session
+	gen   uint64
 }
 
-// holds reports whether sess is still the pinned session on the pinned
-// sign-in.
+// holds reports whether sess is the action's session, still on the action's
+// sign-in. The first call binds an unbound pin to sess as it is now.
 func (pin *signInPin) holds(sess *Session) bool {
-	return pin.sess == sess && sess.generation() == pin.gen
+	return pin.holdsGen(sess, sess.generation())
 }
 
+// holdsGen is holds for a caller that has read sess's sign-in already.
 func (pin *signInPin) holdsGen(sess *Session, gen uint64) bool {
-	return pin.sess == sess && gen == pin.gen
+	pin.mu.Lock()
+	defer pin.mu.Unlock()
+	if !pin.bound {
+		pin.bound, pin.sess, pin.gen = true, sess, gen
+	}
+	return pin.sess == sess && pin.gen == gen
 }
 
 type signInPinKey struct{}
 
 // WithSignIn marks ctx as one user action on the account: every write made
-// with it belongs to the sign-in the provider is on now. A user action that
-// takes more than one request (a new playlist, then the track added to it)
-// passes the same context to each, so that none of them is sent under a
-// sign-in that replaced it part-way.
+// with it belongs to one sign-in, the one its first write is made under. An
+// action that takes more than one request (a new playlist and the track
+// added to it, or many tracks added at once) passes the same context to
+// each, so that none of them is sent under a sign-in that replaced it
+// part-way. What was written before that stays written; nothing is undone.
+//
+// The action has its identity from here, whether or not the provider has a
+// session yet: one that starts before the stored session is set up is bound
+// by its first write, not anew by each.
 func (p *SpotifyProvider) WithSignIn(ctx context.Context) context.Context {
-	p.mu.Lock()
-	sess := p.session
-	p.mu.Unlock()
-	if sess == nil {
-		return ctx
+	if _, ok := ctx.Value(signInPinKey{}).(*signInPin); ok {
+		return ctx // already one action
 	}
-	return context.WithValue(ctx, signInPinKey{}, &signInPin{sess: sess, gen: sess.generation()})
+	return context.WithValue(ctx, signInPinKey{}, &signInPin{})
 }
 
-// signInPinFrom is the pin a write was given (WithSignIn), or one made for
-// the single request it is.
-func signInPinFrom(ctx context.Context, sess *Session) *signInPin {
+// signInPinFrom is the pin of the action a write belongs to (WithSignIn), or
+// one for the single request it is.
+func signInPinFrom(ctx context.Context) *signInPin {
 	if pin, ok := ctx.Value(signInPinKey{}).(*signInPin); ok {
 		return pin
 	}
-	return &signInPin{sess: sess, gen: sess.generation()}
+	return &signInPin{}
 }
 
 // isWrite reports whether a Web API method changes the account.

@@ -821,7 +821,7 @@ func (p *SpotifyProvider) webAPIWithBody(ctx context.Context, method, path strin
 		// (WithSignIn). Under another sign-in it is not sent.
 		if isWrite(method) {
 			if pin == nil {
-				pin = signInPinFrom(ctx, sess)
+				pin = signInPinFrom(ctx)
 			}
 			if !pin.holds(sess) {
 				return nil, errSignInChanged

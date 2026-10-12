@@ -1086,3 +1086,91 @@ func TestLateRefusalsAreAboutTheOldSignIn(t *testing.T) {
 		}
 	})
 }
+
+// An action on the account keeps its identity from the moment it starts,
+// session or no session. Creating a playlist and adding to it, begun before
+// the stored session was set up, belongs to the session its first request
+// was made on, and its second request is not sent once a sign-in has
+// replaced that one. The provider's own CreatePlaylist and
+// AddTrackToPlaylist are used, over the real builders.
+func TestActionKeepsItsSignInFromTheStart(t *testing.T) {
+	track := playlist.Track{Path: "spotify:track:4uLU6hMCjMI75M1A2tKUQC", Title: "Blue in Green"}
+	setup := func(t *testing.T) (*build, *apiByMethod) {
+		t.Helper()
+		storeCreds(t)
+		b := stubBuild(t)
+		api := &apiByMethod{answer: func(string, int) int { return http.StatusOK }}
+		fakeSpotifyHTTP(t, tokenOK, api.handle)
+		return b, api
+	}
+	reauth := func(t *testing.T, p *SpotifyProvider) {
+		t.Helper()
+		p.session.refuseSignIn(p.session.generation())
+		if err := p.Authenticate(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("no session when the action starts", func(t *testing.T) {
+		_, api := setup(t)
+		p := New(nil, "client", 320)
+		ctx := p.WithSignIn(context.Background())
+		if _, err := p.CreatePlaylist(ctx, "New"); err != nil { // sets the stored session up
+			t.Fatal(err)
+		}
+		reauth(t, p)
+		err := p.AddTrackToPlaylist(ctx, "pl", track)
+		if !errors.Is(err, errSignInChanged) || api.sent("POST") != 1 {
+			t.Fatalf("the action's second request = %v after %d writes in all, want errSignInChanged and 1", err, api.sent("POST"))
+		}
+		if err := p.AddTrackToPlaylist(p.WithSignIn(context.Background()), "pl", track); err != nil || api.sent("POST") != 2 {
+			t.Errorf("asked again = %v after %d writes", err, api.sent("POST"))
+		}
+	})
+	t.Run("session setup overlapping a sign-in", func(t *testing.T) {
+		b, api := setup(t)
+		b.storedGate, b.storedEntered = make(chan struct{}), make(chan struct{})
+		held := newLibrespotSession
+		var storedBuilds atomic.Int32
+		newLibrespotSession = func(ctx context.Context, opts *session.Options) (*session.Session, error) {
+			if _, stored := opts.Credentials.(session.StoredCredentials); stored && storedBuilds.Add(1) > 1 {
+				b.librespotSessions.Add(1)
+				return nil, nil // only the action's own setup is held
+			}
+			return held(ctx, opts)
+		}
+		p := New(nil, "client", 320)
+		ctx := p.WithSignIn(context.Background())
+
+		created := make(chan error, 1)
+		go func() { _, err := p.CreatePlaylist(ctx, "New"); created <- err }()
+		<-b.storedEntered
+		if err := p.Authenticate(); err != nil { // the user signs in while the setup runs
+			t.Fatal(err)
+		}
+		close(b.storedGate)
+		if err := <-created; err != nil || api.sent("POST") != 1 {
+			t.Fatalf("the action's first request = %v after %d writes, want it sent on the session that stands", err, api.sent("POST"))
+		}
+		// The action is on that session now: it goes on there...
+		if err := p.AddTrackToPlaylist(ctx, "pl", track); err != nil || api.sent("POST") != 2 {
+			t.Fatalf("the action's second request = %v after %d writes", err, api.sent("POST"))
+		}
+		// ...and not on one that replaces it.
+		reauth(t, p)
+		if err := p.AddTrackToPlaylist(ctx, "pl", track); !errors.Is(err, errSignInChanged) || api.sent("POST") != 2 {
+			t.Errorf("after another sign-in the action = %v after %d writes, want errSignInChanged and 2", err, api.sent("POST"))
+		}
+	})
+	t.Run("an established session, unchanged", func(t *testing.T) {
+		_, api := setup(t)
+		p := New(&Session{clientID: "client", tokenSource: tokenSourceFunc(goodToken)}, "client", 320)
+		ctx := p.WithSignIn(context.Background())
+		if _, err := p.CreatePlaylist(ctx, "New"); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.AddTrackToPlaylist(ctx, "pl", track); err != nil || api.sent("POST") != 2 {
+			t.Errorf("the second request = %v after %d writes, want both sent", err, api.sent("POST"))
+		}
+	})
+}
