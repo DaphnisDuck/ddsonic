@@ -12,6 +12,7 @@ package model
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -309,6 +310,36 @@ func (m *Model) spotSearchNeedsSignIn(err error) bool {
 	return true
 }
 
+// spotAddOutcome says what is known of an add that returned an error: that
+// the track was not added, when the request was never sent or was refused;
+// otherwise that it may have been, since a request that timed out or lost its
+// connection may have been carried out all the same.
+func spotAddOutcome(err error) string {
+	if provider.NotApplied(err) {
+		return "The track was not added"
+	}
+	return "The track may or may not have been added (check the playlist)"
+}
+
+// spotSearchCreateFailed reports a create-and-add that did not complete.
+// When the playlist was created, that is said first and stays on screen: it
+// exists, whatever became of the track, and a sign-in that is needed is
+// offered beside it. Nothing is undone, and nothing is tried again.
+func (m *Model) spotSearchCreateFailed(msg spotCreatedMsg) {
+	if !msg.created {
+		if !m.spotSearchNeedsSignIn(msg.err) {
+			m.setSpotSearchError("Create failed: " + msg.err.Error())
+		}
+		return
+	}
+	created := fmt.Sprintf("Created %q. ", msg.name)
+	if m.spotSearchNeedsSignIn(msg.err) {
+		m.spotSearch.notice = created + spotAddOutcome(msg.err) + "; add it once you have signed in."
+		return
+	}
+	m.setSpotSearchError(created + spotAddOutcome(msg.err) + ": " + msg.err.Error())
+}
+
 // spotSearchAsksSignIn reports whether the provider's search shows the
 // sign-in prompt, or the sign-in running.
 func (m Model) spotSearchAsksSignIn() bool {
@@ -352,7 +383,8 @@ func (m *Model) spotSearchSignInEnded(provider string, signedIn bool) tea.Cmd {
 		m.spotSearch.err = libSignInPrompt
 		return nil
 	}
-	m.spotSearch.err = ""
+	// What was said beside the prompt is what remains to be said.
+	m.spotSearch.err, m.spotSearch.notice = m.spotSearch.notice, ""
 	s, ok := m.spotSearch.prov.(searcher)
 	if !ok || m.spotSearch.screen != spotSearchInput || m.spotSearch.query == "" || m.spotSearch.loading {
 		return nil

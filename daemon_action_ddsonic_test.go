@@ -2,12 +2,13 @@ package main
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/bjarneo/cliamp/ipc"
 	"github.com/bjarneo/cliamp/playlist"
+	providerapi "github.com/bjarneo/cliamp/provider"
 	"github.com/bjarneo/cliamp/ui/model"
 )
 
@@ -31,7 +32,7 @@ func (w *daemonActionWriter) WithSignIn(ctx context.Context) context.Context {
 func (w *daemonActionWriter) AddTrackToPlaylist(ctx context.Context, _ string, _ playlist.Track) error {
 	w.adds = append(w.adds, ctx.Value(daemonActionKey{}))
 	if len(w.adds) == w.failAt {
-		return errors.New("the Spotify session changed, so the request was not sent; try again")
+		return fmt.Errorf("%w: the Spotify session changed, so the request was not sent; try again", providerapi.ErrNotApplied)
 	}
 	return nil
 }

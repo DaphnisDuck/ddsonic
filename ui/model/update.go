@@ -983,7 +983,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spotSearch.loading = false
 		if msg.err != nil {
 			if !m.spotSearchNeedsSignIn(msg.err) { // ddsonic: else the sign-in prompt; nothing is added again
-				m.setSpotSearchError("Add failed: " + msg.err.Error())
+				m.setSpotSearchError(spotAddOutcome(msg.err) + ": " + msg.err.Error())
 			}
 			return m, nil
 		}
@@ -998,13 +998,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cancelSpotRequest()
 		m.spotSearch.loading = false
 		if msg.err != nil {
-			if !m.spotSearchNeedsSignIn(msg.err) { // ddsonic: else the sign-in prompt; nothing is added again
-				if msg.created { // ddsonic: the playlist stays; only the add did not happen
-					m.setSpotSearchError(fmt.Sprintf("Created %q, but the track was not added: %s", msg.name, msg.err))
-				} else {
-					m.setSpotSearchError("Create failed: " + msg.err.Error())
-				}
-			}
+			// ddsonic: what is known is said, and no more (library_signin.go).
+			m.spotSearchCreateFailed(msg)
 			return m, nil
 		}
 		m.status.Showf(statusTTLDefault, "Created %q & added track", msg.name)

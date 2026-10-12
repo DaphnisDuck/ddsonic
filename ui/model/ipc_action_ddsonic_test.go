@@ -3,11 +3,14 @@ package model
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/bjarneo/cliamp/catalog"
 	"github.com/bjarneo/cliamp/ipc"
 	"github.com/bjarneo/cliamp/playlist"
+	"github.com/bjarneo/cliamp/provider"
 )
 
 // actionWriter is a provider whose writes belong to an action, as Spotify's
@@ -31,7 +34,7 @@ func (w *actionWriter) WithSignIn(ctx context.Context) context.Context {
 func (w *actionWriter) AddTrackToPlaylist(ctx context.Context, _ string, _ playlist.Track) error {
 	w.adds = append(w.adds, ctx.Value(actionKey{}))
 	if len(w.adds) == w.failAt {
-		return errors.New("the Spotify session changed, so the request was not sent; try again")
+		return fmt.Errorf("%w: the Spotify session changed, so the request was not sent; try again", provider.ErrNotApplied)
 	}
 	return nil
 }
@@ -120,4 +123,40 @@ func TestCreateAndAddIsOneAction(t *testing.T) {
 	if got := m.spotSearch.err; !strings.Contains(got, `Created "New"`) || !strings.Contains(got, "not added") || strings.Contains(got, "Create failed") {
 		t.Errorf("after a create that worked and an add that did not, the overlay says %q", got)
 	}
+}
+
+// After a playlist was created and its track's add did not complete, the
+// screen says what is known: the playlist exists; and of the track, that it
+// was not added when that is certain (never sent, or sign-in required), or
+// that it may have been when the request's outcome is not known. A sign-in
+// that is needed is offered beside the news that the playlist exists.
+func TestCreateAndAddReportsWhatIsKnown(t *testing.T) {
+	overlay := func(t *testing.T, err error) (Model, *signInProv) {
+		t.Helper()
+		l := newSignInLib(t)
+		m := l.model()
+		m.spotSearch = spotSearchState{prov: l.prov, visible: true, screen: spotSearchNewName}
+		m.requests.spotMutation = 7
+		return sendAll(t, m, spotCreatedMsg{name: "New", err: err, created: true, providerName: "Spotify", gen: 7}), l.prov
+	}
+	t.Run("sign-in required for the add", func(t *testing.T) {
+		m, prov := overlay(t, fmt.Errorf("spotify: add track: %w", playlist.ErrNeedsAuth))
+		wantView(t, "the overlay", m, []string{`Created "New"`, signInPrompt}, "Create failed")
+		if !m.libSyncState(catalog.Spotify).needsAuth {
+			t.Error("Spotify is not marked sign-in required")
+		}
+		m = pressAll(t, m, "enter")
+		if prov.auths != 1 || prov.adds != 0 {
+			t.Errorf("after Enter: sign-ins = %d, adds = %d; want the sign-in and no add", prov.auths, prov.adds)
+		}
+		wantView(t, "the overlay after signing in", m, []string{`Created "New"`, "was not added"}, signInPrompt)
+	})
+	t.Run("the add was not sent", func(t *testing.T) {
+		m, _ := overlay(t, fmt.Errorf("spotify: add track: %w", provider.ErrNotApplied))
+		wantView(t, "the overlay", m, []string{`Created "New"`, "was not added"}, "may or may not", "Create failed")
+	})
+	t.Run("the add timed out", func(t *testing.T) {
+		m, _ := overlay(t, fmt.Errorf("spotify: add track: %w", context.DeadlineExceeded))
+		wantView(t, "the overlay", m, []string{`Created "New"`, "may or may not have been added", "check the playlist"}, "was not added", "Create failed")
+	})
 }

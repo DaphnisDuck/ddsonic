@@ -182,6 +182,7 @@ func (m *Model) spotSearchBusy() bool {
 
 func (m *Model) setSpotSearchError(message string) {
 	m.spotSearch.err = message
+	m.spotSearch.notice = "" // ddsonic: a new message stands alone
 	if m.spotSearch.screen == spotSearchResults {
 		m.spotSearchResultsMaybeAdjustScroll(m.spotSearchResultsVisible())
 	}

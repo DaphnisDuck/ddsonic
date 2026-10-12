@@ -320,7 +320,11 @@ type spotSearchState struct {
 	selTrack     playlist.Track          // track selected to add
 	newName      string                  // new playlist name input
 	err          string
-	cancel       func()
+	// notice is what already happened and stays, shown above err while err
+	// asks for the sign-in: a playlist that was created before its track's
+	// add was refused (ddsonic: library_signin.go).
+	notice string
+	cancel func()
 }
 
 // catalogBatchState holds state for lazy-loading catalog entries from a provider.CatalogLoader.
