@@ -91,8 +91,8 @@ func credsFile() (string, error) {
 //
 // It is a check, not a sandbox: it assumes the test owns that directory and
 // nothing re-links it between the check and the use. An entry that is a
-// regular file with another hard link passes, and the inode is then shared
-// with wherever that link is. A bind or shared mount is not seen as a
+// regular file with another hard link passes, and a load then reads an inode
+// shared with wherever that link is. A bind or shared mount is not seen as a
 // boundary. It covers Spotify's credential file only, and has been run on
 // Linux only.
 func plainTempPath(path string) (string, bool) {
