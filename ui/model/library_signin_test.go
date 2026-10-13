@@ -866,3 +866,37 @@ func TestQuitDuringSignIn(t *testing.T) {
 		t.Error("a sign-in that ended after quit started a sync")
 	}
 }
+
+// A sync that began before the sign-in and ends after it says nothing about
+// the new sign-in: its failure does not bring the sign-in row back or become
+// the list's error. The sync the sign-in required ends later and is believed.
+func TestStaleSyncFailureAfterSignInKeepsSignedInState(t *testing.T) {
+	l := newSignInLib(t)
+	m := l.model()
+	var required []string
+	m.SetCatalogSyncRequired(func(p string) uint64 {
+		required = append(required, p)
+		return 7 // the ticket of the sync this sign-in required
+	})
+	m = pressAll(t, syncEnds(t, m, errSignInNeeded), "enter")
+	// An older sync is still running when the user signs in.
+	m = sendAll(t, m, CatalogSyncMsg{Provider: catalog.Spotify, Phase: CatalogSyncStarted})
+	updated, cmd := m.Update(libKey("enter"))
+	m = runAll(t, updated.(Model), cmd)
+	if len(required) != 1 || len(l.refreshes) != 0 {
+		t.Fatalf("the sign-in asked for %d required and %d ordinary syncs, want 1 and 0", len(required), len(l.refreshes))
+	}
+	wantView(t, "after signing in", m, []string{"Albums"}, signInRow)
+
+	// The older sync ends, refused: it began under the old sign-in.
+	m = sendAll(t, m, CatalogSyncMsg{Provider: catalog.Spotify, Phase: CatalogSyncFinished, Err: errSignInNeeded, Ticket: 0})
+	wantView(t, "after the older sync's refusal", m, []string{"Albums"}, signInRow, "sync failed")
+	if st := m.libSyncState(catalog.Spotify); st.needsAuth || st.lastErr != "" {
+		t.Errorf("the older sync's end was believed: needsAuth %t, error %q", st.needsAuth, st.lastErr)
+	}
+
+	// The required sync ends: its verdict counts, whichever it is.
+	m = sendAll(t, m, CatalogSyncMsg{Provider: catalog.Spotify, Phase: CatalogSyncStarted, Ticket: 7})
+	m = sendAll(t, m, CatalogSyncMsg{Provider: catalog.Spotify, Phase: CatalogSyncFinished, Err: errSignInNeeded, Ticket: 7})
+	wantView(t, "after the required sync's refusal", m, []string{signInRow})
+}

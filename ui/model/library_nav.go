@@ -51,6 +51,9 @@ type libraryState struct {
 	// Catalog sync status per provider, and the action behind "r".
 	sync    map[string]*libSync
 	refresh func(provider string)
+	// refreshRequired is refresh for the sync a sign-in requires
+	// (SetCatalogSyncRequired); nil without a catalog runtime.
+	refreshRequired func(provider string) uint64
 	// auth is who signs in for each synced source that can be signed in to
 	// from the library (library_signin.go).
 	auth map[string]playlist.Authenticator
@@ -79,6 +82,10 @@ type libSync struct {
 	// needsAuth: the source asked for sign-in, in a sync, in playback or in
 	// its own search (library_signin.go).
 	needsAuth bool
+	// authTicket is the ticket of the sync a sign-in required, until that
+	// sync has ended: a sync that ends with an older ticket began before the
+	// sign-in, and says nothing about it (librarySignedIn).
+	authTicket uint64
 }
 
 // CatalogSyncPhase is the stage a CatalogSyncMsg reports.
@@ -97,6 +104,9 @@ type CatalogSyncMsg struct {
 	Phase      CatalogSyncPhase
 	Collection string // CatalogSyncCollectionDone only
 	Err        error
+	// Ticket is the latest sync a sign-in required that this run was started
+	// to serve (SetCatalogSyncRequired); zero when none.
+	Ticket uint64
 }
 
 // CatalogChangedMsg reports that a sync changed provider's catalog rows, for
@@ -121,6 +131,13 @@ func (m *Model) SetCatalogSync(status map[string]CatalogStatus, refresh func(pro
 		m.lib.sync[provider] = &libSync{lastSuccess: st.LastSuccess, lastErr: st.LastError}
 	}
 	m.lib.refresh = refresh
+}
+
+// SetCatalogSyncRequired gives the library the function a successful sign-in
+// calls: it syncs provider even when an older sync still runs, after it, and
+// returns the ticket that sync's messages will carry. It must not block.
+func (m *Model) SetCatalogSyncRequired(required func(provider string) uint64) {
+	m.lib.refreshRequired = required
 }
 
 // libCatalogProvider is the provider of the nearest catalog level on the
@@ -431,6 +448,13 @@ func (m *Model) handleLibraryMsg(msg tea.Msg) (tea.Cmd, bool) {
 				return m.libraryCatalogChanged(msg.Provider), true
 			}
 		case CatalogSyncFinished:
+			if st.authTicket != 0 && msg.Ticket < st.authTicket {
+				// A sync that began before the sign-in: the one the sign-in
+				// required follows it. Its rows are reread; its verdict on
+				// the sign-in, and its error, are about the old sign-in.
+				return m.libraryCatalogChanged(msg.Provider), true
+			}
+			st.authTicket = 0
 			st.running = false
 			switch {
 			case msg.Err == nil:

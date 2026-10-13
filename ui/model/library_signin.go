@@ -258,7 +258,12 @@ func (m *Model) librarySignedIn(msg libraryAuthDoneMsg) tea.Cmd {
 	}
 	m.libSyncState(provider).lastErr = ""
 	m.libSetNeedsAuth(provider, false)
-	if m.lib.refresh != nil {
+	// The sync is required, not merely asked for: it runs after any sync
+	// still running, whose end would otherwise be taken for this one's.
+	switch {
+	case m.lib.refreshRequired != nil:
+		m.libSyncState(provider).authTicket = m.lib.refreshRequired(provider)
+	case m.lib.refresh != nil:
 		m.lib.refresh(provider)
 	}
 	var cmds []tea.Cmd
