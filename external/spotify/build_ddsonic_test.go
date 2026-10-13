@@ -497,7 +497,6 @@ func TestSignInEndsOnItsOwnTimeout(t *testing.T) {
 	for _, have := range []string{"no session", "a session that needs sign-in"} {
 		t.Run(have, func(t *testing.T) {
 			path := storeCreds(t)
-			before := mustRead(t, path)
 			held := newGate()
 			fresh := builtWith("synthetic-late")
 			stubSignIn(t, func(context.Context) (*Session, error) {
@@ -513,7 +512,7 @@ func TestSignInEndsOnItsOwnTimeout(t *testing.T) {
 			}
 			p := New(sess, "client", 320)
 			p.storedRefused = true // the browser is the only way in
-			before = mustRead(t, path)
+			before := mustRead(t, path)
 
 			done := make(chan error, 1)
 			go func() { done <- p.Authenticate() }()
