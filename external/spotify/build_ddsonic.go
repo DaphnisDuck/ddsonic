@@ -53,6 +53,9 @@ type storedCall struct {
 var (
 	storedJoined func()
 	buildCommit  func()
+	// beforeAccept runs when a build has returned and is about to be
+	// published or installed: just before the lock that decides it.
+	beforeAccept func()
 )
 
 // builds counts the build workers still running, so a test can wait for
@@ -210,9 +213,12 @@ func (p *SpotifyProvider) runStored(call *storedCall, ctx context.Context, cance
 	}
 	p.mu.Lock()
 	p.stored, p.storedCancel = nil, nil
-	if err == nil && ctx.Err() != nil {
-		// In time for runBuild and too late for the commit: rejected.
-		err = fmt.Errorf("spotify: the session build did not finish in time: %w", ctx.Err())
+	// The call's context is looked at first, whatever the build returned: a
+	// call that has ended, by its deadline or a cancellation, ended. Its
+	// session is not taken, and neither is its verdict: a refusal that
+	// arrives with a dead call is not remembered against the stored sign-in.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		err = fmt.Errorf("spotify: the session build did not finish in time: %w", ctxErr)
 	}
 	signingIn := p.signingIn != nil // a sign-in is registered, and waiting
 	installed := false
@@ -339,7 +345,9 @@ func (p *SpotifyProvider) signIn() error {
 			fresh, call.err = runBuild(ctx, func(ctx context.Context) (*Session, error) { return newSessionInteractive(ctx, clientID) })
 		}
 	}
-	cancel()
+	if browser && beforeAccept != nil {
+		beforeAccept()
+	}
 
 	// The sign-in ends here, and only here: it deregisters itself, so a
 	// stored build that completes later moves no count for it.
@@ -350,11 +358,16 @@ func (p *SpotifyProvider) signIn() error {
 	}
 	switch {
 	case call.err != nil:
-	case fresh != nil && (p.closed || p.session != nil):
+	case fresh != nil && p.closed:
 		// Quit while the browser was open: the session is not taken.
-		if p.closed {
-			call.err = errProviderClosed
-		}
+		call.err = errProviderClosed
+	case fresh != nil && ctx.Err() != nil:
+		// The sign-in's own call ended before its session was installed:
+		// decided here, under the lock the install would take. Nothing is
+		// installed, counted or written.
+		call.err = fmt.Errorf("spotify: authentication cancelled: %w", ctx.Err())
+	case fresh != nil && p.session != nil:
+		// The provider has a session already; this one is not needed.
 	default:
 		// The sign-in is done once its session is in place and its
 		// credential written: here for a provider that had no session, in
@@ -370,6 +383,7 @@ func (p *SpotifyProvider) signIn() error {
 		p.resetSessionScopedStateLocked()
 	}
 	p.mu.Unlock()
+	cancel() // after the decision: it must not be what ends the call
 	if fresh != nil {
 		fresh.Close() // built, and not taken
 	}

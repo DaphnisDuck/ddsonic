@@ -71,8 +71,9 @@ type notSent string
 func (e notSent) Error() string        { return string(e) }
 func (e notSent) Is(target error) bool { return target == provider.ErrNotApplied }
 
-// signInTimeout bounds one interactive sign-in.
-const signInTimeout = 5 * time.Minute
+// signInTimeout bounds one interactive sign-in. A variable so a test can
+// let it pass.
+var signInTimeout = 5 * time.Minute
 
 // The session's builders and librespot calls, as variables so a test can
 // stand in for Spotify.
@@ -305,13 +306,23 @@ func isWrite(method string) bool {
 //
 // The old playback bundle is retired after the lock is released; the caller
 // does not wait for it (playback.retireNow).
-func (s *Session) publish(fresh *Session, from uint64, silent bool, published func()) (bool, error) {
+//
+// ctx is the context of the call that owns the build. It is looked at here,
+// under the lock, before anything is swapped, counted or written: a call
+// that has ended publishes nothing, however late it ended. One that ends
+// after this point has been published, and stands.
+func (s *Session) publish(ctx context.Context, fresh *Session, from uint64, silent bool, published func()) (bool, error) {
 	s.mu.Lock()
 	switch {
 	case s.closed:
 		s.mu.Unlock()
 		fresh.Close()
 		return false, errSessionClosed
+	case ctx.Err() != nil:
+		err := ctx.Err()
+		s.mu.Unlock()
+		fresh.Close()
+		return false, err
 	case silent && s.gen != from:
 		s.mu.Unlock()
 		fresh.Close()
@@ -416,7 +427,10 @@ func (s *Session) reconnect(ctx context.Context, build func(context.Context, str
 	if err != nil {
 		return fmt.Errorf("spotify: reconnect: %w", err)
 	}
-	done, err := s.publish(newSess, from, silent, published)
+	if beforeAccept != nil {
+		beforeAccept()
+	}
+	done, err := s.publish(ctx, newSess, from, silent, published)
 	if !done {
 		return err
 	}
