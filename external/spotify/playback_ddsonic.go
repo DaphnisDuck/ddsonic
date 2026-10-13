@@ -54,20 +54,19 @@ var (
 		}
 		return b.player.NewStream(ctx, client, id, bitrate, 0)
 	}
-	// closeAccessPoint starts the close of a librespot session's access
-	// point. It may block for as long as librespot is reconnecting.
-	closeAccessPoint = func(sess *session.Session) {
-		if sess != nil {
-			sess.Accesspoint().Close()
+	// closeAccessPoint starts the close of a bundle's access point. It may block for as long as librespot is reconnecting.
+	closeAccessPoint = func(b *playback) {
+		if b.sess != nil {
+			b.sess.Accesspoint().Close()
 		}
 	}
 	// accessPointDone is closed once a close of the access point has begun:
 	// librespot's waits that ignore a context end with it.
-	accessPointDone = func(sess *session.Session) <-chan struct{} {
-		if sess == nil {
+	accessPointDone = func(b *playback) <-chan struct{} {
+		if b.sess == nil {
 			return closedChan
 		}
-		return sess.Accesspoint().Done()
+		return b.sess.Accesspoint().Done()
 	}
 	// openHook, when set by a test, runs at the named points of a track open.
 	openHook func(point string)
@@ -124,8 +123,8 @@ func (b *playback) retireNow() {
 func (b *playback) tail() {
 	defer tails.Done()
 	defer close(b.gone)
-	go closeAccessPoint(b.sess)
-	<-accessPointDone(b.sess)
+	go closeAccessPoint(b)
+	<-accessPointDone(b)
 	b.users.Wait()
 	closeLibrespot(b.player, b.sess)
 }
