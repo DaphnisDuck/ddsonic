@@ -178,8 +178,10 @@ func disposeStream(stream *librespotPlayer.Stream, h *openHandle) {
 // order needs are unexported. So a Vorbis decoder that was never accepted is
 // left unreleased, as an established one is by the streamer: its native
 // memory may stay retained. The owner accepted that as a documented 1.0
-// resource limitation, to be measured on the next candidate, and the defect
-// is reported upstream; the SDK is not patched for it.
+// resource limitation, to be measured on the next candidate. A report for
+// go-librespot is drafted
+// (docs/ddsonic/upstream-reports/go-librespot-vorbis-close.md) and the owner
+// will file it; the SDK is not patched for it.
 func releaseDecoder(src librespot.AudioSource) {
 	switch src := src.(type) {
 	case *vorbis.Decoder:

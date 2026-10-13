@@ -1,6 +1,14 @@
 # go-librespot: `vorbis.(*Decoder).Close` can abort the process
 
-> **DRAFT, NOT YET FILED.** Prepared 2026-10-13 for the go-librespot project. Nothing has been sent anywhere. The owner (Steve), or whoever the owner designates, reviews this text and files it. Until then go-librespot's maintainers do not know of it. ddsonic's 1.0 release does not wait for an answer (`plan.md`, Decisions log, 2026-10-13).
+> **DRAFT, NOT YET FILED.** Prepared 2026-10-13 for the go-librespot project. Nothing has been sent anywhere. The owner (Steve), or whoever the owner designates, reviews this text and files it. This project has not notified go-librespot of it; whether anyone else has reported it was not checked. ddsonic's 1.0 release does not wait for an answer (`plan.md`, Decisions log, 2026-10-13).
+>
+> **Before filing** (for whoever files it):
+>
+> - Run the standalone test under "Reproduction to offer" once. It is a condensed restatement of the harness that was measured and has **not been executed** in the form shown.
+> - Check whether a later go-librespot has already changed this code; only v0.9.1 was looked at.
+> - Include the two libvorbis links under "Observed cause". The designated reviewer supplied them and confirmed the wording of the `decoder_example.c` comment.
+> - The measured numbers are the implementer's; the reviewer did not re-measure them independently.
+> - The proposed reorder is sound as a starting point for upstream's investigation. It has not been independently validated as a complete patch.
 
 ## Title
 
@@ -36,9 +44,22 @@ github.com/devgianlu/go-librespot/vorbis.(*Decoder).Close(...)
 
 It happens in `Close` itself. The decoder does not have to have been read from, `Close` is called once, from one goroutine, and nothing else is using the decoder.
 
-## Minimal reproduction
+## What was measured
 
-A test inside go-librespot's own `vorbis` package, so that nothing but the package and its dependencies is involved. Any small Ogg Vorbis file will do; this one was made with:
+The numbers below come from a scratch harness, not from the snippet in the next section. The harness was a test file compiled into a scratch copy of go-librespot v0.9.1's own `vorbis` package, so that nothing but the package and its dependencies was involved. It had a helper that read a small synthetic Ogg Vorbis file and built a decoder over it with `New(&librespot.NullLogger{}, bytes.NewReader(data), nil, 1)`, and, among its tests, two that each did that 400 times: one called `Close` on each decoder; the other, in place of `Close`, called the decoder's cleanup functions itself in the order under "Proposed change". Each run was a separate process.
+
+| Cleanup order | Runs | Runs that aborted |
+|---|---|---|
+| `Close` as it is at v0.9.1 | 15 | 12 |
+| The same cleanup calls in the order under "Proposed change" | 15 | 0 |
+
+These were measured by the implementer on the one machine under "Environment" and were not independently re-measured by the reviewer.
+
+## Reproduction to offer
+
+**Not executed as shown.** This is a condensed, standalone restatement of the first of the harness's two tests, written for the report. It is expected to behave as the harness did, and it must be run once to confirm that before the report is filed. The numbers above are the harness's, not this snippet's.
+
+It goes inside go-librespot's own `vorbis` package. Any small Ogg Vorbis file will do; the harness's was made with:
 
 ```sh
 ffmpeg -f lavfi -i "sine=frequency=440:duration=0.3:sample_rate=44100" -ac 2 -c:a libvorbis -q:a 3 -f ogg tone.ogg
@@ -76,17 +97,6 @@ OGG=$PWD/tone.ogg go test -count=1 -run TestCloseLoop ./vorbis
 
 The abort is intermittent, so the test is run several times.
 
-### What was measured
-
-Each run is a separate process doing 400 construct-and-close cycles.
-
-| Cleanup order | Runs | Runs that aborted |
-|---|---|---|
-| `Close` as it is at v0.9.1 | 15 | 12 |
-| The same cleanup calls in the order below ("Proposed change") | 15 | 0 |
-
-The second row used the same loop with the decoder's cleanup calls written out in the test in the changed order, in place of `d.Close()`.
-
 ## Observed cause
 
 `decoderStateCleanup` releases the decoder's state in this order:
@@ -99,7 +109,10 @@ The second row used the same loop with the decoder's cleanup calls written out i
 
 The dsp state keeps a pointer to the info it was initialised with (`vorbis_synthesis_init(&dsp, &info)`), and `vorbis_dsp_clear` reads that info while it tears the dsp state down. In the order above the info has been cleared, and its memory freed, by the time `vorbis_dsp_clear` runs, so it reads freed memory. What it then does depends on what that memory holds, which is why the abort is intermittent.
 
-libvorbis's own decoding example (`examples/decoder_example.c`) cleans up in the opposite order: `vorbis_block_clear`, then `vorbis_dsp_clear`, and later `vorbis_comment_clear` and `vorbis_info_clear`, the last with the comment "must be called last".
+libvorbis's own decoding example cleans up in the opposite order: `vorbis_block_clear`, then `vorbis_dsp_clear`, and later `vorbis_comment_clear` and `vorbis_info_clear`, the last with the comment "must be called last". Primary sources, at libvorbis v1.3.7 (supplied by ddsonic's designated reviewer, who confirmed the comment's wording):
+
+- The decoder example's cleanup: <https://github.com/xiph/vorbis/blob/v1.3.7/examples/decoder_example.c#L270>
+- The dsp state's cleanup: <https://github.com/xiph/vorbis/blob/v1.3.7/lib/block.c#L290>. `block.c:172` is where the dsp state keeps the info pointer; `block.c:290-345` is the cleanup that reads the associated info and setup state.
 
 This is a reading of the code together with the measurement above. The exact path inside `vorbis_dsp_clear` that ends in `free(): invalid pointer` was not traced further.
 
@@ -142,7 +155,7 @@ func (d *Decoder) decoderStateCleanup() {
 }
 ```
 
-Only the two blocks for the block and the dsp state move; every call is otherwise as it is today. This is the order the second row of the table was measured with.
+Only the two blocks for the block and the dsp state move; every call is otherwise as it is today. This is the order the second row of the table was measured with. It is offered for upstream's investigation and has not been independently validated as a complete patch.
 
 ## Environment
 
@@ -150,7 +163,7 @@ Only the two blocks for the block and the dsp state move; every call is otherwis
 - Go 1.27.2, cgo, GCC 16.2.1
 - libvorbis 1.3.7, libogg 1.3.6 (system libraries, found through pkg-config)
 
-Not tried: other platforms, other libvorbis versions, other allocators, a decoder that has been read from before `Close`.
+Not tried or not verified: later go-librespot versions, other platforms, other libvorbis versions, other allocators, a decoder that has been read from before `Close`, and the exact final error path inside `vorbis_dsp_clear`.
 
 ## Why it matters to a caller
 

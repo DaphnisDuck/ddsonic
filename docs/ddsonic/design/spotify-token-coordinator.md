@@ -739,8 +739,9 @@ decoder nobody has read. The implementation does not close a never-accepted
 Vorbis decoder. **Owner's decision (2026-10-13, `plan.md`, R9-4 and the
 Decisions log):** that is accepted as a documented 1.0 resource and
 reliability limitation, measured on the next candidate before release, and
-the SDK defect is reported upstream (a draft, not yet filed:
-`docs/ddsonic/upstream-reports/go-librespot-vorbis-close.md`); the SDK is not
+a report of the SDK defect is drafted for upstream, not yet filed, and the
+owner will file it
+(`docs/ddsonic/upstream-reports/go-librespot-vorbis-close.md`); the SDK is not
 patched, forked or re-pinned for it. It is not a correctness or
 credential-integrity defect and not a security waiver. MP3 and FLAC are closed
 as this section says, and tested with real decoders. The original sentence follows. I found nothing in the pinned code that makes any of the
