@@ -221,9 +221,11 @@ func (p *SpotifyProvider) runStored(call *storedCall, ctx context.Context, cance
 		err = errProviderClosed
 	case err == nil && p.session == nil:
 		p.session = sess
-		if signingIn {
-			// A stored session installed for a sign-in is that sign-in's:
-			// the count moves with the install, as it always has.
+		if signingIn && !sess.needsSignIn() {
+			// A stored session that signs the user in, installed for a
+			// sign-in, is that sign-in's: the count moves with the install,
+			// as it always has. One without a Web API token signs nobody
+			// in; the browser sign-in that follows is what counts.
 			p.authEpoch.Add(1)
 		}
 		sess.accept() // taken, so its credential is written

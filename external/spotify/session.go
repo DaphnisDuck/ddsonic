@@ -154,6 +154,14 @@ func newSessionFromStored(ctx context.Context, clientID string, creds *storedCre
 	// Try silent refresh first (no browser), fall back to interactive.
 	var oauthToken *oauth2.Token
 	var refreshErr error
+	// ddsonic: a setup whose context has ended sends no refresh. librespot
+	// can hold a builder past its deadline (the identity read above waits for
+	// a lock without it); by then the build has been given up, and the stored
+	// refresh token is another build's or a coordinator's to refresh.
+	if err := ctx.Err(); err != nil {
+		closeLibrespot(nil, sess)
+		return nil, fmt.Errorf("spotify: session setup ran out of time before refreshing the web api token: %w", err)
+	}
 	if creds.RefreshToken != "" {
 		// ddsonic: upstream deb2f447. The refresh shares the setup's deadline.
 		token, err := silentTokenRefresh(ctx, clientID, creds.RefreshToken)
