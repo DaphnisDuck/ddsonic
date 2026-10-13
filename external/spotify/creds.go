@@ -82,38 +82,69 @@ func underTempDir(path string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// resolvePath is where path leads: the longest part of it that exists, with
-// its links followed, and the rest appended. A final link is followed even
-// when it leads nowhere yet, since a write would go there.
+// maxLinks is how many symbolic links one path may lead through, the
+// kernel's own bound; a loop of links runs into it.
+const maxLinks = 40
+
+// resolvePath is where path leads, read the way the filesystem reads it: one
+// component at a time, each link followed where it stands, and a ".." taken
+// from the directory the links before it led to, never from the spelling.
+// What does not exist yet is appended as it is spelled, so a final link is
+// followed even when it leads nowhere yet, since a write would go there. A
+// path the filesystem itself would not resolve is not resolved here: a loop
+// of links, a ".." after a name that does not exist, a component that cannot
+// be examined.
 func resolvePath(path string) (string, bool) {
-	p, rest := filepath.Clean(path), ""
-	for range 64 { // links followed; a loop of them is not resolved
-		info, err := os.Lstat(p)
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return "", false
+	}
+	sep := string(filepath.Separator)
+	rootOf := func(p string) string { return filepath.VolumeName(p) + sep }
+	split := func(p string) []string { return strings.Split(strings.TrimPrefix(p, filepath.VolumeName(p)), sep) }
+
+	// resolved has no link, "." or ".." in it; pending is still to be read.
+	resolved, pending := rootOf(path), split(path)
+	links, missing := 0, false
+	for len(pending) > 0 {
+		name := pending[0]
+		pending = pending[1:]
+		switch name {
+		case "", ".":
+			continue
+		case "..":
+			if missing {
+				return "", false
+			}
+			resolved = filepath.Dir(resolved)
+			continue
+		}
+		next := filepath.Join(resolved, name)
+		if missing {
+			resolved = next
+			continue
+		}
+		info, err := os.Lstat(next)
 		switch {
-		case err == nil && info.Mode()&os.ModeSymlink != 0:
-			target, err := os.Readlink(p)
-			if err != nil {
-				return "", false
-			}
-			if !filepath.IsAbs(target) {
-				target = filepath.Join(filepath.Dir(p), target)
-			}
-			p = filepath.Clean(target)
-		case err == nil:
-			resolved, err := filepath.EvalSymlinks(p)
-			if err != nil {
-				return "", false
-			}
-			return filepath.Join(resolved, rest), true
 		case errors.Is(err, os.ErrNotExist):
-			parent := filepath.Dir(p)
-			if parent == p {
+			resolved, missing = next, true
+		case err != nil:
+			return "", false
+		case info.Mode()&os.ModeSymlink != 0:
+			if links++; links > maxLinks {
 				return "", false
 			}
-			p, rest = parent, filepath.Join(filepath.Base(p), rest)
+			target, err := os.Readlink(next)
+			if err != nil {
+				return "", false
+			}
+			if filepath.IsAbs(target) {
+				resolved = rootOf(target)
+			}
+			pending = append(split(target), pending...)
 		default:
-			return "", false
+			resolved = next
 		}
 	}
-	return "", false
+	return resolved, true
 }
