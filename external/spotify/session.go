@@ -800,7 +800,7 @@ func generateDeviceID() string {
 }
 
 func loadCreds() (*storedCreds, error) {
-	path, err := CredsPath()
+	path, err := credsFile() // ddsonic: refuses the real file under go test
 	if err != nil {
 		return nil, err
 	}
@@ -816,7 +816,7 @@ func loadCreds() (*storedCreds, error) {
 }
 
 func saveCreds(creds *storedCreds) error {
-	path, err := CredsPath()
+	path, err := credsFile() // ddsonic: refuses the real file under go test
 	if err != nil {
 		return err
 	}

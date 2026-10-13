@@ -2,8 +2,11 @@ package spotify
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"testing"
 
 	"github.com/bjarneo/cliamp/internal/appdir"
 )
@@ -27,7 +30,7 @@ func CredsPath() (string, error) {
 // DeleteCreds removes the stored Spotify credentials file.
 // Returns true if a file was removed, false if it did not exist.
 func DeleteCreds() (bool, error) {
-	path, err := CredsPath()
+	path, err := credsFile() // ddsonic: refuses the real file under go test
 	if err != nil {
 		return false, err
 	}
@@ -38,4 +41,27 @@ func DeleteCreds() (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// credsFile is CredsPath for the code that reads, writes or deletes the
+// credential file. ddsonic: under go test it refuses a path outside the
+// system's temporary directory. A test that has not pointed the config
+// directory at a temporary one would otherwise read the user's own stored
+// sign-in, and write it; like the token and browser guards
+// (session_auth_ddsonic.go), this fails such a test instead, in whichever
+// package it is.
+func credsFile() (string, error) {
+	path, err := CredsPath()
+	if err != nil {
+		return "", err
+	}
+	if testing.Testing() && !underTempDir(path) {
+		return "", fmt.Errorf("spotify: the credential file is outside the test's temporary directory: %w", errNoStandIn)
+	}
+	return path, nil
+}
+
+func underTempDir(path string) bool {
+	rel, err := filepath.Rel(os.TempDir(), path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

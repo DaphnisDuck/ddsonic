@@ -2,6 +2,7 @@ package spotify
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -79,4 +80,33 @@ func TestSignInFailsClosedUnderTest(t *testing.T) {
 			}
 		}
 	})
+}
+
+// The credential file is fail-closed under test too. With nothing set, the
+// package's tests resolve a config directory inside the temporary directory;
+// and a test that points HOME somewhere else is refused the file, before it
+// is read, written or deleted.
+func TestCredentialFileFailsClosedUnderTest(t *testing.T) {
+	path, err := CredsPath()
+	if err != nil || !underTempDir(path) {
+		t.Fatalf("with nothing set, the credential path is %q (%v): not in the temporary directory", path, err)
+	}
+
+	outside := "/var/empty/ddsonic-not-a-test-home"
+	t.Setenv("HOME", outside)
+	if path, _ := CredsPath(); underTempDir(path) {
+		t.Fatalf("the case does not leave the temporary directory: %q", path)
+	}
+	if _, err := loadCreds(); !errors.Is(err, errNoStandIn) {
+		t.Errorf("loadCreds() outside the temporary directory = %v, want the guard's refusal", err)
+	}
+	if err := saveCreds(&storedCreds{Username: "u"}); !errors.Is(err, errNoStandIn) {
+		t.Errorf("saveCreds() outside the temporary directory = %v, want the guard's refusal", err)
+	}
+	if _, err := DeleteCreds(); !errors.Is(err, errNoStandIn) {
+		t.Errorf("DeleteCreds() outside the temporary directory = %v, want the guard's refusal", err)
+	}
+	if _, err := os.Stat(outside); err == nil {
+		t.Errorf("%s was created", outside)
+	}
 }
