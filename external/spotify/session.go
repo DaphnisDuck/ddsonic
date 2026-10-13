@@ -142,6 +142,10 @@ func NewSession(ctx context.Context, clientID string) (*Session, error) {
 			return s, nil
 		}
 		// Stored credentials failed (expired/revoked), fall through to interactive.
+		// ddsonic: unless the caller has given up meanwhile.
+		if err := oauthCancelled(ctx); err != nil {
+			return nil, fmt.Errorf("spotify: %w", err)
+		}
 	}
 	return newInteractiveSession(ctx, clientID)
 }
@@ -227,6 +231,10 @@ func newSessionFromStored(ctx context.Context, clientID string, creds *storedCre
 				return nil, err
 			}
 			return s, nil
+		}
+		if err := oauthCancelled(ctx); err != nil { // ddsonic: no browser for a caller that gave up
+			closeLibrespot(nil, sess)
+			return nil, fmt.Errorf("spotify: %w", err)
 		}
 		token, err := doWebAPIAuth(ctx, clientID)
 		if err != nil {
@@ -386,6 +394,13 @@ func isInvalidGrant(err error) bool {
 	return rerr.ErrorCode == "invalid_grant"
 }
 
+// ddsonic: the callback listener and the browser launch, as variables so a
+// test can stand in for them.
+var (
+	oauthListen = net.Listen
+	openBrowser = browser.Open
+)
+
 // oauthCallbackHTML is the response sent to the browser after a successful OAuth2 callback.
 const oauthCallbackHTML = `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>cliamp</title></head>
@@ -473,6 +488,15 @@ func performOAuth2PKCE(ctx context.Context, clientID string, scopes []string) (*
 	return tokens[0], nil
 }
 
+// oauthCancelled is the error of a sign-in flow whose context has ended, and
+// nil while it has not. ddsonic
+func oauthCancelled(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("authentication cancelled: %w", err)
+	}
+	return nil
+}
+
 // performOAuth2PKCEFlows opens one browser journey for one or more OAuth
 // authorizations. Each callback redirects the same tab to the next flow, so a
 // custom Web API client can be followed by keymaster playback authorization
@@ -481,8 +505,14 @@ func performOAuth2PKCEFlows(ctx context.Context, flows []oauthFlow) ([]*oauth2.T
 	if len(flows) == 0 {
 		return nil, fmt.Errorf("no OAuth flows configured")
 	}
+	// ddsonic: a flow that is already cancelled offers nothing: no callback
+	// port here, no URL and no browser below. A cancellation that lands just
+	// after a check is an ordinary race with the browser, as it always was.
+	if err := oauthCancelled(ctx); err != nil {
+		return nil, err
+	}
 
-	lis, err := net.Listen("tcp", callbackAddress())
+	lis, err := oauthListen("tcp", callbackAddress()) // ddsonic: a variable, for tests
 	if err != nil {
 		return nil, fmt.Errorf("listen on port %d: %w", CallbackPort, err)
 	}
@@ -509,8 +539,14 @@ func performOAuth2PKCEFlows(ctx context.Context, flows []oauthFlow) ([]*oauth2.T
 		}
 	}()
 
+	if err := oauthCancelled(ctx); err != nil { // ddsonic
+		return nil, err
+	}
 	notifyAuthURL(pending[0].authURL)
-	_ = browser.Open(pending[0].authURL) // best-effort — user can open the URL manually if this fails
+	if err := oauthCancelled(ctx); err != nil { // ddsonic
+		return nil, err
+	}
+	_ = openBrowser(pending[0].authURL) // best-effort — user can open the URL manually if this fails; ddsonic: a variable, for tests
 
 	tokens := make([]*oauth2.Token, len(pending))
 	for remaining := len(pending); remaining > 0; remaining-- {
