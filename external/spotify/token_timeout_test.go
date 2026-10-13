@@ -7,8 +7,6 @@ import (
 	"net/http"
 	"testing"
 	"time"
-
-	"golang.org/x/oauth2"
 )
 
 type stallTransport struct{}
@@ -37,29 +35,5 @@ func TestSilentTokenRefreshIsBounded(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("refresh still blocked on the token endpoint")
-	}
-}
-
-// An established session refreshes its expired Web API token through the
-// same bounded client.
-func TestWebAPITokenRefreshIsBounded(t *testing.T) {
-	oldClient, oldTransport := tokenHTTPClient, http.DefaultTransport
-	t.Cleanup(func() { tokenHTTPClient, http.DefaultTransport = oldClient, oldTransport })
-	http.DefaultTransport = stallTransport{}
-	tokenHTTPClient = &http.Client{Timeout: 50 * time.Millisecond}
-	expired := &oauth2.Token{AccessToken: "old", RefreshToken: "rt", Expiry: time.Now().Add(-time.Hour)}
-	source := webAPITokenSource("id", expired, storedCreds{RefreshToken: "rt"})
-	done := make(chan error, 1)
-	go func() {
-		_, err := source.Token()
-		done <- err
-	}()
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Error("timed-out refresh succeeded")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("refresh of an expired token still blocked on the token endpoint")
 	}
 }

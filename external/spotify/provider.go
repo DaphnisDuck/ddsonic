@@ -68,13 +68,18 @@ type SpotifyProvider struct {
 	userID     string // Spotify user ID, fetched lazily on first Playlists() call
 	meFetched  bool   // /v1/me has been attempted this session; suppresses retry on failure
 	mu         sync.Mutex
-	sessionMu  sync.Mutex                // ddsonic: one session creation at a time (sync and playback both ensure one)
 	rate       rateGate                  // ddsonic: Spotify's current rate-limit block
 	trackCache map[string]*playlistCache // playlist ID → cache entry
 	pending    map[string]*pendingTracks
 	authCancel context.CancelFunc // cancels any in-progress OAuth flow
 	signingIn  *signInCall        // ddsonic: the sign-in in flight, shared by its callers
-	closed     bool               // ddsonic: Close ran
+	// ddsonic: what is being built for a provider without a healthy session:
+	// nothing, the one build from the stored credential, or a browser
+	// sign-in (build_ddsonic.go).
+	phase        buildPhase
+	stored       *storedCall
+	storedCancel context.CancelFunc
+	closed       bool // ddsonic: Close ran
 	// ddsonic: how many sign-ins the user has completed here; an action on
 	// the account belongs to the one that stood when it began.
 	authEpoch atomic.Uint64
@@ -102,44 +107,8 @@ func New(session *Session, clientID string, bitrate int) *SpotifyProvider {
 	}
 }
 
-// ensureSession tries to create a session using stored credentials only
-// (no browser). Returns playlist.ErrNeedsAuth if interactive sign-in is needed.
-func (p *SpotifyProvider) ensureSession() error {
-	p.sessionMu.Lock() // ddsonic: a second caller waits for the first's session
-	defer p.sessionMu.Unlock()
-	p.mu.Lock()
-	if p.session != nil {
-		p.mu.Unlock()
-		return nil
-	}
-	// ddsonic: a closed provider builds nothing, and a stored sign-in that
-	// Spotify refused is not offered to it again.
-	if p.closed {
-		p.mu.Unlock()
-		return errProviderClosed
-	}
-	if p.storedRefused {
-		p.mu.Unlock()
-		return errStoredSignInRefused
-	}
-	clientID := p.clientID
-	p.mu.Unlock()
-
-	if clientID == "" {
-		return fmt.Errorf("spotify: no client ID available")
-	}
-	// ddsonic: upstream deb2f447. Bounded, so a stalled setup ends and gives
-	// sessionMu up (session_setup_ddsonic.go).
-	ctx, cancel := context.WithTimeout(context.Background(), sessionSetupTimeout)
-	defer cancel()
-	sess, err := newSessionSilent(ctx, clientID)
-	// ddsonic: the build ran without the lock, and the user may have signed
-	// in meanwhile (Authenticate does not wait for sessionMu). What the
-	// build found, a session or a refusal, is then about the stored
-	// credential the sign-in replaced: the provider keeps the session it
-	// took, and the build is closed unwritten (startupResult).
-	return p.startupResult(sess, err)
-}
+// ddsonic: ensureSession is in build_ddsonic.go: one build from the stored
+// credential, shared by every caller, with no lock held while it runs.
 
 // Authenticate runs the interactive sign-in flow (opens browser, waits for callback).
 //
@@ -154,16 +123,25 @@ func (p *SpotifyProvider) Authenticate() error {
 // Close releases the session if one was created.
 func (p *SpotifyProvider) Close() {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.closed = true // ddsonic: a sign-in still running installs nothing
+	p.closed = true // ddsonic: a sign-in or a build still running installs nothing
 	if p.authCancel != nil {
 		p.authCancel()
 		p.authCancel = nil
 	}
-	if p.session != nil {
-		p.session.Close()
+	if p.storedCancel != nil { // ddsonic
+		p.storedCancel()
+	}
+	sess := p.session
+	if sess != nil {
 		p.session = nil
 		p.resetSessionScopedStateLocked()
+	}
+	p.mu.Unlock()
+	// ddsonic: closed after the lock is released. Closing writes at most a
+	// local file and makes no librespot call; the session's playback is
+	// torn down behind it (playback_ddsonic.go).
+	if sess != nil {
+		sess.Close()
 	}
 }
 
@@ -727,11 +705,17 @@ func (p *SpotifyProvider) NewStreamer(uri string) (beep.StreamSeekCloser, beep.F
 		return nil, beep.Format{}, 0, fmt.Errorf("spotify: invalid URI %q: %w", uri, err)
 	}
 
-	gen := p.session.generation() // ddsonic: the sign-in this stream is opened under
+	// ddsonic: the session is read once, under the lock, and the build this
+	// stream is opened on remembered: what follows is about that build.
+	sess := p.sessionNow()
+	if sess == nil {
+		return nil, beep.Format{}, 0, playlist.ErrNeedsAuth
+	}
+	gen := sess.generation()
 	tryStream := func() (*spotifyStreamer, error) {
 		ctx, setupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer setupCancel()
-		stream, streamCancel, err := sessionNewStream(p.session, ctx, *spotID, p.bitrate) // ddsonic: a variable, for tests
+		stream, streamCancel, err := sessionNewStream(sess, ctx, *spotID, p.bitrate) // ddsonic: a variable, for tests
 		if err != nil {
 			return nil, err
 		}
@@ -750,7 +734,9 @@ func (p *SpotifyProvider) NewStreamer(uri string) (beep.StreamSeekCloser, beep.F
 	applog.UserWarn("spotify: stream auth error (%v), attempting silent reconnect...", err)
 
 	reconnCtx, reconnCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	reconnErr := sessionReconnect(p.session, reconnCtx) // ddsonic: a variable, for tests
+	// ddsonic: the build the stream failed on is the one rebuilt; when it
+	// has been replaced meanwhile there is nothing to rebuild.
+	reconnErr := sessionReconnect(sess, reconnCtx, gen)
 	reconnCancel()
 
 	if reconnErr != nil {
@@ -761,7 +747,7 @@ func (p *SpotifyProvider) NewStreamer(uri string) (beep.StreamSeekCloser, beep.F
 			return nil, beep.Format{}, 0, fmt.Errorf("spotify: stream auth error, silent reconnect failed: %w", reconnErr)
 		}
 		applog.UserWarn("spotify: silent reconnect failed (%v); sign-in required", reconnErr)
-		p.session.refuseSignIn(gen) // ddsonic: so a sign-in replaces this session
+		sess.refuseSignIn(gen) // ddsonic: so a sign-in replaces this session
 		return nil, beep.Format{}, 0, fmt.Errorf("spotify: stream auth error, silent reconnect failed: %w", playlist.ErrNeedsAuth)
 	}
 
@@ -776,7 +762,7 @@ func (p *SpotifyProvider) NewStreamer(uri string) (beep.StreamSeekCloser, beep.F
 	// Still failing after a silent reconnect — surface ErrNeedsAuth so the
 	// UI can prompt the user to sign in. Do NOT open a browser from here.
 	applog.UserWarn("spotify: stream still failing after silent reconnect (%v); sign-in required", err)
-	p.session.refuseSignIn(p.session.generation()) // ddsonic: so a sign-in replaces this session
+	sess.refuseSignIn(sess.generation()) // ddsonic: so a sign-in replaces this session
 	return nil, beep.Format{}, 0, fmt.Errorf("spotify: stream auth error after silent reconnect: %w", playlist.ErrNeedsAuth)
 }
 
@@ -789,8 +775,6 @@ func (p *SpotifyProvider) webAPI(ctx context.Context, method, path string, query
 // and a set of acceptable HTTP status codes (e.g. 200, 201). Retries 429 with
 // exponential backoff (honoring Retry-After when present).
 func (p *SpotifyProvider) webAPIWithBody(ctx context.Context, method, path string, query url.Values, body io.Reader, contentType string, acceptStatus ...int) (*http.Response, error) {
-	const maxRetries = 8
-
 	// Buffer the body so it can be replayed on retry.
 	var bodyBytes []byte
 	if body != nil {
@@ -801,60 +785,27 @@ func (p *SpotifyProvider) webAPIWithBody(ctx context.Context, method, path strin
 		}
 	}
 
-	// ddsonic: the sign-in a write belongs to, fixed before the first wait
-	// here: the caller's action (WithSignIn), or this request's own.
-	var pin *signInPin
+	// ddsonic: the request is one apiCall from here (request_ddsonic.go):
+	// the session is read, the token got, the request sent and its 401 or
+	// rate limit dealt with in the one place every Web API call shares, with
+	// what the request has spent kept across its retries. The sign-in a
+	// write belongs to is fixed before the first wait: the caller's action
+	// (WithSignIn), or this request's own. Upstream read the session and
+	// sent the request here, and returned a 401 as any other status.
+	call := &apiCall{method: method, path: path, query: query, body: bodyBytes, contentType: contentType, waitRate: true}
 	if isWrite(method) {
-		pin = p.signInPinFrom(ctx)
+		call.pin = p.signInPinFrom(ctx)
 	}
-	for attempt := range maxRetries {
-		if err := p.rateLimited(); err != nil { // ddsonic: blocked, do not ask
-			return nil, err
-		}
-		// ddsonic: the request is sent, and what its answer says about the
-		// sign-in dealt with, in the one place every Web API call shares
-		// (authorized, session_auth_ddsonic.go). What is left here is this
-		// helper's own rule for rate limits. Upstream read the session and
-		// sent the request here, and returned a 401 as any other status.
-		resp, err := p.authorized(ctx, method, path, query, bodyBytes, contentType, pin)
-		if err != nil {
-			return nil, err
-		}
-		if resp.StatusCode == http.StatusTooManyRequests {
-			resp.Body.Close()
-			wait := time.Duration(1<<uint(attempt)) * time.Second
-			if ra := resp.Header.Get("Retry-After"); ra != "" {
-				if secs, err := strconv.Atoi(ra); err == nil && secs > 0 {
-					wait = time.Duration(min(secs, maxRetryAfterSecs)) * time.Second // ddsonic: capped
-					if wait > maxInlineRetryWait {                                   // ddsonic: a long block fails now
-						return nil, p.block(wait)
-					}
-				}
-			}
-			// On the last attempt there's no retry after the wait, so don't
-			// sleep (up to 128s) just to give up; fail now. ddsonic: after
-			// reading Retry-After, so a long block on it closes the gate.
-			if attempt == maxRetries-1 {
-				break
-			}
-			applog.UserWarn("spotify: web api rate-limited on %s, retrying in %v (attempt %d/%d)", path, wait, attempt+1, maxRetries)
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(wait):
-				continue
-			}
-		}
-
-		ok := slices.Contains(acceptStatus, resp.StatusCode)
-		if !ok {
-			respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 512))
-			resp.Body.Close()
-			return nil, statusError(resp.StatusCode, resp.Status, respBody, readErr) // ddsonic: typed, same message
-		}
-		return resp, nil
+	resp, err := p.request(ctx, call)
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("spotify: web api rate-limited on %s after %d retries (try re-authenticating)", path, maxRetries)
+	if !slices.Contains(acceptStatus, resp.StatusCode) {
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 512))
+		resp.Body.Close()
+		return nil, statusError(resp.StatusCode, resp.Status, respBody, readErr) // ddsonic: typed, same message
+	}
+	return resp, nil
 }
 
 // devModeSearchLimit is the largest per-request limit /v1/search accepts for an

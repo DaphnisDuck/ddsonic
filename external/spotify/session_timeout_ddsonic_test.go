@@ -20,10 +20,10 @@ func TestWebAPIRequestIsBounded(t *testing.T) {
 	http.DefaultTransport = stallTransport{}
 	webHTTPClient = &http.Client{Timeout: 50 * time.Millisecond}
 
-	s := &Session{tokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "t"})}
+	s := tokenSession(&oauth2.Token{AccessToken: "t"})
 	done := make(chan error, 1)
 	go func() {
-		_, err := s.webApiWithBody(context.Background(), http.MethodGet, "/v1/me", nil, nil, "")
+		_, err := New(s, "client", 320).webAPI(context.Background(), http.MethodGet, "/v1/me", nil)
 		done <- err
 	}()
 	select {

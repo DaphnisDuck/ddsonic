@@ -11,8 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-
-	"golang.org/x/oauth2"
 )
 
 type searchRequest struct {
@@ -78,7 +76,7 @@ func devModeSpotify(t *testing.T, total, failOffset int) (*SpotifyProvider, *[]s
 	})
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
 
-	sess := &Session{tokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "token"})}
+	sess := staticSession()
 	return New(sess, "client", 320), &requests
 }
 
@@ -174,7 +172,7 @@ func TestSearchTracksSharedClientKeepsSingleRequest(t *testing.T) {
 	})
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
 
-	sess := &Session{tokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "token"})}
+	sess := staticSession()
 	p := New(sess, DefaultClientID, 320)
 	if _, err := p.SearchTracks(context.Background(), "radiohead", 20); err != nil {
 		t.Fatalf("SearchTracks() error = %v", err)

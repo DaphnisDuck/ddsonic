@@ -7,12 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
-	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time" // ddsonic
@@ -73,14 +70,16 @@ func notifyAuthURL(u string) {
 }
 
 // Session manages a go-librespot session and player for Spotify integration.
+//
+// ddsonic: upstream kept the librespot session, the player and an
+// auto-refreshing token source here, under a lock held across librespot's
+// calls. They are the session's playback bundle (playback_ddsonic.go) and its
+// token coordinator (token_coordinator_ddsonic.go) now, and mu is held for
+// short steps only.
 type Session struct {
-	mu          sync.RWMutex
-	sess        *session.Session
-	player      *librespotPlayer.Player
-	devID       string
-	clientID    string             // Spotify Developer app client ID
-	tokenSource oauth2.TokenSource // auto-refreshing OAuth2 token source
-	signInState                    // ddsonic: which sign-in this is, and what became of it (session_auth_ddsonic.go)
+	mu          sync.Mutex
+	clientID    string // Spotify Developer app client ID
+	signInState        // ddsonic: which sign-in this is, and what belongs to it (session_auth_ddsonic.go)
 }
 
 type streamContextTransport struct {
@@ -95,40 +94,6 @@ func (t streamContextTransport) RoundTrip(req *http.Request) (*http.Response, er
 
 func newSpotifyStreamHTTPClient(ctx context.Context, transport http.RoundTripper) *http.Client {
 	return &http.Client{Transport: streamContextTransport{ctx: ctx, base: transport}}
-}
-
-func awaitSpotifyStream(ctx context.Context, cancel context.CancelFunc, open func() (*librespotPlayer.Stream, error)) (*librespotPlayer.Stream, context.CancelFunc, error) {
-	type result struct {
-		stream *librespotPlayer.Stream
-		err    error
-	}
-
-	// The worker must be able to release Session's read lock after a timeout.
-	results := make(chan result, 1)
-	go func() {
-		// A panic in librespot's stream setup would otherwise take down the
-		// whole process and leave the terminal in raw mode; fail the track instead.
-		defer func() {
-			if r := recover(); r != nil {
-				applog.Error("spotify: stream setup panicked: %v\n%s", r, debug.Stack())
-				results <- result{err: fmt.Errorf("spotify: stream setup failed: %v", r)}
-			}
-		}()
-		stream, err := open()
-		results <- result{stream: stream, err: err}
-	}()
-
-	select {
-	case res := <-results:
-		if res.err != nil {
-			cancel()
-			return nil, nil, res.err
-		}
-		return res.stream, cancel, nil
-	case <-ctx.Done():
-		cancel()
-		return nil, nil, ctx.Err()
-	}
 }
 
 // NewSession creates a go-librespot session, using stored credentials if
@@ -218,14 +183,14 @@ func newSessionFromStored(ctx context.Context, clientID string, creds *storedCre
 			// Continue without a token source — already-loaded tracks still stream
 			// via spclient; new Web API calls will return ErrNeedsAuth.
 			applog.UserError("spotify: stored auth no longer valid; run '%s spotify reset' or sign in again to fix", appmeta.ClientName()) // ddsonic
-			s := &Session{sess: sess, devID: devID, clientID: clientID}
-			// ddsonic: staged, and written when the session is taken.
-			s.stageCreds(storedCreds{
+			// ddsonic: the credential is staged with the session's
+			// coordinator, and written when the session is taken.
+			s := builtSession(clientID, sess, storedCreds{
 				Username:     username,
 				Data:         data,
 				DeviceID:     devID,
 				RefreshToken: creds.RefreshToken, // preserve for next attempt
-			})
+			}, nil)
 			if err := initSessionPlayer(s); err != nil {
 				closeLibrespot(nil, sess)
 				return nil, err
@@ -252,11 +217,10 @@ func newSessionFromStored(ctx context.Context, clientID string, creds *storedCre
 		RefreshToken: oauthToken.RefreshToken,
 	}
 
-	// ddsonic: the credential is staged, and written when the session is
-	// taken (stageCreds); upstream wrote it here, before the player started.
-	s := &Session{sess: sess, devID: devID, clientID: clientID}
-	s.stageCreds(stored)
-	s.tokenSource = s.stagedTokenSource(oauthToken)
+	// ddsonic: the credential is staged with the session's coordinator, and
+	// written when the session is taken; upstream wrote it here, before the
+	// player started.
+	s := builtSession(clientID, sess, stored, oauthToken)
 
 	if err := initSessionPlayer(s); err != nil {
 		closeLibrespot(nil, sess)
@@ -338,49 +302,6 @@ func tokenContext() context.Context {
 // ctx does. ddsonic
 func tokenContextFrom(ctx context.Context) context.Context {
 	return context.WithValue(ctx, oauth2.HTTPClient, tokenHTTPClient)
-}
-
-// persistingTokenSource saves refresh-token rotations without making a usable
-// access token fail when credential persistence itself fails.
-type persistingTokenSource struct {
-	source       oauth2.TokenSource
-	persist      func(string) error
-	mu           sync.Mutex
-	refreshToken string
-}
-
-func (s *persistingTokenSource) Token() (*oauth2.Token, error) {
-	token, err := s.source.Token()
-	if err != nil {
-		return nil, err
-	}
-	if token.RefreshToken == "" {
-		return token, nil
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if token.RefreshToken == s.refreshToken {
-		return token, nil
-	}
-	s.refreshToken = token.RefreshToken
-	if err := s.persist(token.RefreshToken); err != nil {
-		applog.UserError("spotify: failed to persist rotated refresh token: %v", err)
-	}
-	return token, nil
-}
-
-func webAPITokenSource(clientID string, token *oauth2.Token, creds storedCreds) oauth2.TokenSource {
-	conf := spotifyOAuthConfig(clientID, oauthScopes)
-	source := conf.TokenSource(tokenContext(), token) // ddsonic: bounded
-	return &persistingTokenSource{
-		source:       source,
-		refreshToken: creds.RefreshToken,
-		persist: func(refreshToken string) error {
-			creds.RefreshToken = refreshToken
-			return saveCreds(&creds)
-		},
-	}
 }
 
 // isInvalidGrant reports whether err is an OAuth2 invalid_grant response
@@ -627,11 +548,10 @@ func newInteractiveSession(ctx context.Context, clientID string) (*Session, erro
 		RefreshToken: webToken.RefreshToken,
 	}
 
-	// ddsonic: the credential is staged, and written when the session is
-	// taken (stageCreds); upstream wrote it here, before the player started.
-	s := &Session{sess: sess, devID: devID, clientID: clientID}
-	s.stageCreds(stored)
-	s.tokenSource = s.stagedTokenSource(webToken)
+	// ddsonic: the credential is staged with the session's coordinator, and
+	// written when the session is taken; upstream wrote it here, before the
+	// player started.
+	s := builtSession(clientID, sess, stored, webToken)
 	if err := initSessionPlayer(s); err != nil {
 		closeLibrespot(nil, sess)
 		return nil, err
@@ -647,9 +567,9 @@ func (s *Session) initPlayer() error {
 	// accounts can play all tracks regardless.
 	countryCode := "US"
 	p, err := librespotPlayer.NewPlayer(&librespotPlayer.Options{
-		Spclient:             s.sess.Spclient(),
-		AudioKey:             s.sess.AudioKey(),
-		Events:               s.sess.Events(),
+		Spclient:             s.play.sess.Spclient(), // ddsonic: the session's playback bundle
+		AudioKey:             s.play.sess.AudioKey(),
+		Events:               s.play.sess.Events(),
 		Log:                  &librespot.NullLogger{},
 		CountryCode:          &countryCode,
 		NormalisationEnabled: true,
@@ -659,139 +579,18 @@ func (s *Session) initPlayer() error {
 	if err != nil {
 		return fmt.Errorf("spotify: player init: %w", err)
 	}
-	s.player = p
+	s.play.player = p
 	return nil
 }
 
-// NewStream creates a decoded audio stream for the given Spotify track ID. The
-// caller must retain and invoke the returned cancel function for the lifetime
-// of a successful stream. ctx bounds setup independently of that lifetime.
-//
-// Holds s.mu.RLock() across the librespot network call. Multiple concurrent
-// NewStream / webApi callers can run in parallel (RLock is shared), so rapid
-// track skipping does not serialize. reconnect() and Close() take the full
-// Lock and will wait for in-flight callers to finish before tearing down the
-// player — without this, the swap could call oldPlayer.Close() while we are
-// still reading from it.
-func (s *Session) NewStream(ctx context.Context, spotID librespot.SpotifyId, bitrate int) (*librespotPlayer.Stream, context.CancelFunc, error) {
-	streamCtx, cancel := context.WithCancel(context.Background())
-	client := newSpotifyStreamHTTPClient(streamCtx, http.DefaultTransport)
+// ddsonic: NewStream and Close are in playback_ddsonic.go and
+// session_auth_ddsonic.go. Upstream's held the session's lock across
+// librespot's stream setup and teardown; upstream's webApiWithBody asked an
+// oauth2 token source here, which the token coordinator replaces.
 
-	return awaitSpotifyStream(ctx, cancel, func() (*librespotPlayer.Stream, error) {
-		s.mu.RLock()
-		defer s.mu.RUnlock()
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if s.player == nil {
-			return nil, fmt.Errorf("spotify: session closed")
-		}
-		return s.player.NewStream(ctx, client, spotID, bitrate, 0)
-	})
-}
-
-// webApiWithBody calls the Spotify Web API using the OAuth2 access token.
-//
-// The spclient/login5 token from librespot is NOT accepted by the Web API
-// for endpoints like /v1/search and /v1/me/playlists — Spotify returns
-// misleading errors ("Invalid limit", 429) instead of a clear auth failure.
-// So if there is no OAuth2 token source, fail loudly with ErrNeedsAuth
-// rather than attempting the call with the wrong token.
-func (s *Session) webApiWithBody(ctx context.Context, method, path string, query url.Values, body io.Reader, contentType string) (*http.Response, error) {
-	resp, _, err := s.webAPIStamped(ctx, method, path, query, body, contentType, nil)
-	return resp, err
-}
-
-// webAPIStamped is webApiWithBody, and says which sign-in and token the call
-// was made with. ddsonic: the token comes with the sign-in it belongs to, so
-// that a refusal, or a 401, is held against that one only
-// (session_auth_ddsonic.go). Upstream read the token source and asked it here.
-func (s *Session) webAPIStamped(ctx context.Context, method, path string, query url.Values, body io.Reader, contentType string, pin *signInPin) (*http.Response, tokenStamp, error) {
-	token, stamp, err := s.accessToken(isWrite(method), pin)
-	if err != nil {
-		return nil, stamp, err
-	}
-
-	u, _ := url.Parse("https://api.spotify.com")
-	u = u.JoinPath(path)
-	if query != nil {
-		u.RawQuery = query.Encode()
-	}
-
-	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
-	if err != nil {
-		return nil, stamp, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/json")
-	if contentType != "" {
-		req.Header.Set("Content-Type", contentType)
-	}
-
-	resp, err := webHTTPClient.Do(req) // ddsonic: bounded
-	return resp, stamp, err
-}
-
-// Close releases all session and player resources.
-func (s *Session) Close() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed { // ddsonic: once; a closed session takes no replacement
-		return
-	}
-	s.closed = true
-	s.cred.retire()                  // ddsonic: a closed session writes no credential
-	closeLibrespot(s.player, s.sess) // ddsonic: a variable, for tests
-}
-
-// Reconnect rebuilds the session from stored credentials (no browser).
-// Returns an error if stored credentials are missing or the refresh fails.
-func (s *Session) Reconnect(ctx context.Context) error {
-	return s.reconnect(ctx, NewSessionSilent, true, nil) // ddsonic: gives way to a newer sign-in
-}
-
-// ReconnectInteractive forces a fresh browser-based OAuth2 flow.
-// Stored credentials are preserved until the new session succeeds —
-// newInteractiveSession overwrites them via saveCreds on success.
-func (s *Session) ReconnectInteractive(ctx context.Context) error {
-	return s.reconnect(ctx, buildInteractiveSession, false, nil) // ddsonic: a variable, for tests
-}
-
-// reconnect replaces the live session using the provided builder function.
-// The new session is established before tearing down the old one to avoid a
-// window where s.sess/s.player are nil (which would crash concurrent callers).
-//
-// The swap-and-teardown phase is done under s.mu (full Lock), which waits for
-// any in-flight NewStream / webApi RLockers to drain. This guarantees that
-// oldPlayer.Close() is never called while a NewStream is still using the
-// old player pointer.
-//
-// ddsonic: silent says the rebuild came from the stored credential and not
-// from the user. Publication is conditional (publish, session_auth_ddsonic.go):
-// a closed session takes nothing, and a silent rebuild gives way to a sign-in
-// that finished while it ran. Upstream swapped unconditionally.
-func (s *Session) reconnect(ctx context.Context, build func(context.Context, string) (*Session, error), silent bool, published func()) error {
-	s.mu.RLock()
-	clientID, from, closed := s.clientID, s.gen, s.closed
-	s.mu.RUnlock()
-	if closed {
-		return errSessionClosed
-	}
-
-	newSess, err := build(ctx, clientID)
-	if err != nil {
-		return fmt.Errorf("spotify: reconnect: %w", err)
-	}
-	done, err := s.publish(newSess, from, silent, published)
-	if !done {
-		return err
-	}
-
-	const reauthMsg = "spotify: re-authenticated successfully"
-	applog.Info(reauthMsg)
-	applog.Status(reauthMsg)
-	return nil
-}
+// ddsonic: Reconnect and ReconnectInteractive are in session_auth_ddsonic.go.
+// Upstream's silent reconnect built a whole second session, with its own
+// refresh of the stored refresh token; here it rebuilds playback only.
 
 func generateDeviceID() string {
 	b := make([]byte, 20)

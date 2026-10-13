@@ -6,8 +6,6 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-
-	"golang.org/x/oauth2"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -49,7 +47,7 @@ func TestPlaylistsIncludesFollowedPlaylists(t *testing.T) {
 	})
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
 
-	sess := &Session{tokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "token"})}
+	sess := staticSession()
 	got, err := New(sess, "client", 320).Playlists()
 	if err != nil {
 		t.Fatal(err)

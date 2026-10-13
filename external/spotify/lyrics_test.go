@@ -10,8 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/oauth2"
-
 	"github.com/bjarneo/cliamp/lyrics"
 )
 
@@ -121,7 +119,7 @@ func lyricsSpotify(t *testing.T, status int, body string) (*SpotifyProvider, *[]
 	})
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
 
-	sess := &Session{tokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "token"})}
+	sess := staticSession()
 	return New(sess, "client", 320), &requests
 }
 

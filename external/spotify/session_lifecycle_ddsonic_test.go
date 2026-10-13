@@ -36,8 +36,24 @@ type build struct {
 	storedEntered                                           chan struct{}
 }
 
+// disposed is how many librespot sessions were torn down, once every retired
+// playback bundle has been.
+// torn is disposed for a test that is still holding a build: it waits for
+// the bundle tails only.
+func (b *build) torn() int32 {
+	tails.Wait()
+	return b.disposals.Load()
+}
+
+func (b *build) disposed() int32 {
+	builds.Wait()
+	tails.Wait()
+	return b.disposals.Load()
+}
+
 func stubBuild(t *testing.T) *build {
 	t.Helper()
+	quiesce(t)
 	b := &build{}
 	origTokens, origSess, origID, origInit, origClose := interactiveTokens, newLibrespotSession, sessionIdentity, initSessionPlayer, closeLibrespot
 	interactiveTokens = func(_ context.Context, flows []oauthFlow) ([]*oauth2.Token, error) {
@@ -70,6 +86,7 @@ func stubBuild(t *testing.T) *build {
 	t.Cleanup(func() {
 		interactiveTokens, newLibrespotSession, sessionIdentity, initSessionPlayer, closeLibrespot = origTokens, origSess, origID, origInit, origClose
 	})
+	settleBackground(t)
 	return b
 }
 
@@ -81,6 +98,7 @@ type spotifyHTTP struct {
 
 func fakeSpotifyHTTP(t *testing.T, token func(n int) (int, string), api func(n int, req *http.Request) (int, http.Header)) *spotifyHTTP {
 	t.Helper()
+	quiesce(t)
 	h := &spotifyHTTP{}
 	orig := http.DefaultTransport
 	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -102,6 +120,7 @@ func fakeSpotifyHTTP(t *testing.T, token func(n int) (int, string), api func(n i
 			Header: header, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
 	})
 	t.Cleanup(func() { http.DefaultTransport = orig })
+	settleBackground(t)
 	return h
 }
 
@@ -125,7 +144,7 @@ func credsExist(t *testing.T, path string) bool {
 }
 
 func brokenSession() *Session {
-	s := &Session{clientID: "client", tokenSource: tokenSourceFunc(goodToken)}
+	s := goodSession()
 	s.refuseSignIn(s.generation())
 	return s
 }
@@ -145,8 +164,8 @@ func TestRejectedStoredSignInKeepsCredential(t *testing.T) {
 	if !credsExist(t, path) || mustRead(t, path) != before {
 		t.Fatal("a refused stored sign-in changed or deleted the credential")
 	}
-	if b.disposals.Load() != 1 {
-		t.Errorf("the refused setup's session was closed %d times, want 1", b.disposals.Load())
+	if b.disposed() != 1 {
+		t.Errorf("the refused setup's session was closed %d times, want 1", b.disposed())
 	}
 
 	p := New(nil, "client", 320)
@@ -203,8 +222,8 @@ func TestInteractiveSignInCommitsCredentialOnlyWhenAccepted(t *testing.T) {
 			// Every librespot session the sign-in opened is closed, once: the
 			// stored one Spotify refused (with no session to start from), and
 			// the one whose player failed.
-			if b.disposals.Load() != b.librespotSessions.Load() {
-				t.Errorf("%d librespot sessions were opened and %d closed", b.librespotSessions.Load(), b.disposals.Load())
+			if b.disposed() != b.librespotSessions.Load() {
+				t.Errorf("%d librespot sessions were opened and %d closed", b.librespotSessions.Load(), b.disposed())
 			}
 		})
 		t.Run(have+": quit while the replacement is finished", func(t *testing.T) {
@@ -214,9 +233,9 @@ func TestInteractiveSignInCommitsCredentialOnlyWhenAccepted(t *testing.T) {
 			fakeSpotifyHTTP(t, tokenRevoked, apiOK)
 			p := newProvider()
 			old := p.session
-			var oldSource oauth2.TokenSource
+			oldToken := ""
 			if old != nil {
-				oldSource = old.tokenSource
+				oldToken = tokenOf(old)
 			}
 			b.onInit = p.Close // the replacement is built; ddsonic quits before it is taken
 
@@ -229,10 +248,10 @@ func TestInteractiveSignInCommitsCredentialOnlyWhenAccepted(t *testing.T) {
 			if p.session != nil {
 				t.Error("a session is installed after quit")
 			}
-			if old != nil && (old.player != nil || old.sess != nil || fmt.Sprint(old.tokenSource) != fmt.Sprint(oldSource)) {
+			if old != nil && (!old.viewNow().closed || tokenOf(old) != oldToken) {
 				t.Error("the closed session adopted the replacement")
 			}
-			if b.disposals.Load() < 1 {
+			if b.disposed() < 1 {
 				t.Error("the unaccepted replacement was never closed")
 			}
 		})
@@ -298,13 +317,14 @@ func TestCloseWhileReplacementIsBuilt(t *testing.T) {
 		<-release // ignores the cancelled context: the session is complete
 	}
 	old := brokenSession()
-	oldSource := old.tokenSource
+	oldToken := tokenOf(old)
 	p := New(old, "client", 320)
 
 	done := make(chan error, 1)
 	go func() { done <- p.Authenticate() }()
 	<-entered
-	p.Close() // finishes first
+	p.Close()    // finishes first
+	tails.Wait() // the closed session's own teardown; the build is still held
 	closedAt := b.disposals.Load()
 	close(release)
 	var err error
@@ -316,10 +336,10 @@ func TestCloseWhileReplacementIsBuilt(t *testing.T) {
 	if err == nil {
 		t.Error("Authenticate() = nil for a replacement that arrived after Close")
 	}
-	if old.player != nil || old.sess != nil || fmt.Sprint(old.tokenSource) != fmt.Sprint(oldSource) || p.session != nil {
+	if !old.viewNow().closed || tokenOf(old) != oldToken || p.session != nil {
 		t.Error("the replacement was published into a closed session")
 	}
-	if got := b.disposals.Load() - closedAt; got != 1 {
+	if got := b.disposed() - closedAt; got != 1 {
 		t.Errorf("the unaccepted replacement was closed %d times, want exactly 1", got)
 	}
 	if mustRead(t, path) != before {
@@ -336,29 +356,27 @@ func TestStaleTokenResultDoesNotKillNewSignIn(t *testing.T) {
 	fakeSpotifyHTTP(t, tokenOK, apiOK)
 	revoked := &oauth2.RetrieveError{ErrorCode: "invalid_grant"}
 	entered, release := make(chan struct{}), make(chan struct{})
-	var calls atomic.Int32
-	sess := &Session{clientID: "client", tokenSource: tokenSourceFunc(func() (*oauth2.Token, error) {
-		if calls.Add(1) == 1 {
+	stubRefresh(t, func(n int) (*oauth2.Token, error) {
+		if n == 1 {
 			close(entered)
-			<-release // the slow request, still in flight during the sign-in
+			<-release // the slow request's refresh, still in flight during the sign-in
 		}
 		return nil, revoked
-	})}
+	})
+	sess := expiredSession()
 	p := New(sess, "client", 320)
 
 	slow := make(chan error, 1)
 	go func() {
-		resp, err := sess.webApiWithBody(context.Background(), "GET", "/v1/me", nil, nil, "")
+		resp, err := p.webAPI(context.Background(), "GET", "/v1/me", nil)
 		if resp != nil {
 			resp.Body.Close()
 		}
 		slow <- err
 	}()
 	<-entered
-	// A second request is refused at once; the user signs in again.
-	if _, err := sess.webApiWithBody(context.Background(), "GET", "/v1/me", nil, nil, ""); !errors.Is(err, playlist.ErrNeedsAuth) {
-		t.Fatalf("the refused request = %v, want ErrNeedsAuth", err)
-	}
+	// Playback is refused meanwhile, and the user signs in again.
+	sess.refuseSignIn(sess.generation())
 	if err := p.Authenticate(); err != nil || sess.signInRefused() {
 		t.Fatalf("Authenticate() = %v, still refused = %v", err, sess.signInRefused())
 	}
@@ -371,7 +389,7 @@ func TestStaleTokenResultDoesNotKillNewSignIn(t *testing.T) {
 	if err != nil {
 		t.Errorf("the slow request = %v, want it to go through on the new sign-in", err)
 	}
-	if _, err := sess.webApiWithBody(context.Background(), "GET", "/v1/me", nil, nil, ""); err != nil {
+	if _, err := p.webAPI(context.Background(), "GET", "/v1/me", nil); err != nil {
 		t.Errorf("a request after the sign-in = %v", err)
 	}
 }
@@ -383,7 +401,7 @@ func TestSilentReconnectDoesNotReplaceNewerSignIn(t *testing.T) {
 	b := stubBuild(t)
 	b.storedGate, b.storedEntered = make(chan struct{}), make(chan struct{})
 	fakeSpotifyHTTP(t, tokenOK, apiOK)
-	sess := &Session{clientID: "client", tokenSource: tokenSourceFunc(goodToken)}
+	sess := goodSession()
 	p := New(sess, "client", 320)
 
 	silent := make(chan error, 1)
@@ -398,19 +416,19 @@ func TestSilentReconnectDoesNotReplaceNewerSignIn(t *testing.T) {
 	if !strings.Contains(signedIn, "new-refresh") {
 		t.Fatalf("the sign-in did not store its credential: %q", signedIn)
 	}
-	closedBefore := b.disposals.Load()
+	closedBefore := b.torn()
 
 	close(b.storedGate) // the silent rebuild finishes now
 	if err := <-silent; err != nil {
 		t.Errorf("the overtaken silent reconnect = %v, want nil: the session is already renewed", err)
 	}
-	if tok, err := sess.tokenSource.Token(); err != nil || tok.AccessToken != "signed-in" {
-		t.Errorf("token after the overtaken reconnect = %v, %v, want the sign-in's", tok, err)
+	if got := tokenOf(sess); got != "signed-in" {
+		t.Errorf("token after the overtaken reconnect = %q, want the sign-in's", got)
 	}
 	if got := mustRead(t, path); got != signedIn {
 		t.Errorf("the overtaken reconnect rewrote the credential: %q", got)
 	}
-	if got := b.disposals.Load() - closedBefore; got != 1 {
+	if got := b.disposed() - closedBefore; got != 1 {
 		t.Errorf("the overtaken replacement was closed %d times, want exactly 1", got)
 	}
 	if sess.signInRefused() {
@@ -424,11 +442,11 @@ func TestRefusedRestoreIsRemembered(t *testing.T) {
 	path := storeCreds(t)
 	before := mustRead(t, path)
 	h := fakeSpotifyHTTP(t, tokenRevoked, apiOK)
-	sess := &Session{clientID: "client"}
+	sess := tokenSession(nil)
 	p := New(sess, "client", 320)
 
 	for i := range 3 {
-		if err := p.ensureWebAPI(); !errors.Is(err, playlist.ErrNeedsAuth) {
+		if err := ensureWebAPI(p); !errors.Is(err, playlist.ErrNeedsAuth) {
 			t.Fatalf("ensureWebAPI() #%d = %v, want ErrNeedsAuth", i+1, err)
 		}
 	}
@@ -455,7 +473,7 @@ func TestWebAPIUnauthorized(t *testing.T) {
 		return func(int, *http.Request) (int, http.Header) { return status, header }
 	}
 	newProvider := func() (*SpotifyProvider, *Session) {
-		sess := &Session{clientID: "client", tokenSource: tokenSourceFunc(goodToken)}
+		sess := goodSession()
 		return New(sess, "client", 320), sess
 	}
 
@@ -618,11 +636,10 @@ func TestRetiredSignInCannotWriteCredential(t *testing.T) {
 		return http.StatusOK, `{"access_token":"late","token_type":"Bearer","refresh_token":"stale-rotation","expires_in":3600}`
 	}, apiOK)
 	p, sess := signedInSession(t)
-	oldCred := sess.cred
-	stamp := tokenStamp{sess.generation(), 0}
+	old := sess.viewNow().tokens // the first sign-in's coordinator
 
 	renewal := make(chan error, 1)
-	go func() { renewal <- sess.renewToken(context.Background(), stamp) }()
+	go func() { _, _, err := old.renew(context.Background(), lease{old, 1}); renewal <- err }()
 	<-entered
 
 	sess.refuseSignIn(sess.generation())
@@ -632,27 +649,26 @@ func TestRetiredSignInCannotWriteCredential(t *testing.T) {
 	signedIn := mustRead(t, path)
 
 	close(release) // the old renewal's answer, with a rotated refresh token
-	if err := <-renewal; err != nil {
-		t.Errorf("the overtaken renewal = %v, want nil: a newer sign-in stands", err)
+	if err := <-renewal; !errors.Is(err, errSuperseded) {
+		t.Errorf("the overtaken renewal = %v, want to be told a newer sign-in stands", err)
 	}
 	if got := mustRead(t, path); got != signedIn || strings.Contains(got, "stale-rotation") {
 		t.Errorf("the old sign-in's renewal rewrote the credential:\n was %q\n now %q", signedIn, got)
 	}
-	if err := oldCred.rotate("stale-callback"); err != nil {
-		t.Errorf("the retired credential's rotation = %v", err)
-	}
+	old.setIdentity("stale", []byte("identity"), "dev")
 	if got := mustRead(t, path); got != signedIn {
-		t.Errorf("the old token source's rotation rewrote the credential: %q", got)
+		t.Errorf("the replaced sign-in's coordinator rewrote the credential: %q", got)
 	}
-	if tok, err := sess.tokenSource.Token(); err != nil || tok.AccessToken != "signed-in" {
-		t.Errorf("token after the overtaken renewal = %v, %v, want the new sign-in's", tok, err)
+	if got := tokenOf(sess); got != "signed-in" {
+		t.Errorf("token after the overtaken renewal = %q, want the new sign-in's", got)
 	}
 
-	// A closed session's credential writes nothing either.
-	live := sess.cred
+	// A closed session's coordinator writes nothing either.
+	live := sess.viewNow().tokens
 	p.Close()
-	if err := live.rotate("after-close"); err != nil || mustRead(t, path) != signedIn {
-		t.Errorf("a rotation after Close = %v and changed the credential: %v", err, mustRead(t, path) != signedIn)
+	live.setIdentity("after", []byte("close"), "dev")
+	if _, _, err := live.renew(context.Background(), lease{live, 1}); !errors.Is(err, errSuperseded) || mustRead(t, path) != signedIn {
+		t.Errorf("a renewal after Close = %v and changed the credential: %v", err, mustRead(t, path) != signedIn)
 	}
 }
 
@@ -667,9 +683,8 @@ func TestPendingWriteIsNotSentAfterSignIn(t *testing.T) {
 			stubBuild(t)
 			h := fakeSpotifyHTTP(t, tokenOK, apiOK)
 			entered, release := make(chan struct{}), make(chan struct{})
-			var calls atomic.Int32
-			sess := &Session{clientID: "client", tokenSource: tokenSourceFunc(func() (*oauth2.Token, error) {
-				if calls.Add(1) == 1 {
+			stubRefresh(t, func(n int) (*oauth2.Token, error) {
+				if n == 1 {
 					close(entered)
 					<-release
 					if late == "answered" {
@@ -677,7 +692,8 @@ func TestPendingWriteIsNotSentAfterSignIn(t *testing.T) {
 					}
 				}
 				return nil, &oauth2.RetrieveError{ErrorCode: "invalid_grant"}
-			})}
+			})
+			sess := expiredSession()
 			p := New(sess, "client", 320)
 
 			write := make(chan error, 1)
@@ -723,17 +739,14 @@ func TestCredentialSnapshotsAreLocked(t *testing.T) {
 	stubBuild(t)
 	fakeSpotifyHTTP(t, tokenOK, apiOK)
 	_, sess := signedInSession(t)
-	cred := sess.cred
+	tokens := sess.viewNow().tokens
 
 	var wg sync.WaitGroup
 	for i := range 50 {
-		wg.Go(func() { _ = cred.rotate(fmt.Sprintf("rotated-%d", i)) })
-		wg.Go(func() {
-			sess.mu.Lock() // as its callers hold it: the source is the session's
-			defer sess.mu.Unlock()
-			_ = sess.stagedTokenSource(&oauth2.Token{AccessToken: "a", Expiry: time.Now().Add(time.Hour)})
-		})
-		wg.Go(func() { _, _ = sess.renewalCreds(cred) })
+		wg.Go(func() { tokens.setIdentity(fmt.Sprintf("user-%d", i), []byte("blob"), "dev") })
+		wg.Go(func() { _, _, _ = tokens.renew(context.Background(), lease{tokens, uint64(i)}) })
+		wg.Go(func() { _ = tokens.snapshot() })
+		wg.Go(func() { _ = sess.needsSignIn() })
 	}
 	wg.Wait()
 }
@@ -785,7 +798,7 @@ func TestWriteUnauthorizedFindsOutWithoutReplay(t *testing.T) {
 				return tt.probe
 			}}
 			h := fakeSpotifyHTTP(t, tokenOK, api.handle)
-			sess := &Session{clientID: "client", tokenSource: tokenSourceFunc(goodToken)}
+			sess := goodSession()
 			p := New(sess, "client", 320)
 
 			_, err := p.webAPIWithBody(context.Background(), "POST", "/v1/playlists/pl/tracks", nil,
@@ -816,14 +829,11 @@ func TestSignInThatCommittedReportsSuccess(t *testing.T) {
 	p := New(sess, "client", 320)
 	// Close arrives while the old session is being torn down: after the
 	// replacement is in place and its credential written.
-	closing := make(chan struct{})
 	teardown := closeLibrespot
 	closeLibrespot = func(pl *librespotPlayer.Player, s *session.Session) {
 		teardown(pl, s)
 		if b.disposals.Load() == 1 {
-			go func() { close(closing); p.Close() }()
-			<-closing
-			time.Sleep(20 * time.Millisecond) // Close now waits for the swap to finish
+			p.Close()
 		}
 	}
 
@@ -833,68 +843,6 @@ func TestSignInThatCommittedReportsSuccess(t *testing.T) {
 	}
 	if err != nil {
 		t.Errorf("Authenticate() = %v for a sign-in that was published and stored", err)
-	}
-}
-
-// A stored-session build begun at startup must not replace a sign-in the
-// user completed while it ran: the provider keeps the newer session and its
-// credential, and the startup build is closed once, unwritten. The builders
-// are the real ones.
-func TestStartupBuildDoesNotReplaceNewerSignIn(t *testing.T) {
-	for _, ending := range []string{"succeeds", "is refused"} {
-		t.Run("the startup build "+ending, func(t *testing.T) {
-			path := storeCreds(t)
-			b := stubBuild(t)
-			b.storedGate, b.storedEntered = make(chan struct{}), make(chan struct{})
-			// The sign-in's own look at the stored credential is refused, so it
-			// goes to the browser; the startup build's refresh comes last.
-			fakeSpotifyHTTP(t, func(n int) (int, string) {
-				if n <= refusedRefresh || ending == "is refused" {
-					return tokenRevoked(n)
-				}
-				return tokenOK(n)
-			}, apiOK)
-			held := newLibrespotSession
-			var storedBuilds atomic.Int32
-			newLibrespotSession = func(ctx context.Context, opts *session.Options) (*session.Session, error) {
-				if _, stored := opts.Credentials.(session.StoredCredentials); stored && storedBuilds.Add(1) > 1 {
-					b.librespotSessions.Add(1)
-					return nil, nil // only the startup build is held
-				}
-				return held(ctx, opts)
-			}
-			p := New(nil, "client", 320)
-
-			startup := make(chan error, 1)
-			go func() { startup <- p.ensureSession() }()
-			<-b.storedEntered
-
-			if err := p.Authenticate(); err != nil {
-				t.Fatal(err)
-			}
-			signedIn, taken := mustRead(t, path), p.session
-			if !strings.Contains(signedIn, "new-refresh") || taken == nil {
-				t.Fatalf("the sign-in was not taken: session %v, credential %q", taken != nil, signedIn)
-			}
-			closedBefore := b.disposals.Load()
-
-			close(b.storedGate)
-			if err := <-startup; err != nil {
-				t.Errorf("the overtaken startup build = %v, want nil: the provider has a session", err)
-			}
-			if p.session != taken {
-				t.Error("the startup build replaced the session the user signed in to")
-			}
-			if got := mustRead(t, path); got != signedIn {
-				t.Errorf("the startup build rewrote the credential:\n was %q\n now %q", signedIn, got)
-			}
-			if got := b.disposals.Load() - closedBefore; got != 1 {
-				t.Errorf("the obsolete startup session was closed %d times, want exactly 1", got)
-			}
-			if err := p.ensureSession(); err != nil || taken.signInRefused() {
-				t.Errorf("after the overtaken build: ensureSession() = %v, refused = %v; want the sign-in untouched", err, taken.signInRefused())
-			}
-		})
 	}
 }
 
@@ -931,7 +879,7 @@ func TestWriteStaysWithItsSignIn(t *testing.T) {
 	t.Run("a rate-limit wait, the same sign-in", func(t *testing.T) {
 		storeCreds(t)
 		h := fakeSpotifyHTTP(t, tokenOK, rateLimitedOnce)
-		p := New(&Session{clientID: "client", tokenSource: tokenSourceFunc(goodToken)}, "client", 320)
+		p := New(goodSession(), "client", 320)
 		if err := post(p, context.Background()); err != nil || h.apiCalls.Load() != 2 {
 			t.Errorf("the write = %v after %d requests, want it sent again after the wait", err, h.apiCalls.Load())
 		}
@@ -940,7 +888,7 @@ func TestWriteStaysWithItsSignIn(t *testing.T) {
 		storeCreds(t)
 		stubBuild(t)
 		h := fakeSpotifyHTTP(t, tokenOK, rateLimitedOnce)
-		sess := &Session{clientID: "client", tokenSource: tokenSourceFunc(goodToken)}
+		sess := goodSession()
 		p := New(sess, "client", 320)
 
 		write := make(chan error, 1)
@@ -962,7 +910,7 @@ func TestWriteStaysWithItsSignIn(t *testing.T) {
 		storeCreds(t)
 		stubBuild(t)
 		h := fakeSpotifyHTTP(t, tokenOK, apiOK)
-		sess := &Session{clientID: "client", tokenSource: tokenSourceFunc(goodToken)}
+		sess := goodSession()
 		p := New(sess, "client", 320)
 
 		ctx := p.WithSignIn(context.Background()) // create a playlist, then add to it
@@ -1027,7 +975,7 @@ func TestLateRefusalsAreAboutTheOldSignIn(t *testing.T) {
 				}
 				return tokenRevoked(n)
 			}, api.handle)
-			sess := &Session{clientID: "client", tokenSource: tokenSourceFunc(goodToken)}
+			sess := goodSession()
 			p := New(sess, "client", 320)
 
 			result := make(chan error, 1)
@@ -1065,7 +1013,7 @@ func TestLateRefusalsAreAboutTheOldSignIn(t *testing.T) {
 			}
 			return http.StatusOK, nil
 		})
-		sess := &Session{clientID: "client", tokenSource: tokenSourceFunc(goodToken)}
+		sess := goodSession()
 		p := New(sess, "client", 320)
 
 		result := make(chan error, 1)
@@ -1084,7 +1032,7 @@ func TestLateRefusalsAreAboutTheOldSignIn(t *testing.T) {
 		storeCreds(t)
 		api := &apiByMethod{answer: func(string, int) int { return http.StatusUnauthorized }}
 		fakeSpotifyHTTP(t, func(int) (int, string) { return http.StatusServiceUnavailable, `no healthy upstream` }, api.handle)
-		sess := &Session{clientID: "client", tokenSource: tokenSourceFunc(goodToken)}
+		sess := goodSession()
 		p := New(sess, "client", 320)
 		if err := call(p, "GET"); err == nil || errors.Is(err, playlist.ErrNeedsAuth) || errors.Is(err, errSignInChanged) || sess.signInRefused() {
 			t.Errorf("the read = %v (refused %v), want an outage error", err, sess.signInRefused())
@@ -1118,7 +1066,7 @@ func TestActionKeepsItsSignInFromTheStart(t *testing.T) {
 		}
 	}
 	established := func() *SpotifyProvider {
-		return New(&Session{clientID: "client", tokenSource: tokenSourceFunc(goodToken)}, "client", 320)
+		return New(goodSession(), "client", 320)
 	}
 	wantUnsent := func(t *testing.T, what string, err error, api *apiByMethod, writes int) {
 		t.Helper()
@@ -1161,25 +1109,25 @@ func TestActionKeepsItsSignInFromTheStart(t *testing.T) {
 	t.Run("the stored session's setup overlapping a sign-in", func(t *testing.T) {
 		b, api := setup(t)
 		b.storedGate, b.storedEntered = make(chan struct{}), make(chan struct{})
-		held := newLibrespotSession
-		var storedBuilds atomic.Int32
-		newLibrespotSession = func(ctx context.Context, opts *session.Options) (*session.Session, error) {
-			if _, stored := opts.Credentials.(session.StoredCredentials); stored && storedBuilds.Add(1) > 1 {
-				b.librespotSessions.Add(1)
-				return nil, nil // only the action's own setup is held
-			}
-			return held(ctx, opts)
-		}
+		joined := make(chan struct{})
+		storedJoined = onceFunc(func() { close(joined) })
+		t.Cleanup(func() { storedJoined = nil })
 		p := New(nil, "client", 320)
 		ctx := p.WithSignIn(context.Background())
 
 		created := make(chan error, 1)
 		go func() { _, err := p.CreatePlaylist(ctx, "New"); created <- err }()
 		<-b.storedEntered
-		if err := p.Authenticate(); err != nil { // the user signs in while the setup runs
+		// The user signs in while the setup runs. The sign-in and the setup
+		// are the one build from the stored credential; when it is taken it
+		// is that sign-in's, and the action began before it.
+		signedIn := make(chan error, 1)
+		go func() { signedIn <- p.Authenticate() }()
+		<-joined
+		close(b.storedGate)
+		if err := <-signedIn; err != nil {
 			t.Fatal(err)
 		}
-		close(b.storedGate)
 		wantUnsent(t, "the action's first request", <-created, api, 0)
 		wantUnsent(t, "the action's second request", p.AddTrackToPlaylist(ctx, "pl", track), api, 0)
 	})
@@ -1207,117 +1155,6 @@ func TestActionKeepsItsSignInFromTheStart(t *testing.T) {
 	})
 }
 
-// A token refresh that was already under way when the token was renewed is
-// about the token it set out to refresh. When Spotify refuses it afterwards,
-// the session, on the renewed token of the same sign-in, is not refused: the
-// call uses the token that stands.
-func TestStaleRefreshDoesNotRefuseRenewedToken(t *testing.T) {
-	call := func(p *SpotifyProvider, method string) error {
-		var body io.Reader
-		if method != "GET" {
-			body = strings.NewReader(`{}`)
-		}
-		resp, err := p.webAPIWithBody(context.Background(), method, "/v1/me", nil, body, "application/json", http.StatusOK)
-		if resp != nil {
-			resp.Body.Close()
-		}
-		return err
-	}
-	for _, method := range []string{"GET", "POST"} {
-		t.Run(method+": a held refresh, refused after the renewal", func(t *testing.T) {
-			storeCreds(t)
-			api := &apiByMethod{answer: func(string, int) int { return http.StatusOK }}
-			h := fakeSpotifyHTTP(t, tokenOK, api.handle)
-			entered, release := make(chan struct{}), make(chan struct{})
-			var calls atomic.Int32
-			sess := &Session{clientID: "client", tokenSource: tokenSourceFunc(func() (*oauth2.Token, error) {
-				if calls.Add(1) == 1 {
-					close(entered)
-					<-release
-				}
-				return nil, &oauth2.RetrieveError{ErrorCode: "invalid_grant"}
-			})}
-			p := New(sess, "client", 320)
-
-			result := make(chan error, 1)
-			go func() { result <- call(p, method) }()
-			<-entered
-			if err := sess.renewToken(context.Background(), tokenStamp{}); err != nil { // the forced renewal wins
-				t.Fatal(err)
-			}
-			close(release)
-			err := <-result
-			if sess.signInRefused() || err != nil {
-				t.Fatalf("%s = %v, session refused = %v; want it through on the renewed token", method, err, sess.signInRefused())
-			}
-			if api.sent(method) != 1 || h.tokenCalls.Load() != 1 {
-				t.Errorf("requests = %d, renewals = %d; want 1 and 1: sent once, never twice", api.sent(method), h.tokenCalls.Load())
-			}
-		})
-	}
-	t.Run("the real token source: its own refresh refused after the renewal", func(t *testing.T) {
-		t.Setenv("CLIAMP_CONFIG_DIR", t.TempDir())
-		stubBuild(t)
-		entered, release := make(chan struct{}), make(chan struct{})
-		api := &apiByMethod{answer: func(string, int) int { return http.StatusOK }}
-		h := fakeSpotifyHTTP(t, func(n int) (int, string) {
-			switch n {
-			case 1: // the token source's own refresh, held
-				close(entered)
-				<-release
-				return tokenRevoked(n)
-			case 2: // the forced renewal
-				return tokenOK(n)
-			}
-			return tokenRevoked(n) // oauth2's second try of the held refresh
-		}, api.handle)
-		p, sess := signedInSession(t)
-		// The access token has run out, so the next call refreshes it.
-		sess.tokenSource = sess.stagedTokenSource(&oauth2.Token{AccessToken: "expired", RefreshToken: "new-refresh", Expiry: time.Now().Add(-time.Hour)})
-
-		result := make(chan error, 1)
-		go func() { result <- call(p, "GET") }()
-		<-entered
-		if err := sess.renewToken(context.Background(), tokenStamp{sess.generation(), 0}); err != nil {
-			t.Fatal(err)
-		}
-		close(release)
-		if err := <-result; err != nil || sess.signInRefused() {
-			t.Fatalf("the read = %v, session refused = %v; want it through on the renewed token", err, sess.signInRefused())
-		}
-		if api.sent("GET") != 1 {
-			t.Errorf("requests = %d, want 1", api.sent("GET"))
-		}
-		_ = h
-	})
-	t.Run("a 401 for a token that was renewed meanwhile", func(t *testing.T) {
-		storeCreds(t)
-		entered, release := make(chan struct{}), make(chan struct{})
-		var n atomic.Int32
-		fakeSpotifyHTTP(t, tokenOK, func(int, *http.Request) (int, http.Header) {
-			if n.Add(1) == 1 { // sent with the old token; answered after the renewal
-				close(entered)
-				<-release
-				return http.StatusUnauthorized, nil
-			}
-			return http.StatusOK, nil
-		})
-		sess := &Session{clientID: "client", tokenSource: tokenSourceFunc(goodToken)}
-		p := New(sess, "client", 320)
-
-		result := make(chan error, 1)
-		go func() { result <- call(p, "GET") }()
-		<-entered
-		if err := sess.renewToken(context.Background(), tokenStamp{}); err != nil {
-			t.Fatal(err)
-		}
-		close(release)
-		if err := <-result; err != nil || sess.signInRefused() || n.Load() != 2 {
-			t.Errorf("the read = %v (refused %v) after %d requests; want it through on the renewed token, in 2", err, sess.signInRefused(), n.Load())
-		}
-	})
-}
-
 // A single write made through the provider's own CreatePlaylist or
 // AddTrackToPlaylist, with an ordinary context, is an action from the moment
 // it is called: before the stored session is set up, and before any other
@@ -1338,14 +1175,10 @@ func TestSingleWritesAreActionsFromTheCall(t *testing.T) {
 				}
 				return original(ctx, opts)
 			}
-			// The sign-in's look at the stored credential is refused, so it
-			// goes to the browser; the held setup's refresh works.
-			h := fakeSpotifyHTTP(t, func(n int) (int, string) {
-				if n <= refusedRefresh {
-					return tokenRevoked(n)
-				}
-				return tokenOK(n)
-			}, apiOK)
+			h := fakeSpotifyHTTP(t, tokenOK, apiOK)
+			joined := make(chan struct{})
+			storedJoined = onceFunc(func() { close(joined) })
+			t.Cleanup(func() { storedJoined = nil })
 			p := New(nil, "client", 320)
 
 			done := make(chan error, 1)
@@ -1358,10 +1191,14 @@ func TestSingleWritesAreActionsFromTheCall(t *testing.T) {
 				}
 			}()
 			<-entered
-			if err := p.Authenticate(); err != nil {
+			// The sign-in shares the write's own setup, and takes it.
+			signedIn := make(chan error, 1)
+			go func() { signedIn <- p.Authenticate() }()
+			<-joined
+			close(release)
+			if err := <-signedIn; err != nil {
 				t.Fatal(err)
 			}
-			close(release)
 			err := <-done
 			if !errors.Is(err, errSignInChanged) || h.apiCalls.Load() != 0 {
 				t.Fatalf("the %s = %v after %d requests, want errSignInChanged and none sent", kind, err, h.apiCalls.Load())
@@ -1385,93 +1222,6 @@ func TestSingleWritesAreActionsFromTheCall(t *testing.T) {
 	}
 }
 
-// A refusal of one token is about that token. When a renewal that was
-// already on its way then installs a new token, the refusal has nothing left
-// to refuse: the session is working. A refusal of the whole sign-in, such as
-// playback's, is not undone by a new token. (The first case is adapted from
-// the reviewer's round-6 probe, on the real staged token source.)
-func TestTokenRefusalDoesNotOutliveItsToken(t *testing.T) {
-	expiredSession := func(t *testing.T) *Session {
-		t.Helper()
-		s := &Session{clientID: "client"}
-		s.stageCreds(storedCreds{Username: "user", Data: []byte("blob"), DeviceID: "dev", RefreshToken: "old"})
-		s.accept()
-		s.tokenSource = s.stagedTokenSource(&oauth2.Token{AccessToken: "expired", RefreshToken: "old", Expiry: time.Now().Add(-time.Hour)})
-		return s
-	}
-	t.Run("the token's own refresh is refused, then the renewal lands", func(t *testing.T) {
-		storeCreds(t)
-		autoEntered, autoRelease := make(chan struct{}), make(chan struct{})
-		forcedEntered, forcedRelease := make(chan struct{}), make(chan struct{})
-		fakeSpotifyHTTP(t, func(n int) (int, string) {
-			switch n {
-			case 1: // the token source's own refresh
-				close(autoEntered)
-				<-autoRelease
-			case 2: // the forced renewal: accepted, its answer held
-				close(forcedEntered)
-				<-forcedRelease
-				return tokenOK(n)
-			}
-			return tokenRevoked(n)
-		}, apiOK)
-		s := expiredSession(t)
-		p := New(s, "client", 320)
-
-		auto := make(chan error, 1)
-		go func() {
-			resp, err := p.webAPI(context.Background(), "GET", "/v1/me", nil)
-			if resp != nil {
-				resp.Body.Close()
-			}
-			auto <- err
-		}()
-		<-autoEntered
-		forced := make(chan error, 1)
-		go func() { forced <- s.renewToken(context.Background(), tokenStamp{}) }()
-		<-forcedEntered
-
-		close(autoRelease)
-		if err := <-auto; !errors.Is(err, playlist.ErrNeedsAuth) {
-			t.Fatalf("the read on the old token = %v, want its refusal", err)
-		}
-		close(forcedRelease)
-		if err := <-forced; err != nil {
-			t.Fatal(err)
-		}
-		if s.signInRefused() {
-			t.Fatal("the session is still refused, for a token it no longer uses")
-		}
-		if resp, err := p.webAPI(context.Background(), "GET", "/v1/me", nil); err != nil {
-			t.Errorf("a read on the renewed token = %v", err)
-		} else {
-			resp.Body.Close()
-		}
-	})
-	t.Run("a refusal of the whole sign-in stays through a new token", func(t *testing.T) {
-		storeCreds(t)
-		forcedEntered, forcedRelease := make(chan struct{}), make(chan struct{})
-		fakeSpotifyHTTP(t, func(n int) (int, string) {
-			if n == 1 {
-				close(forcedEntered)
-				<-forcedRelease
-			}
-			return tokenOK(n)
-		}, apiOK)
-		s := expiredSession(t)
-
-		forced := make(chan error, 1)
-		go func() { forced <- s.renewToken(context.Background(), tokenStamp{}) }()
-		<-forcedEntered
-		s.refuseSignIn(s.generation()) // playback: the sign-in itself is refused
-		close(forcedRelease)
-		<-forced
-		if !s.signInRefused() {
-			t.Error("a new token undid a refusal of the whole sign-in")
-		}
-	})
-}
-
 // A write that got a 401 was refused: it did not take effect, whatever
 // happens next. When the renewal that follows cannot reach Spotify, the
 // error still says so (provider.NotApplied), and the outage stays an outage.
@@ -1488,7 +1238,7 @@ func TestRefusedWriteStaysNotAppliedThroughAnOutage(t *testing.T) {
 		storeCreds(t)
 		h := fakeSpotifyHTTP(t, func(int) (int, string) { return http.StatusServiceUnavailable, "unavailable" },
 			func(int, *http.Request) (int, http.Header) { return http.StatusUnauthorized, nil })
-		sess := &Session{clientID: "client", tokenSource: tokenSourceFunc(goodToken)}
+		sess := goodSession()
 		err := post(New(sess, "client", 320))
 		if err == nil || h.apiCalls.Load() != 1 {
 			t.Fatalf("the write = %v after %d requests, want an error after one", err, h.apiCalls.Load())
@@ -1512,23 +1262,12 @@ func TestRefusedWriteStaysNotAppliedThroughAnOutage(t *testing.T) {
 			return http.StatusBadGateway
 		}}
 		fakeSpotifyHTTP(t, tokenOK, api.handle)
-		sess := &Session{clientID: "client", tokenSource: tokenSourceFunc(goodToken)}
+		sess := goodSession()
 		err := post(New(sess, "client", 320))
 		if err == nil || api.sent("POST") != 1 || errors.Is(err, playlist.ErrNeedsAuth) || !provider.NotApplied(err) {
 			t.Errorf("the write = %v after %d writes; want one write, no sign-in, and not applied", err, api.sent("POST"))
 		}
 	})
-}
-
-// expiredStagedSession is a session through acceptance on the real staged
-// token source, its access token run out, so its next call refreshes.
-func expiredStagedSession(t *testing.T) *Session {
-	t.Helper()
-	s := &Session{clientID: "client"}
-	s.stageCreds(storedCreds{Username: "user", Data: []byte("blob"), DeviceID: "dev", RefreshToken: "original"})
-	s.accept()
-	s.tokenSource = s.stagedTokenSource(&oauth2.Token{AccessToken: "expired", RefreshToken: "original", Expiry: time.Now().Add(-time.Hour)})
-	return s
 }
 
 func storedRefreshToken(t *testing.T) string {
@@ -1544,126 +1283,6 @@ func tokenAnswer(access, refresh string) (int, string) {
 	return http.StatusOK, fmt.Sprintf(`{"access_token":%q,"token_type":"Bearer","refresh_token":%q,"expires_in":3600}`, access, refresh)
 }
 
-// A token source writes the refresh token Spotify rotates only while it is
-// the session's token source. One that a renewal has replaced holds an older
-// answer: when that answer arrives late, the newer credential on disk and in
-// memory stays. (The first case is adapted from the reviewer's round-7
-// probe, on the real staged token source.)
-func TestObsoleteTokenSourceDoesNotRewriteCredential(t *testing.T) {
-	t.Run("its answer arrives after the renewal", func(t *testing.T) {
-		storeCreds(t)
-		entered, release := make(chan struct{}), make(chan struct{})
-		fakeSpotifyHTTP(t, func(n int) (int, string) {
-			if n == 1 { // the token source's own refresh: issued first, delivered last
-				close(entered)
-				<-release
-				return tokenAnswer("auto-access", "auto-issued-earlier")
-			}
-			return tokenAnswer("standing-access", "forced-issued-later")
-		}, apiOK)
-		s := expiredStagedSession(t)
-		p := New(s, "client", 320)
-
-		done := make(chan error, 1)
-		go func() {
-			resp, err := p.webAPI(context.Background(), "GET", "/v1/me", nil)
-			if resp != nil {
-				resp.Body.Close()
-			}
-			done <- err
-		}()
-		<-entered
-		if err := s.renewToken(context.Background(), tokenStamp{}); err != nil {
-			t.Fatal(err)
-		}
-		if got := storedRefreshToken(t); got != "forced-issued-later" {
-			t.Fatalf("the renewal stored %q, want its own refresh token", got)
-		}
-		close(release)
-		if err := <-done; err != nil {
-			t.Fatal(err)
-		}
-		if got := storedRefreshToken(t); got != "forced-issued-later" {
-			t.Errorf("the replaced token source rewrote the stored credential to %q", got)
-		}
-		if got := s.cred.snapshot().RefreshToken; got != "forced-issued-later" {
-			t.Errorf("the replaced token source rewrote the credential in memory to %q", got)
-		}
-	})
-	t.Run("the session's own token source still rotates", func(t *testing.T) {
-		storeCreds(t)
-		fakeSpotifyHTTP(t, func(int) (int, string) { return tokenAnswer("auto-access", "rotated-by-the-source") }, apiOK)
-		s := expiredStagedSession(t)
-		resp, err := New(s, "client", 320).webAPI(context.Background(), "GET", "/v1/me", nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
-		if got := storedRefreshToken(t); got != "rotated-by-the-source" {
-			t.Errorf("stored refresh token = %q, want the one the standing source was given", got)
-		}
-	})
-	t.Run("a session published by a sign-in rotates as itself", func(t *testing.T) {
-		t.Setenv("CLIAMP_CONFIG_DIR", t.TempDir())
-		stubBuild(t)
-		fakeSpotifyHTTP(t, func(int) (int, string) { return tokenAnswer("auto-access", "rotated-after-sign-in") }, apiOK)
-		old := brokenSession()
-		p := New(old, "client", 320)
-		if err := p.Authenticate(); err != nil { // the built session's source is adopted by old
-			t.Fatal(err)
-		}
-		// The adopted token runs out; its source refreshes and rotates.
-		old.mu.Lock()
-		old.tokenSource = old.stagedTokenSource(&oauth2.Token{AccessToken: "expired", RefreshToken: "new-refresh", Expiry: time.Now().Add(-time.Hour)})
-		old.mu.Unlock()
-		resp, err := p.webAPI(context.Background(), "GET", "/v1/me", nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
-		if got := storedRefreshToken(t); got != "rotated-after-sign-in" {
-			t.Errorf("stored refresh token = %q, want the adopted source's rotation", got)
-		}
-	})
-	t.Run("a token source whose session was closed or replaced writes nothing", func(t *testing.T) {
-		for _, ending := range []string{"closed", "replaced by a sign-in"} {
-			t.Setenv("CLIAMP_CONFIG_DIR", t.TempDir())
-			stubBuild(t)
-			entered, release := make(chan struct{}), make(chan struct{})
-			fakeSpotifyHTTP(t, func(n int) (int, string) {
-				if n == 1 {
-					close(entered)
-					<-release
-				}
-				return tokenAnswer("late-access", "late-rotation")
-			}, apiOK)
-			p, s := signedInSession(t)
-			s.mu.Lock()
-			s.tokenSource = s.stagedTokenSource(&oauth2.Token{AccessToken: "expired", RefreshToken: "new-refresh", Expiry: time.Now().Add(-time.Hour)})
-			source := s.tokenSource
-			s.mu.Unlock()
-
-			done := make(chan struct{})
-			go func() { _, _ = source.Token(); close(done) }()
-			<-entered
-			if ending == "closed" {
-				p.Close()
-			} else {
-				s.refuseSignIn(s.generation())
-				if err := p.Authenticate(); err != nil {
-					t.Fatal(err)
-				}
-			}
-			before := storedRefreshToken(t)
-			close(release)
-			<-done
-			if got := storedRefreshToken(t); got != before || got == "late-rotation" {
-				t.Errorf("%s: the old token source rewrote the stored credential to %q", ending, got)
-			}
-		}
-	})
-}
-
 // The catalog's background album read answers a 401 as every read does: the
 // token is renewed once and the read sent once more; a 401 the renewed token
 // gets too is sign-in required. It keeps its own rule for rate limits: none
@@ -1675,7 +1294,7 @@ func TestBackgroundAlbumReadRecoversFrom401(t *testing.T) {
 		return err
 	}
 	healthy := func() (*SpotifyProvider, *Session) {
-		s := &Session{clientID: "client", tokenSource: tokenSourceFunc(goodToken)}
+		s := goodSession()
 		return New(s, "client", 320), s
 	}
 	always := func(status int, header http.Header) func(int, *http.Request) (int, http.Header) {
@@ -1763,6 +1382,160 @@ func TestBackgroundAlbumReadRecoversFrom401(t *testing.T) {
 		close(release)
 		if err := <-done; errors.Is(err, playlist.ErrNeedsAuth) || s.signInRefused() {
 			t.Errorf("the read = %v (refused %v): the old sign-in's 401 reached the new one", err, s.signInRefused())
+		}
+	})
+}
+
+// expiredStagedSession is a session a provider took, whose access token has
+// run out, so its next call refreshes it.
+func expiredStagedSession(t *testing.T) *Session {
+	t.Helper()
+	s := builtSession("client", nil, storedCreds{Username: "user", Data: []byte("blob"), DeviceID: "dev", RefreshToken: "original"},
+		&oauth2.Token{AccessToken: "expired", Expiry: time.Now().Add(-time.Hour)})
+	s.accept()
+	return s
+}
+
+// A 401 that arrives for a token the session has renewed meanwhile is about
+// the old token: the read is sent again on the one that stands, and nothing
+// is refused. (The orderings this test used to hold beside it, a refresh in
+// the air while a second, forced one overtook it, cannot be made any more:
+// there is one refresh at a time. TestProductionCallersShareOneRefresh holds
+// what they protected.)
+func TestStaleRefreshDoesNotRefuseRenewedToken(t *testing.T) {
+	storeCreds(t)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var n atomic.Int32
+	fakeSpotifyHTTP(t, tokenOK, func(int, *http.Request) (int, http.Header) {
+		if n.Add(1) == 1 { // sent with the old token; answered after the renewal
+			close(entered)
+			<-release
+			return http.StatusUnauthorized, nil
+		}
+		return http.StatusOK, nil
+	})
+	sess := goodSession()
+	p := New(sess, "client", 320)
+
+	result := make(chan error, 1)
+	go func() {
+		resp, err := p.webAPI(context.Background(), "GET", "/v1/me", nil)
+		if resp != nil {
+			resp.Body.Close()
+		}
+		result <- err
+	}()
+	<-entered
+	tokens := sess.viewNow().tokens
+	if _, _, err := tokens.renew(context.Background(), lease{tokens, 1}); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-result; err != nil || sess.signInRefused() || n.Load() != 2 {
+		t.Errorf("the read = %v (refused %v) after %d requests; want it through on the renewed token, in 2", err, sess.signInRefused(), n.Load())
+	}
+}
+
+// A refusal of the whole sign-in, from playback, is not about a token: a
+// token renewed afterwards leaves it standing.
+func TestPlaybackRefusalStaysThroughANewToken(t *testing.T) {
+	storeCreds(t)
+	forcedEntered, forcedRelease := make(chan struct{}), make(chan struct{})
+	fakeSpotifyHTTP(t, func(n int) (int, string) {
+		if n == 1 {
+			close(forcedEntered)
+			<-forcedRelease
+		}
+		return tokenOK(n)
+	}, apiOK)
+	s := expiredStagedSession(t)
+	tokens := s.viewNow().tokens
+
+	forced := make(chan error, 1)
+	go func() { _, _, err := tokens.renew(context.Background(), lease{tokens, 1}); forced <- err }()
+	<-forcedEntered
+	s.refuseSignIn(s.generation()) // playback: the sign-in itself is refused
+	close(forcedRelease)
+	if err := <-forced; err != nil {
+		t.Fatal(err)
+	}
+	if !s.signInRefused() || !s.needsSignIn() {
+		t.Error("a new token undid a refusal of the whole sign-in")
+	}
+	if _, err := New(s, "client", 320).webAPI(context.Background(), "GET", "/v1/me", nil); !errors.Is(err, playlist.ErrNeedsAuth) {
+		t.Errorf("a read on a session refused for playback = %v, want playlist.ErrNeedsAuth", err)
+	}
+}
+
+// A sign-in's coordinator writes the refresh token Spotify rotates while it
+// is the sign-in's, and nothing once its session was closed or replaced.
+func TestOnlyTheStandingSignInRotatesTheCredential(t *testing.T) {
+	t.Run("the session's own refresh rotates", func(t *testing.T) {
+		storeCreds(t)
+		fakeSpotifyHTTP(t, func(int) (int, string) { return tokenAnswer("auto-access", "rotated-by-the-refresh") }, apiOK)
+		s := expiredStagedSession(t)
+		resp, err := New(s, "client", 320).webAPI(context.Background(), "GET", "/v1/me", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if got := storedRefreshToken(t); got != "rotated-by-the-refresh" {
+			t.Errorf("stored refresh token = %q, want the one the refresh was given", got)
+		}
+	})
+	t.Run("a session published by a sign-in rotates as itself", func(t *testing.T) {
+		t.Setenv("CLIAMP_CONFIG_DIR", t.TempDir())
+		stubBuild(t)
+		fakeSpotifyHTTP(t, func(int) (int, string) { return tokenAnswer("auto-access", "rotated-after-sign-in") }, apiOK)
+		old := brokenSession()
+		p := New(old, "client", 320)
+		if err := p.Authenticate(); err != nil { // the built session's coordinator is old's now
+			t.Fatal(err)
+		}
+		tokens := old.viewNow().tokens
+		// The published token runs out; the coordinator refreshes and rotates.
+		tokens.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+		resp, err := p.webAPI(context.Background(), "GET", "/v1/me", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if got := storedRefreshToken(t); got != "rotated-after-sign-in" || old.viewNow().tokens != tokens {
+			t.Errorf("stored refresh token = %q, want the published coordinator's own rotation", got)
+		}
+	})
+	t.Run("a coordinator whose session was closed or replaced writes nothing", func(t *testing.T) {
+		for _, ending := range []string{"closed", "replaced by a sign-in"} {
+			t.Setenv("CLIAMP_CONFIG_DIR", t.TempDir())
+			stubBuild(t)
+			entered, release := make(chan struct{}), make(chan struct{})
+			fakeSpotifyHTTP(t, func(n int) (int, string) {
+				if n == 1 {
+					close(entered)
+					<-release
+				}
+				return tokenAnswer("late-access", "late-rotation")
+			}, apiOK)
+			p, s := signedInSession(t)
+			tokens := s.viewNow().tokens
+
+			done := make(chan struct{})
+			go func() { _, _, _ = tokens.renew(context.Background(), lease{tokens, 1}); close(done) }()
+			<-entered
+			if ending == "closed" {
+				p.Close()
+			} else {
+				s.refuseSignIn(s.generation())
+				if err := p.Authenticate(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := storedRefreshToken(t)
+			close(release)
+			<-done
+			if got := storedRefreshToken(t); got != before || got == "late-rotation" {
+				t.Errorf("%s: the old sign-in's refresh rewrote the stored credential to %q", ending, got)
+			}
 		}
 	})
 }

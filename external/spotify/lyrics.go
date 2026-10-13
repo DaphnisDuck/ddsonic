@@ -37,9 +37,7 @@ func TrackIDFromPath(path string) string {
 // view). This endpoint is undocumented and may change without notice; callers
 // must treat failures as a signal to fall back to other lyric sources.
 func (p *SpotifyProvider) TrackLyrics(ctx context.Context, trackID string) ([]lyrics.Line, error) {
-	p.mu.Lock()
-	sess := p.session
-	p.mu.Unlock()
+	sess := p.sessionNow()
 	if sess == nil {
 		return nil, fmt.Errorf("spotify: not signed in: %w", playlist.ErrNeedsAuth)
 	}
@@ -54,7 +52,11 @@ func (s *Session) trackLyrics(ctx context.Context, trackID string) ([]lyrics.Lin
 	// ddsonic: the token comes from the one place every call gets it, so a
 	// refusal here is held against the right sign-in and token
 	// (accessToken, session_auth_ddsonic.go). Upstream asked the source here.
-	accessToken, _, err := s.accessToken(false, nil)
+	v := s.viewNow()
+	if v.tokens == nil {
+		return nil, errNoToken()
+	}
+	_, accessToken, err := v.tokens.token(ctx)
 	if err != nil {
 		return nil, err
 	}

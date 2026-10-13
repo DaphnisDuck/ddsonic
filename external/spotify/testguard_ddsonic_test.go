@@ -109,4 +109,11 @@ func TestCredentialFileFailsClosedUnderTest(t *testing.T) {
 	if _, err := os.Stat(outside); err == nil {
 		t.Errorf("%s was created", outside)
 	}
+	// A session built there owns no file and writes none.
+	s := builtSession("client", nil, storedCreds{Username: "u", RefreshToken: "r"}, nil)
+	s.accept()
+	s.Close()
+	if _, err := os.Stat(outside); err == nil {
+		t.Errorf("%s was created by an accepted session", outside)
+	}
 }
