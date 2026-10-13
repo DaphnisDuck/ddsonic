@@ -68,14 +68,6 @@ func quiesce(t *testing.T) {
 	}
 }
 
-// retired waits for every retired playback bundle to be torn down, which no
-// production caller waits for.
-func retired(t *testing.T) {
-	t.Helper()
-	builds.Wait()
-	tails.Wait()
-}
-
 // expiredSession is a session whose token has expired: its next use refreshes
 // it, from the stored credential's refresh token.
 func expiredSession() *Session {

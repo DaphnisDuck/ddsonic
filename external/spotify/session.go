@@ -301,13 +301,8 @@ var tokenHTTPClient = &http.Client{Timeout: 30 * time.Second}
 // was dropped while it ran (ddsonic: upstream deb2f447).
 var webHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
-// tokenContext carries the bounded client to oauth2's requests. ddsonic
-func tokenContext() context.Context {
-	return tokenContextFrom(context.Background())
-}
-
-// tokenContextFrom is tokenContext within ctx: the requests also end when
-// ctx does. ddsonic
+// tokenContextFrom carries the bounded client to oauth2's requests, which
+// also end when ctx does. ddsonic
 func tokenContextFrom(ctx context.Context) context.Context {
 	return context.WithValue(ctx, oauth2.HTTPClient, tokenHTTPClient)
 }
