@@ -2,7 +2,8 @@
 
 Status: revision 10, with one correction of fact made on 2026-10-13 after
 review round 9 and marked where it stands (section 4.3, "CORRECTION"): the
-claim that closing a never-accepted Vorbis decoder is safe was wrong.
+claim that closing a never-accepted Vorbis decoder is safe was wrong. The
+owner's decision on that (2026-10-13) is recorded there too.
 The design is implemented on branch `fix/spotify-signin`
 (see `plan.md`); the implementation is in review and is not accepted.
 Revision 10 differs from revision 9, which was the reviewed design, in two
@@ -735,9 +736,14 @@ is false for Vorbis.** go-librespot v0.9.1's `vorbis.Decoder.Close` clears and
 frees the stream's info before it clears the dsp state that points at it, the
 reverse of libvorbis's documented order, and can abort the process on a
 decoder nobody has read. The implementation does not close a never-accepted
-Vorbis decoder until the owner has decided how to resolve that (`plan.md`,
-R9-4); MP3 and FLAC are closed as this section says, and tested with real
-decoders. The original sentence follows. I found nothing in the pinned code that makes any of the
+Vorbis decoder. **Owner's decision (2026-10-13, `plan.md`, R9-4 and the
+Decisions log):** that is accepted as a documented 1.0 resource and
+reliability limitation, measured on the next candidate before release, and
+the SDK defect is reported upstream (a draft, not yet filed:
+`docs/ddsonic/upstream-reports/go-librespot-vorbis-close.md`); the SDK is not
+patched, forked or re-pinned for it. It is not a correctness or
+credential-integrity defect and not a security waiver. MP3 and FLAC are closed
+as this section says, and tested with real decoders. The original sentence follows. I found nothing in the pinned code that makes any of the
 three unsafe under those conditions; that is a code reading plus the tests of
 14.5, not a proof for every platform.
 

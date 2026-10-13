@@ -241,6 +241,8 @@ That checklist has become **Release Acceptance** ([acceptance.md](acceptance.md)
 - [ ] The known rc.3 bugs are triaged or resolved
 - [ ] The checklist is drafted and independently reviewed
 - [ ] Steve executes it against the release candidate
+- [ ] Vorbis decoder retention is measured with the MP3 measurement and brought to the owner ([acceptance.md](acceptance.md)); a material cost stops release progression
+- [ ] The owner files the upstream report on go-librespot's `vorbis.Decoder.Close` (draft, not yet filed: [upstream-reports/go-librespot-vorbis-close.md](upstream-reports/go-librespot-vorbis-close.md))
 - [ ] Anything it uncovers is triaged before rc.4 is published
 
 It emphasizes real workflows and state transitions. The pattern, for each synced source: add content upstream; verify it is absent; refresh; verify it appears; restart; verify it persisted; remove it upstream; refresh; verify it is gone.

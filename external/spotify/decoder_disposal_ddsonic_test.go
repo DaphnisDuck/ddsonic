@@ -122,13 +122,14 @@ func TestRealDecodersAreClosedWhenAnOpenIsNotAccepted(t *testing.T) {
 	}
 }
 
-// OPEN (review round 9, R9-4): a real Ogg Vorbis decoder that is never
-// accepted is NOT closed, because go-librespot v0.9.1's Close of it can
-// abort the process (releaseDecoder says why). This test holds the interim:
+// A real Ogg Vorbis decoder that is never accepted is NOT closed (review
+// round 9, R9-4; accepted by the owner on 2026-10-13 as a 1.0 limitation),
+// because go-librespot v0.9.1's Close of it can
+// abort the process (releaseDecoder says why). This test holds that:
 // the open's disposal, repeated with real decoders, does not bring the
 // process down. It does not show that the decoder's memory is given back;
-// it is not. When the owner has decided how that is resolved, this test
-// changes with it.
+// it is not, and the test is no proof of release. It changes when the SDK's
+// Close is safe to call.
 func TestRealVorbisDecoderIsNotClosedByDisposal(t *testing.T) {
 	for _, how := range []string{"cancelled", "retired"} {
 		t.Run(how, func(t *testing.T) {
