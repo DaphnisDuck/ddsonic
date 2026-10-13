@@ -117,3 +117,94 @@ func TestCredentialFileFailsClosedUnderTest(t *testing.T) {
 		t.Errorf("%s was created by an accepted session", outside)
 	}
 }
+
+// The guard looks at where the credential path leads, not at how it is
+// spelled: a config directory, or a credential file, that is a symbolic link
+// out of the temporary directory is refused for reading, for the atomic
+// write and for deletion, whether or not anything exists at the far end.
+// What it leads to is left as it was. A link that stays inside the temporary
+// directory is an ordinary path. (Adapted from the reviewer's round-9 probe;
+// every credential here is synthetic.)
+func TestCredentialGuardFollowsSymlinks(t *testing.T) {
+	synthetic := []byte(`{"username":"synthetic","data":"AQ==","refresh_token":"synthetic"}`)
+	for _, link := range []string{"the config directory", "the credential file", "a credential file that leads nowhere yet"} {
+		for _, op := range []string{"load", "save", "delete"} {
+			t.Run(link+": "+op, func(t *testing.T) {
+				// "Outside" is a directory that is not under the temporary
+				// directory the test then narrows TMPDIR to.
+				outside := t.TempDir()
+				inside := filepath.Join(t.TempDir(), "tmp")
+				if err := os.MkdirAll(inside, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("TMPDIR", inside)
+				if underTempDir(outside) {
+					t.Fatal("the case's outside directory is inside the temporary directory")
+				}
+				config := filepath.Join(inside, "config")
+				target := filepath.Join(outside, "spotify_credentials.json")
+				switch link {
+				case "the config directory":
+					if err := os.Symlink(outside, config); err != nil {
+						t.Fatal(err)
+					}
+				default:
+					if err := os.MkdirAll(config, 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(target, filepath.Join(config, "spotify_credentials.json")); err != nil {
+						t.Fatal(err)
+					}
+				}
+				exists := link != "a credential file that leads nowhere yet"
+				if exists {
+					if err := os.WriteFile(target, synthetic, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				t.Setenv("CLIAMP_CONFIG_DIR", config)
+
+				var err error
+				switch op {
+				case "load":
+					_, err = loadCreds()
+				case "save":
+					err = saveCreds(&storedCreds{Username: "written-by-the-test"})
+				case "delete":
+					_, err = DeleteCreds()
+				}
+				if !errors.Is(err, errNoStandIn) {
+					t.Errorf("%s through %s = %v, want the guard's refusal", op, link, err)
+				}
+				got, readErr := os.ReadFile(target)
+				switch {
+				case exists && (readErr != nil || string(got) != string(synthetic)):
+					t.Errorf("what the link leads to was changed or removed: %q, %v", got, readErr)
+				case !exists && readErr == nil:
+					t.Errorf("a file was created outside the temporary directory: %q", got)
+				}
+			})
+		}
+	}
+	t.Run("a link that stays inside is an ordinary path", func(t *testing.T) {
+		root := t.TempDir()
+		real := filepath.Join(root, "real")
+		if err := os.MkdirAll(real, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		config := filepath.Join(root, "config")
+		if err := os.Symlink(real, config); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("CLIAMP_CONFIG_DIR", config)
+		if err := saveCreds(&storedCreds{Username: "synthetic"}); err != nil {
+			t.Fatal(err)
+		}
+		if creds, err := loadCreds(); err != nil || creds.Username != "synthetic" {
+			t.Errorf("loadCreds() through a link inside the temporary directory = %+v, %v", creds, err)
+		}
+		if removed, err := DeleteCreds(); err != nil || !removed {
+			t.Errorf("DeleteCreds() through a link inside the temporary directory = %t, %v", removed, err)
+		}
+	})
+}

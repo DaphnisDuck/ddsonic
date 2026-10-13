@@ -44,12 +44,17 @@ func DeleteCreds() (bool, error) {
 }
 
 // credsFile is CredsPath for the code that reads, writes or deletes the
-// credential file. ddsonic: under go test it refuses a path outside the
-// system's temporary directory. A test that has not pointed the config
-// directory at a temporary one would otherwise read the user's own stored
-// sign-in, and write it; like the token and browser guards
+// credential file. ddsonic: under go test it refuses a path that leads
+// outside the system's temporary directory. A test that has not pointed the
+// config directory at a temporary one would otherwise read the user's own
+// stored sign-in, and write it; like the token and browser guards
 // (session_auth_ddsonic.go), this fails such a test instead, in whichever
 // package it is.
+//
+// The path is judged by where it leads, not by how it is spelled: symbolic
+// links in it are followed, the credential file's own included, whether or
+// not anything exists at their end. Outside go test nothing is checked and
+// links are followed as they always were.
 func credsFile() (string, error) {
 	path, err := CredsPath()
 	if err != nil {
@@ -61,7 +66,54 @@ func credsFile() (string, error) {
 	return path, nil
 }
 
+// underTempDir reports whether path, with every symbolic link in it
+// followed, lies inside the temporary directory, itself resolved. A path
+// that cannot be resolved is not inside.
 func underTempDir(path string) bool {
-	rel, err := filepath.Rel(os.TempDir(), path)
+	root, err := filepath.EvalSymlinks(os.TempDir())
+	if err != nil {
+		return false
+	}
+	resolved, ok := resolvePath(path)
+	if !ok {
+		return false
+	}
+	rel, err := filepath.Rel(root, resolved)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// resolvePath is where path leads: the longest part of it that exists, with
+// its links followed, and the rest appended. A final link is followed even
+// when it leads nowhere yet, since a write would go there.
+func resolvePath(path string) (string, bool) {
+	p, rest := filepath.Clean(path), ""
+	for range 64 { // links followed; a loop of them is not resolved
+		info, err := os.Lstat(p)
+		switch {
+		case err == nil && info.Mode()&os.ModeSymlink != 0:
+			target, err := os.Readlink(p)
+			if err != nil {
+				return "", false
+			}
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(filepath.Dir(p), target)
+			}
+			p = filepath.Clean(target)
+		case err == nil:
+			resolved, err := filepath.EvalSymlinks(p)
+			if err != nil {
+				return "", false
+			}
+			return filepath.Join(resolved, rest), true
+		case errors.Is(err, os.ErrNotExist):
+			parent := filepath.Dir(p)
+			if parent == p {
+				return "", false
+			}
+			p, rest = parent, filepath.Join(filepath.Base(p), rest)
+		default:
+			return "", false
+		}
+	}
+	return "", false
 }
