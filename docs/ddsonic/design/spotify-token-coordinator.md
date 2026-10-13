@@ -1,6 +1,9 @@
 # Spotify token coordinator: design specification
 
-Status: revision 10. The design is implemented on branch `fix/spotify-signin`
+Status: revision 10, with one correction of fact made on 2026-10-13 after
+review round 9 and marked where it stands (section 4.3, "CORRECTION"): the
+claim that closing a never-accepted Vorbis decoder is safe was wrong.
+The design is implemented on branch `fix/spotify-signin`
 (see `plan.md`); the implementation is in review and is not accepted.
 Revision 10 differs from revision 9, which was the reviewed design, in two
 things only, both in 14.5: the contract runner is a separate mandatory gate
@@ -727,7 +730,14 @@ references can never free it. Called once, by an exclusive owner, on a
 decoder nobody reads, each `Close` is the decoder's own documented release:
 Vorbis takes its lock and is idempotent; MP3's `free` is idempotent; FLAC's
 deletes the decoder and its client data and is not idempotent, which is why
-"once" matters. I found nothing in the pinned code that makes any of the
+"once" matters. **CORRECTION (2026-10-13, review round 9): the next sentence
+is false for Vorbis.** go-librespot v0.9.1's `vorbis.Decoder.Close` clears and
+frees the stream's info before it clears the dsp state that points at it, the
+reverse of libvorbis's documented order, and can abort the process on a
+decoder nobody has read. The implementation does not close a never-accepted
+Vorbis decoder until the owner has decided how to resolve that (`plan.md`,
+R9-4); MP3 and FLAC are closed as this section says, and tested with real
+decoders. The original sentence follows. I found nothing in the pinned code that makes any of the
 three unsafe under those conditions; that is a code reading plus the tests of
 14.5, not a proof for every platform.
 

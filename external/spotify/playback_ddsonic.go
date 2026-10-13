@@ -35,6 +35,7 @@ import (
 	librespot "github.com/devgianlu/go-librespot"
 	librespotPlayer "github.com/devgianlu/go-librespot/player"
 	"github.com/devgianlu/go-librespot/session"
+	"github.com/devgianlu/go-librespot/vorbis"
 
 	"github.com/bjarneo/cliamp/applog"
 )
@@ -161,12 +162,31 @@ func disposeStream(stream *librespotPlayer.Stream, h *openHandle) {
 	if stream == nil {
 		return
 	}
-	switch src := stream.Source.(type) {
+	releaseDecoder(stream.Source)
+}
+
+// releaseDecoder closes a decoder nobody reads, when closing it is safe.
+//
+// OPEN (review round 9, R9-4; the owner decides): an Ogg Vorbis decoder is
+// NOT closed. go-librespot v0.9.1's vorbis.Decoder.Close clears and frees
+// the stream's info before it clears the dsp state that still points at it,
+// the reverse of the order libvorbis documents, and libvorbis then reads
+// freed memory and can abort the process (free(): invalid pointer in
+// vorbis_dsp_clear). The abort is in Close itself, on a decoder nobody has
+// read, and cannot be avoided from outside the SDK: the fields the right
+// order needs are unexported. Until that is resolved a Vorbis decoder that
+// was never accepted is left unreleased, as an established one is by the
+// streamer: its native memory is not given back. That is a leak, stated
+// here and in plan.md, and not a decision.
+func releaseDecoder(src librespot.AudioSource) {
+	switch src := src.(type) {
+	case *vorbis.Decoder:
+		// not closed: see above
 	case io.Closer: // mp3, flac
 		if err := src.Close(); err != nil {
 			applog.Warn("spotify: closing an unused stream: %v", err)
 		}
-	case interface{ Close() }: // vorbis
+	case interface{ Close() }:
 		src.Close()
 	}
 }

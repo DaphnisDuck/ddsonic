@@ -70,3 +70,5 @@ The contract gate (`make sdk-contract`, [acceptance.md](acceptance.md#the-go-lib
 1. changes `sdkPin` in `external/spotify/sdkcontract/runner_test.go` in the same change;
 2. runs the gate. If the helper or a test in `testdata` no longer compiles against the SDK's internals, port it;
 3. reads each failure by what its test says of itself. A test marked **STOP** is an assumption the design depends on: the bump waits until section 4.3 of the design has been re-examined. A test marked as a **reviewed expectation** pins a limitation ddsonic works around; if the SDK has lifted it the test fails with "EXPECTATION CHANGED", ddsonic stays correct, and the expectation is updated in a change the reviewer sees, never silently.
+
+A known defect of v0.9.1 to look at on every bump: `vorbis.Decoder.Close` frees the stream's info before it clears the dsp state that points at it, and can abort the process. ddsonic therefore does not close a Vorbis decoder (`releaseDecoder` in `external/spotify/playback_ddsonic.go`; `plan.md`, R9-4). If a later go-librespot fixes the order, that exception can go, with a real-decoder test in its place.

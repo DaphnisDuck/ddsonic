@@ -3,6 +3,7 @@ package spotify
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -363,5 +364,76 @@ func TestRequestGivesUpWhenTheSignInKeepsChanging(t *testing.T) {
 	}
 	if err := c.backAuth(); err == nil || c.authRound != maxAuthRounds {
 		t.Errorf("a fourth round = %v with %d counted, want it refused before it is taken", err, c.authRound)
+	}
+}
+
+// A refresh token that Spotify rotated and ddsonic accepted is the one the
+// next start uses: it was written when it was accepted. (Adapted from the
+// reviewer's round-9 probe.)
+func TestRestartAfterRotation(t *testing.T) {
+	storeCreds(t)
+	stubBuild(t)
+	var sent []string // the refresh token each token request carried
+	orig := http.DefaultTransport
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body := "{}"
+		if strings.Contains(req.URL.Host, "accounts.spotify.com") {
+			if err := req.ParseForm(); err != nil {
+				return nil, err
+			}
+			sent = append(sent, req.Form.Get("refresh_token"))
+			body = `{"access_token":"synthetic-access","refresh_token":"synthetic-rotated","token_type":"Bearer","expires_in":3600}`
+		}
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{"Content-Type": {"application/json"}},
+			Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = orig })
+
+	p := New(expiredSession(), "client", 320)
+	if err := get(p, context.Background()); err != nil { // refreshes, and Spotify rotates
+		t.Fatal(err)
+	}
+	p.Close() // quit
+
+	restarted := New(nil, "client", 320)
+	t.Cleanup(restarted.Close)
+	if err := restarted.ensureSession(); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 2 || sent[0] != "old" || sent[1] != "synthetic-rotated" {
+		t.Errorf("the token requests carried %q, want the stored token and then the rotated one after the restart", sent)
+	}
+}
+
+// One request through everything at once: its token has run out (a refresh
+// that is not its renewal), a 401 (its one renewal in this sign-in), a rate
+// limit during which the user signs in again, a 401 on the new sign-in (its
+// one renewal there), and a 401 once more, which refuses it. What it spent
+// was never reset. (Adapted from the reviewer's round-9 probe.)
+func TestMixedExpiry401AndSignIn(t *testing.T) {
+	storeCreds(t)
+	stubSignIn(t, nil)
+	waits, during := stubRateWait(t)
+	h := fakeSpotifyHTTP(t, tokenOK, statuses(401, 429, 401, 401))
+	s := expiredSession()
+	p := New(s, "client", 320)
+	t.Cleanup(p.Close)
+	*during = func(int) {
+		s.refuseSignIn(s.generation())
+		if err := p.Authenticate(); err != nil {
+			t.Error(err)
+		}
+	}
+
+	c := &apiCall{method: "GET", path: "/v1/me", waitRate: true}
+	_, err := p.request(context.Background(), c)
+	if !errors.Is(err, playlist.ErrNeedsAuth) {
+		t.Errorf("the request = %v, want the refusal of the second sign-in's renewed token", err)
+	}
+	// Token requests: the refresh on expiry, the first sign-in's renewal,
+	// the second sign-in's renewal.
+	if h.apiCalls.Load() != 4 || h.tokenCalls.Load() != 3 || waits.Load() != 1 || c.authRound != 2 || c.rateTry != 1 {
+		t.Errorf("requests %d, token requests %d, waits %d, auth rounds %d, rate tries %d; want 4, 3, 1, 2 and 1",
+			h.apiCalls.Load(), h.tokenCalls.Load(), waits.Load(), c.authRound, c.rateTry)
 	}
 }

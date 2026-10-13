@@ -487,3 +487,62 @@ func TestCloseDuringTheStoredBuild(t *testing.T) {
 			p.sessionNow() != nil, mustRead(t, path) != before, writes.Load())
 	}
 }
+
+// A browser sign-in ends on its own timeout even when its builder never
+// returns: librespot can hold one. The sign-in is deregistered, the provider
+// is free again, and what the held builder returns later, a success
+// included, is retired: not installed and not written. (Adapted from the
+// reviewer's round-9 probe.)
+func TestSignInEndsOnItsOwnTimeout(t *testing.T) {
+	for _, have := range []string{"no session", "a session that needs sign-in"} {
+		t.Run(have, func(t *testing.T) {
+			path := storeCreds(t)
+			before := mustRead(t, path)
+			held := newGate()
+			fresh := builtWith("synthetic-late")
+			stubSignIn(t, func(context.Context) (*Session, error) {
+				held.wait() // deaf to its context
+				return fresh, nil
+			})
+			orig := signInTimeout
+			signInTimeout = 30 * time.Millisecond
+			t.Cleanup(func() { signInTimeout = orig })
+			var sess *Session
+			if have != "no session" {
+				sess = brokenSession()
+			}
+			p := New(sess, "client", 320)
+			p.storedRefused = true // the browser is the only way in
+			before = mustRead(t, path)
+
+			done := make(chan error, 1)
+			go func() { done <- p.Authenticate() }()
+			arrive(t, "the browser build", held.entered)
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("Authenticate() = %v, want its own deadline", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("the sign-in is still waiting for a builder that ignores its deadline")
+			}
+			p.mu.Lock()
+			registered, phase := p.signingIn != nil, p.phase
+			p.mu.Unlock()
+			if registered || phase != phaseIdle || p.sessionNow() != sess {
+				t.Fatalf("the ended sign-in kept something: registered %t, phase %d, session changed %t", registered, phase, p.sessionNow() != sess)
+			}
+
+			held.open() // the builder reports success now
+			builds.Wait()
+			tails.Wait()
+			if !fresh.viewNow().closed {
+				t.Error("the late build was not retired")
+			}
+			if p.sessionNow() != sess || mustRead(t, path) != before {
+				t.Error("the late build was installed or written")
+			}
+			p.Close()
+		})
+	}
+}
