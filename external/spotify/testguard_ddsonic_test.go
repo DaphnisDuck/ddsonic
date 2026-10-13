@@ -460,4 +460,32 @@ func TestCredentialGuardPermitsAPlainPathInside(t *testing.T) {
 			t.Errorf("credsFile() beside a linked temporary directory = %v, want the guard's refusal", err)
 		}
 	})
+	// The temporary directory named relative to the working directory, and
+	// through a link; the config directory by its resolved, absolute path.
+	// (Adapted from the reviewer's round-12 probe.)
+	t.Run("a relative temporary directory through a link, the config directory resolved", func(t *testing.T) {
+		base, inside, outside := guardDirs(t)
+		if err := os.Symlink("tmp", filepath.Join(base, "alias")); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(base)
+		t.Setenv("TMPDIR", "alias")
+		config := filepath.Join(inside, "config")
+		t.Setenv("CLIAMP_CONFIG_DIR", config)
+		path, err := credsFile()
+		if want := filepath.Join(config, "spotify_credentials.json"); err != nil || path != want {
+			t.Errorf("credsFile() = %q, %v, want %q", path, err, want)
+		}
+		roundTrip(t, config)
+		// The aliased spelling is the same place, and the sibling is outside.
+		t.Setenv("CLIAMP_CONFIG_DIR", filepath.Join("alias", "config"))
+		if path, err := credsFile(); err != nil || path != filepath.Join(config, "spotify_credentials.json") {
+			t.Errorf("credsFile() by the aliased spelling = %q, %v", path, err)
+		}
+		roundTrip(t, config)
+		t.Setenv("CLIAMP_CONFIG_DIR", outside)
+		if _, err := credsFile(); !errors.Is(err, errNoStandIn) {
+			t.Errorf("credsFile() beside a relative temporary directory = %v, want the guard's refusal", err)
+		}
+	})
 }

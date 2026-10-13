@@ -90,11 +90,18 @@ func credsFile() (string, error) {
 // There is no second location whose order of resolution could matter.
 //
 // It is a check, not a sandbox: it assumes the test owns that directory and
-// nothing re-links it between the check and the use. It covers Spotify's
-// credential file only, and has been run on Linux only.
+// nothing re-links it between the check and the use. An entry that is a
+// regular file with another hard link passes, and the inode is then shared
+// with wherever that link is. A bind or shared mount is not seen as a
+// boundary. It covers Spotify's credential file only, and has been run on
+// Linux only.
 func plainTempPath(path string) (string, bool) {
 	root, err := filepath.EvalSymlinks(os.TempDir())
 	if err != nil {
+		return "", false
+	}
+	// A relative temporary directory resolves to a relative path.
+	if root, err = filepath.Abs(root); err != nil {
 		return "", false
 	}
 	spelled, err := filepath.Abs(os.TempDir())
