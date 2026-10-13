@@ -3,7 +3,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 BINARY  ?= ddsonic
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: build test vet lint staticcheck fmt fmt-check coverage security ci check clean install acceptance acceptance-validate
+.PHONY: build test vet lint staticcheck fmt fmt-check coverage security ci check clean install acceptance acceptance-validate sdk-contract
 
 build:
 	go build -trimpath -ldflags="$(LDFLAGS)" -o $(BINARY) .
@@ -37,11 +37,24 @@ security:
 
 ci: fmt-check vet staticcheck security
 	go test -count=1 -race ./...
+	$(MAKE) sdk-contract
 	$(MAKE) coverage
 	shellcheck packaging/*.sh
 	git diff --exit-code
 
 check: fmt vet test
+
+# ddsonic: the go-librespot contract gate (external/spotify/sdkcontract,
+# docs/ddsonic/acceptance.md). It is not part of check or test: it stages the
+# pinned SDK and compiles it from empty private caches, offline, and runs
+# eleven contract tests in it under the race detector. It is mandatory for a
+# full validation, for a release candidate, and for any change at the
+# boundary with go-librespot or to its version. It needs the pinned Go
+# toolchain, cgo with the codec libraries, and the module download cache
+# filled (any earlier build or test fills it). It fails, and never skips,
+# when one of those is missing.
+sdk-contract:
+	go test -tags sdkcontract -count=1 -timeout 30m ./external/spotify/sdkcontract
 
 # ddsonic: release acceptance (docs/ddsonic/acceptance.md). acceptance runs the
 # scripted cases on a local build, which is never release evidence; a release
