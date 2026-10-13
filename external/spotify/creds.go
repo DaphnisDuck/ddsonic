@@ -44,107 +44,98 @@ func DeleteCreds() (bool, error) {
 }
 
 // credsFile is CredsPath for the code that reads, writes or deletes the
-// credential file. ddsonic: under go test it refuses a path that leads
-// outside the system's temporary directory. A test that has not pointed the
-// config directory at a temporary one would otherwise read the user's own
-// stored sign-in, and write it; like the token and browser guards
+// credential file. ddsonic: under go test it permits only a plain path inside
+// the system's temporary directory, and returns that path with the temporary
+// directory's own links resolved. A test that has not pointed the config
+// directory at a temporary one would otherwise read the user's own stored
+// sign-in, and write it; like the token and browser guards
 // (session_auth_ddsonic.go), this fails such a test instead, in whichever
 // package it is.
 //
-// The path is judged by where it leads, not by how it is spelled: symbolic
-// links in it are followed, the credential file's own included, whether or
-// not anything exists at their end. Outside go test nothing is checked and
-// links are followed as they always were.
+// Outside go test nothing is checked and the path is CredsPath's.
 func credsFile() (string, error) {
 	path, err := CredsPath()
 	if err != nil {
 		return "", err
 	}
-	if testing.Testing() && !underTempDir(path) {
-		return "", fmt.Errorf("spotify: the credential file is outside the test's temporary directory: %w", errNoStandIn)
+	if !testing.Testing() {
+		return path, nil
 	}
-	return path, nil
-}
-
-// underTempDir reports whether path, with every symbolic link in it
-// followed, lies inside the temporary directory, itself resolved. A path
-// that cannot be resolved is not inside.
-func underTempDir(path string) bool {
-	root, err := filepath.EvalSymlinks(os.TempDir())
-	if err != nil {
-		return false
-	}
-	resolved, ok := resolvePath(path)
+	plain, ok := plainTempPath(path)
 	if !ok {
-		return false
+		return "", fmt.Errorf("spotify: the credential file is not a plain path inside the test's temporary directory: %w", errNoStandIn)
 	}
-	rel, err := filepath.Rel(root, resolved)
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	return plain, nil
 }
 
-// maxLinks is how many symbolic links one path may lead through, the
-// kernel's own bound; a loop of links runs into it.
-const maxLinks = 40
-
-// resolvePath is where path leads, read the way the filesystem reads it: one
-// component at a time, each link followed where it stands, and a ".." taken
-// from the directory the links before it led to, never from the spelling.
-// What does not exist yet is appended as it is spelled, so a final link is
-// followed even when it leads nowhere yet, since a write would go there. A
-// path the filesystem itself would not resolve is not resolved here: a loop
-// of links, a ".." after a name that does not exist, a component that cannot
-// be examined.
-func resolvePath(path string) (string, bool) {
-	path, err := filepath.Abs(path)
+// plainTempPath is the test guard's one rule. It makes no attempt to work
+// out where a symbolic link leads; a path with one in it is refused. path is
+// accepted when all of this holds:
+//
+//   - as spelled, it lies inside the temporary directory, in a directory
+//     below it (the config directory is never the temporary directory
+//     itself, which a save would otherwise re-mode);
+//   - no component below the temporary directory is a symbolic link, the
+//     credential file's own entry included;
+//   - every component that exists and is not the last is a directory, and the
+//     last, if it exists, is a regular file;
+//   - nothing in it fails to be examined for a reason other than not existing.
+//
+// The temporary directory itself may be reached through links (macOS's is);
+// it is resolved once, and the path returned is spelled from that resolved
+// directory. So what a caller is given has no link in it anywhere, and each
+// thing done with it touches only that path and its directory: the read, the
+// directory an atomic save creates and re-modes, the temporary file it writes
+// beside the destination, the rename, and a reset's removal of the entry.
+// There is no second location whose order of resolution could matter.
+//
+// It is a check, not a sandbox: it assumes the test owns that directory and
+// nothing re-links it between the check and the use. It covers Spotify's
+// credential file only, and has been run on Linux only.
+func plainTempPath(path string) (string, bool) {
+	root, err := filepath.EvalSymlinks(os.TempDir())
 	if err != nil {
 		return "", false
 	}
-	sep := string(filepath.Separator)
-	rootOf := func(p string) string { return filepath.VolumeName(p) + sep }
-	split := func(p string) []string { return strings.Split(strings.TrimPrefix(p, filepath.VolumeName(p)), sep) }
-
-	// resolved has no link, "." or ".." in it; pending is still to be read.
-	resolved, pending := rootOf(path), split(path)
-	links, missing := 0, false
-	for len(pending) > 0 {
-		name := pending[0]
-		pending = pending[1:]
-		switch name {
-		case "", ".":
-			continue
-		case "..":
-			if missing {
-				return "", false
-			}
-			resolved = filepath.Dir(resolved)
-			continue
-		}
-		next := filepath.Join(resolved, name)
-		if missing {
-			resolved = next
-			continue
-		}
-		info, err := os.Lstat(next)
-		switch {
-		case errors.Is(err, os.ErrNotExist):
-			resolved, missing = next, true
-		case err != nil:
+	spelled, err := filepath.Abs(os.TempDir())
+	if err != nil {
+		return "", false
+	}
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return "", false
+	}
+	rel, ok := relInside(spelled, path)
+	if !ok {
+		if rel, ok = relInside(root, path); !ok {
 			return "", false
-		case info.Mode()&os.ModeSymlink != 0:
-			if links++; links > maxLinks {
-				return "", false
-			}
-			target, err := os.Readlink(next)
-			if err != nil {
-				return "", false
-			}
-			if filepath.IsAbs(target) {
-				resolved = rootOf(target)
-			}
-			pending = append(split(target), pending...)
-		default:
-			resolved = next
 		}
 	}
-	return resolved, true
+	names := strings.Split(rel, string(filepath.Separator))
+	if len(names) < 2 {
+		return "", false
+	}
+	cur := root
+	for i, name := range names {
+		cur = filepath.Join(cur, name)
+		info, err := os.Lstat(cur)
+		if errors.Is(err, os.ErrNotExist) {
+			break // nothing below a missing name exists either
+		}
+		last := i == len(names)-1
+		if err != nil || (last && !info.Mode().IsRegular()) || (!last && !info.IsDir()) {
+			return "", false // a link is neither a directory nor a regular file
+		}
+	}
+	return filepath.Join(root, rel), true
+}
+
+// relInside is path relative to dir when path, as spelled, is strictly
+// inside dir.
+func relInside(dir, path string) (string, bool) {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return rel, true
 }

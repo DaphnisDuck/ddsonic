@@ -82,134 +82,9 @@ func TestSignInFailsClosedUnderTest(t *testing.T) {
 	})
 }
 
-// The credential file is fail-closed under test too. With nothing set, the
-// package's tests resolve a config directory inside the temporary directory;
-// and a test that points HOME somewhere else is refused the file, before it
-// is read, written or deleted.
-func TestCredentialFileFailsClosedUnderTest(t *testing.T) {
-	path, err := CredsPath()
-	if err != nil || !underTempDir(path) {
-		t.Fatalf("with nothing set, the credential path is %q (%v): not in the temporary directory", path, err)
-	}
+// guardOps are the three things done to the credential file.
+var guardOps = []string{"load", "save", "delete"}
 
-	outside := "/var/empty/ddsonic-not-a-test-home"
-	t.Setenv("HOME", outside)
-	if path, _ := CredsPath(); underTempDir(path) {
-		t.Fatalf("the case does not leave the temporary directory: %q", path)
-	}
-	if _, err := loadCreds(); !errors.Is(err, errNoStandIn) {
-		t.Errorf("loadCreds() outside the temporary directory = %v, want the guard's refusal", err)
-	}
-	if err := saveCreds(&storedCreds{Username: "u"}); !errors.Is(err, errNoStandIn) {
-		t.Errorf("saveCreds() outside the temporary directory = %v, want the guard's refusal", err)
-	}
-	if _, err := DeleteCreds(); !errors.Is(err, errNoStandIn) {
-		t.Errorf("DeleteCreds() outside the temporary directory = %v, want the guard's refusal", err)
-	}
-	if _, err := os.Stat(outside); err == nil {
-		t.Errorf("%s was created", outside)
-	}
-	// A session built there owns no file and writes none.
-	s := builtSession("client", nil, storedCreds{Username: "u", RefreshToken: "r"}, nil)
-	s.accept()
-	s.Close()
-	if _, err := os.Stat(outside); err == nil {
-		t.Errorf("%s was created by an accepted session", outside)
-	}
-}
-
-// The guard looks at where the credential path leads, not at how it is
-// spelled: a config directory, or a credential file, that is a symbolic link
-// out of the temporary directory is refused for reading, for the atomic
-// write and for deletion, whether or not anything exists at the far end.
-// What it leads to is left as it was. A link that stays inside the temporary
-// directory is an ordinary path. (Adapted from the reviewer's round-9 probe;
-// every credential here is synthetic.)
-func TestCredentialGuardFollowsSymlinks(t *testing.T) {
-	synthetic := []byte(`{"username":"synthetic","data":"AQ==","refresh_token":"synthetic"}`)
-	for _, link := range []string{"the config directory", "the credential file", "a credential file that leads nowhere yet"} {
-		for _, op := range []string{"load", "save", "delete"} {
-			t.Run(link+": "+op, func(t *testing.T) {
-				// "Outside" is a directory that is not under the temporary
-				// directory the test then narrows TMPDIR to.
-				outside := t.TempDir()
-				inside := filepath.Join(t.TempDir(), "tmp")
-				if err := os.MkdirAll(inside, 0o755); err != nil {
-					t.Fatal(err)
-				}
-				t.Setenv("TMPDIR", inside)
-				if underTempDir(outside) {
-					t.Fatal("the case's outside directory is inside the temporary directory")
-				}
-				config := filepath.Join(inside, "config")
-				target := filepath.Join(outside, "spotify_credentials.json")
-				switch link {
-				case "the config directory":
-					if err := os.Symlink(outside, config); err != nil {
-						t.Fatal(err)
-					}
-				default:
-					if err := os.MkdirAll(config, 0o755); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.Symlink(target, filepath.Join(config, "spotify_credentials.json")); err != nil {
-						t.Fatal(err)
-					}
-				}
-				exists := link != "a credential file that leads nowhere yet"
-				if exists {
-					if err := os.WriteFile(target, synthetic, 0o600); err != nil {
-						t.Fatal(err)
-					}
-				}
-				t.Setenv("CLIAMP_CONFIG_DIR", config)
-
-				var err error
-				switch op {
-				case "load":
-					_, err = loadCreds()
-				case "save":
-					err = saveCreds(&storedCreds{Username: "written-by-the-test"})
-				case "delete":
-					_, err = DeleteCreds()
-				}
-				if !errors.Is(err, errNoStandIn) {
-					t.Errorf("%s through %s = %v, want the guard's refusal", op, link, err)
-				}
-				got, readErr := os.ReadFile(target)
-				switch {
-				case exists && (readErr != nil || string(got) != string(synthetic)):
-					t.Errorf("what the link leads to was changed or removed: %q, %v", got, readErr)
-				case !exists && readErr == nil:
-					t.Errorf("a file was created outside the temporary directory: %q", got)
-				}
-			})
-		}
-	}
-	t.Run("a link that stays inside is an ordinary path", func(t *testing.T) {
-		root := t.TempDir()
-		real := filepath.Join(root, "real")
-		if err := os.MkdirAll(real, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		config := filepath.Join(root, "config")
-		if err := os.Symlink(real, config); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("CLIAMP_CONFIG_DIR", config)
-		if err := saveCreds(&storedCreds{Username: "synthetic"}); err != nil {
-			t.Fatal(err)
-		}
-		if creds, err := loadCreds(); err != nil || creds.Username != "synthetic" {
-			t.Errorf("loadCreds() through a link inside the temporary directory = %+v, %v", creds, err)
-		}
-		if removed, err := DeleteCreds(); err != nil || !removed {
-			t.Errorf("DeleteCreds() through a link inside the temporary directory = %t, %v", removed, err)
-		}
-	})
-}
-
-// guardOp runs one of the three things done to the credential file.
 func guardOp(t *testing.T, op string) error {
 	t.Helper()
 	var err error
@@ -226,115 +101,317 @@ func guardOp(t *testing.T, op string) error {
 	return err
 }
 
-// A ".." in a link's target is taken the way the filesystem takes it: from
-// the directory the links before it led to, not from the spelling. Here
-// "pivot" is a link out of the temporary directory, so "pivot/.." is outside
-// it, though the spelling "inside/pivot/../x" reads as "inside/x". Such a
-// path is refused for reading, for the atomic write and for deletion, with
-// the target absolute or relative, as the credential file's link or as the
-// config directory's. (Adapted from the reviewer's round-10 probe; every
-// credential here is synthetic.)
-func TestCredentialGuardTakesParentComponentsAsTheFilesystemDoes(t *testing.T) {
-	synthetic := []byte(`{"username":"synthetic","data":"AQ==","refresh_token":"synthetic"}`)
-	links := []struct {
-		name string
-		dir  bool // the config directory is the link, not the credential file
-		// target spells the link's target, given the inside directory.
-		target func(inside string) string
+// treeState is everything under dir as Lstat sees it: each entry's mode, a
+// link's target, a file's content. Two equal states mean nothing was created,
+// removed, re-moded, re-linked or rewritten.
+func treeState(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	state := map[string]string{}
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		entry := info.Mode().String()
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			entry += " -> " + target
+		case info.Mode().IsRegular():
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			entry += " " + string(data)
+		}
+		state[path] = entry
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return state
+}
+
+func sameTree(t *testing.T, before, after map[string]string) {
+	t.Helper()
+	for path, was := range before {
+		if is, ok := after[path]; !ok {
+			t.Errorf("%s was removed (it was %s)", path, was)
+		} else if is != was {
+			t.Errorf("%s changed: %s, was %s", path, is, was)
+		}
+	}
+	for path, is := range after {
+		if _, ok := before[path]; !ok {
+			t.Errorf("%s was created: %s", path, is)
+		}
+	}
+}
+
+// guardDirs makes a test's two directories, both mode 0755, and narrows the
+// temporary directory to the first: "outside" is then not in it.
+func guardDirs(t *testing.T) (base, inside, outside string) {
+	t.Helper()
+	base = t.TempDir()
+	inside, outside = filepath.Join(base, "tmp"), filepath.Join(base, "outside")
+	for _, dir := range []string{inside, outside} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("TMPDIR", inside)
+	return base, inside, outside
+}
+
+const syntheticCreds = `{"username":"synthetic","data":"AQ==","refresh_token":"synthetic"}`
+
+// The credential file is fail-closed under test. With nothing set, the
+// package's tests resolve a config directory inside the temporary directory;
+// and a test that points HOME somewhere else is refused the file, before it
+// is read, written or deleted.
+func TestCredentialFileFailsClosedUnderTest(t *testing.T) {
+	if path, err := credsFile(); err != nil {
+		t.Fatalf("with nothing set, the credential path is refused: %q, %v", path, err)
+	}
+
+	outside := "/var/empty/ddsonic-not-a-test-home"
+	t.Setenv("HOME", outside)
+	for _, op := range guardOps {
+		if err := guardOp(t, op); !errors.Is(err, errNoStandIn) {
+			t.Errorf("%s outside the temporary directory = %v, want the guard's refusal", op, err)
+		}
+	}
+	if _, err := os.Stat(outside); err == nil {
+		t.Errorf("%s was created", outside)
+	}
+	// A session built there owns no file and writes none.
+	s := builtSession("client", nil, storedCreds{Username: "u", RefreshToken: "r"}, nil)
+	s.accept()
+	s.Close()
+	if _, err := os.Stat(outside); err == nil {
+		t.Errorf("%s was created by an accepted session", outside)
+	}
+}
+
+// Under go test the credential file is a plain path inside the temporary
+// directory or it is refused: for reading, for the atomic write and for
+// deletion alike, and before any of them touches anything. Each case builds
+// its own directories and links; after the refusal everything in them is as
+// it was: every entry, every link, every directory's mode, every file's
+// content, and nothing new. No case asks where a link leads; a link is
+// refused wherever it is and wherever it goes. (The cases come from the
+// reviewer's probes of rounds 9, 10 and 11; every credential is synthetic.)
+func TestCredentialGuardRefusesAnythingButAPlainPathInside(t *testing.T) {
+	const name = "spotify_credentials.json"
+	write := func(t *testing.T, path string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(syntheticCreds), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mkdir := func(t *testing.T, path string) string {
+		t.Helper()
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	link := func(t *testing.T, target, path string) {
+		t.Helper()
+		if err := os.Symlink(target, path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// pivot is a link in inside to a directory two levels into outside, so
+	// "inside/pivot/.." is outside, whatever its spelling suggests.
+	pivot := func(t *testing.T, inside, outside string) {
+		link(t, mkdir(t, filepath.Join(outside, "deep")), filepath.Join(inside, "pivot"))
+		write(t, filepath.Join(outside, name))
+	}
+	// Each case returns the config directory it has built.
+	cases := []struct {
+		name  string
+		build func(t *testing.T, inside, outside string) string
 	}{
-		{"the credential file, absolute target", false, func(inside string) string {
-			return inside + "/pivot/../spotify_credentials.json"
+		// The original location is outside the temporary directory.
+		{"a config directory outside", func(t *testing.T, inside, outside string) string {
+			write(t, filepath.Join(outside, name))
+			return outside
 		}},
-		{"the credential file, relative target", false, func(string) string {
-			return "../pivot/../spotify_credentials.json"
+		{"a config directory outside whose entry is a link to a file inside", func(t *testing.T, inside, outside string) string {
+			write(t, filepath.Join(inside, "synthetic.json"))
+			link(t, filepath.Join(inside, "synthetic.json"), filepath.Join(outside, name))
+			return outside
 		}},
-		{"the config directory, absolute target", true, func(inside string) string {
-			return inside + "/pivot/.."
+		{"the temporary directory itself as the config directory", func(t *testing.T, inside, outside string) string {
+			write(t, filepath.Join(inside, name))
+			return inside
 		}},
-		{"the config directory, relative target", true, func(string) string {
-			return "pivot/../../" + "outside"
+		// A link that leads out.
+		{"a config directory that is a link out", func(t *testing.T, inside, outside string) string {
+			write(t, filepath.Join(outside, name))
+			link(t, outside, filepath.Join(inside, "config"))
+			return filepath.Join(inside, "config")
+		}},
+		{"a credential file that is a link out", func(t *testing.T, inside, outside string) string {
+			write(t, filepath.Join(outside, name))
+			config := mkdir(t, filepath.Join(inside, "config"))
+			link(t, filepath.Join(outside, name), filepath.Join(config, name))
+			return config
+		}},
+		{"a credential file that is a link out to nothing yet", func(t *testing.T, inside, outside string) string {
+			config := mkdir(t, filepath.Join(inside, "config"))
+			link(t, filepath.Join(outside, name), filepath.Join(config, name))
+			return config
+		}},
+		{"a component above the config directory that is a link out", func(t *testing.T, inside, outside string) string {
+			mkdir(t, filepath.Join(outside, "config"))
+			link(t, outside, filepath.Join(inside, "up"))
+			return filepath.Join(inside, "up", "config")
+		}},
+		// A link whose target has parent components.
+		{"a credential file link, absolute, through a parent component", func(t *testing.T, inside, outside string) string {
+			pivot(t, inside, outside)
+			config := mkdir(t, filepath.Join(inside, "config"))
+			link(t, inside+"/pivot/../"+name, filepath.Join(config, name))
+			return config
+		}},
+		{"a credential file link, relative, through a parent component", func(t *testing.T, inside, outside string) string {
+			pivot(t, inside, outside)
+			config := mkdir(t, filepath.Join(inside, "config"))
+			link(t, "../pivot/../"+name, filepath.Join(config, name))
+			return config
+		}},
+		{"a config directory link, absolute, through a parent component", func(t *testing.T, inside, outside string) string {
+			pivot(t, inside, outside)
+			link(t, inside+"/pivot/..", filepath.Join(inside, "config"))
+			return filepath.Join(inside, "config")
+		}},
+		{"a config directory link, relative, through a parent component", func(t *testing.T, inside, outside string) string {
+			pivot(t, inside, outside)
+			link(t, "pivot/../../outside", filepath.Join(inside, "config"))
+			return filepath.Join(inside, "config")
+		}},
+		// A link that stays inside, or comes back in: refused all the same.
+		{"a credential file that is a link to a file inside", func(t *testing.T, inside, outside string) string {
+			config := mkdir(t, filepath.Join(inside, "config"))
+			write(t, filepath.Join(inside, "synthetic.json"))
+			link(t, filepath.Join(inside, "synthetic.json"), filepath.Join(config, name))
+			return config
+		}},
+		{"a config directory that is a link to a directory inside", func(t *testing.T, inside, outside string) string {
+			write(t, filepath.Join(mkdir(t, filepath.Join(inside, "real")), name))
+			link(t, filepath.Join(inside, "real"), filepath.Join(inside, "config"))
+			return filepath.Join(inside, "config")
+		}},
+		{"a config directory link spelled outside that leads back inside", func(t *testing.T, inside, outside string) string {
+			mkdir(t, filepath.Join(inside, "real"))
+			link(t, mkdir(t, filepath.Join(inside, "deep")), filepath.Join(outside, "back"))
+			link(t, outside+"/back/../real", filepath.Join(inside, "config"))
+			return filepath.Join(inside, "config")
+		}},
+		{"a component above the config directory that is a link inside", func(t *testing.T, inside, outside string) string {
+			mkdir(t, filepath.Join(inside, "real", "config"))
+			link(t, "real", filepath.Join(inside, "alias"))
+			return filepath.Join(inside, "alias", "config")
+		}},
+		// Links the filesystem would not resolve.
+		{"a loop of links", func(t *testing.T, inside, outside string) string {
+			config := mkdir(t, filepath.Join(inside, "config"))
+			link(t, "a", filepath.Join(config, name))
+			link(t, "b", filepath.Join(config, "a"))
+			link(t, "a", filepath.Join(config, "b"))
+			return config
+		}},
+		{"a link to itself", func(t *testing.T, inside, outside string) string {
+			config := mkdir(t, filepath.Join(inside, "config"))
+			link(t, name, filepath.Join(config, name))
+			return config
+		}},
+		{"a link through a missing name and a parent component", func(t *testing.T, inside, outside string) string {
+			config := mkdir(t, filepath.Join(inside, "config"))
+			link(t, "missing/../elsewhere.json", filepath.Join(config, name))
+			return config
+		}},
+		{"a link to a file followed by a slash", func(t *testing.T, inside, outside string) string {
+			config := mkdir(t, filepath.Join(inside, "config"))
+			write(t, filepath.Join(config, "plain.json"))
+			link(t, filepath.Join(config, "plain.json")+"/", filepath.Join(config, name))
+			return config
+		}},
+		{"a link to a file followed by a dot", func(t *testing.T, inside, outside string) string {
+			config := mkdir(t, filepath.Join(inside, "config"))
+			write(t, filepath.Join(config, "plain.json"))
+			link(t, filepath.Join(config, "plain.json")+"/.", filepath.Join(config, name))
+			return config
+		}},
+		{"a link to a file followed by a parent component", func(t *testing.T, inside, outside string) string {
+			config := mkdir(t, filepath.Join(inside, "config"))
+			write(t, filepath.Join(config, "plain.json"))
+			link(t, filepath.Join(config, "plain.json")+"/../plain.json", filepath.Join(config, name))
+			return config
+		}},
+		// No link at all, and still not a file in a directory.
+		{"a config directory that is a regular file", func(t *testing.T, inside, outside string) string {
+			write(t, filepath.Join(inside, "config"))
+			return filepath.Join(inside, "config")
+		}},
+		{"a regular file above the config directory", func(t *testing.T, inside, outside string) string {
+			write(t, filepath.Join(inside, "plain"))
+			return filepath.Join(inside, "plain", "config")
+		}},
+		{"a credential file that is a directory", func(t *testing.T, inside, outside string) string {
+			config := mkdir(t, filepath.Join(inside, "config"))
+			mkdir(t, filepath.Join(config, name))
+			return config
 		}},
 	}
-	for _, link := range links {
-		for _, op := range []string{"load", "save", "delete"} {
-			t.Run(link.name+": "+op, func(t *testing.T) {
-				root := t.TempDir()
-				outside := filepath.Join(root, "outside")
-				inside := filepath.Join(root, "tmp")
-				deep := filepath.Join(outside, "deep")
-				for _, dir := range []string{deep, inside} {
-					if err := os.MkdirAll(dir, 0o755); err != nil {
-						t.Fatal(err)
-					}
-				}
-				t.Setenv("TMPDIR", inside)
-				if underTempDir(outside) {
-					t.Fatal("the case's outside directory is inside the temporary directory")
-				}
-				if err := os.Symlink(deep, filepath.Join(inside, "pivot")); err != nil {
-					t.Fatal(err)
-				}
-				target := filepath.Join(outside, "spotify_credentials.json")
-				if err := os.WriteFile(target, synthetic, 0o600); err != nil {
-					t.Fatal(err)
-				}
-				config := filepath.Join(inside, "config")
-				if link.dir {
-					if err := os.Symlink(link.target(inside), config); err != nil {
-						t.Fatal(err)
-					}
-				} else {
-					if err := os.Mkdir(config, 0o755); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.Symlink(link.target(inside), filepath.Join(config, "spotify_credentials.json")); err != nil {
-						t.Fatal(err)
-					}
-				}
-				// The case is what it says: the filesystem reaches the outside
-				// file through the config directory.
-				if got, err := os.ReadFile(filepath.Join(config, "spotify_credentials.json")); err != nil || string(got) != string(synthetic) {
-					t.Fatalf("the case's path does not lead to the outside file: %q, %v", got, err)
-				}
-				t.Setenv("CLIAMP_CONFIG_DIR", config)
+	for _, tc := range cases {
+		for _, op := range guardOps {
+			t.Run(tc.name+": "+op, func(t *testing.T) {
+				base, inside, outside := guardDirs(t)
+				t.Setenv("CLIAMP_CONFIG_DIR", tc.build(t, inside, outside))
+				before := treeState(t, base)
 
-				if err := guardOp(t, op); !errors.Is(err, errNoStandIn) {
-					t.Errorf("%s through %s = %v, want the guard's refusal", op, link.name, err)
+				done := make(chan error, 1)
+				go func() { done <- guardOp(t, op) }()
+				select {
+				case err := <-done:
+					if !errors.Is(err, errNoStandIn) {
+						t.Errorf("%s = %v, want the guard's refusal", op, err)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatalf("%s did not return", op)
 				}
-				if got, err := os.ReadFile(target); err != nil || string(got) != string(synthetic) {
-					t.Errorf("what the link leads to was changed or removed: %q, %v", got, err)
-				}
+				sameTree(t, before, treeState(t, base))
 			})
 		}
 	}
+}
 
-	// The same rule the other way: a target spelled through an outside
-	// directory whose link leads back in is an ordinary path.
-	t.Run("a parent component that leads back inside is an ordinary path", func(t *testing.T) {
-		root := t.TempDir()
-		outside := filepath.Join(root, "outside")
-		inside := filepath.Join(root, "tmp")
-		deep := filepath.Join(inside, "deep")
-		realDir := filepath.Join(inside, "real")
-		for _, dir := range []string{outside, deep, realDir} {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				t.Fatal(err)
-			}
-		}
-		t.Setenv("TMPDIR", inside)
-		if err := os.Symlink(deep, filepath.Join(outside, "back")); err != nil {
-			t.Fatal(err)
-		}
-		config := filepath.Join(inside, "config")
-		if err := os.Symlink(outside+"/back/../real", config); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("CLIAMP_CONFIG_DIR", config)
+// What the guard permits: a plain path inside the temporary directory, the
+// config directory there already or not, and a temporary directory that is
+// itself reached through a link. The path handed out is spelled from the
+// resolved temporary directory, so no link is in it.
+func TestCredentialGuardPermitsAPlainPathInside(t *testing.T) {
+	roundTrip := func(t *testing.T, wantDir string) {
+		t.Helper()
 		if err := saveCreds(&storedCreds{Username: "synthetic"}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := os.Stat(filepath.Join(realDir, "spotify_credentials.json")); err != nil {
-			t.Errorf("the credential was not written where the path leads: %v", err)
+		file := filepath.Join(wantDir, "spotify_credentials.json")
+		if info, err := os.Lstat(file); err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+			t.Errorf("the credential was not written as a 0600 file at %s: %v, %v", file, info, err)
+		}
+		if info, err := os.Stat(wantDir); err != nil || info.Mode().Perm() != 0o700 {
+			t.Errorf("the config directory is not 0700 after a save: %v, %v", info, err)
 		}
 		if creds, err := loadCreds(); err != nil || creds.Username != "synthetic" {
 			t.Errorf("loadCreds() = %+v, %v", creds, err)
@@ -342,45 +419,45 @@ func TestCredentialGuardTakesParentComponentsAsTheFilesystemDoes(t *testing.T) {
 		if removed, err := DeleteCreds(); err != nil || !removed {
 			t.Errorf("DeleteCreds() = %t, %v", removed, err)
 		}
-	})
-}
-
-// A path the filesystem would not resolve is refused, and in bounded time: a
-// loop of links, and a ".." after a name that does not exist.
-func TestCredentialGuardRefusesWhatCannotBeResolved(t *testing.T) {
-	cases := []struct {
-		name  string
-		links map[string]string // name in the config directory -> target
-	}{
-		{"a loop of links", map[string]string{"spotify_credentials.json": "a", "a": "b", "b": "a"}},
-		{"a link to itself", map[string]string{"spotify_credentials.json": "spotify_credentials.json"}},
-		{"a parent component after a missing name", map[string]string{"spotify_credentials.json": "missing/../elsewhere.json"}},
-	}
-	for _, tc := range cases {
-		for _, op := range []string{"load", "save", "delete"} {
-			t.Run(tc.name+": "+op, func(t *testing.T) {
-				config := t.TempDir()
-				for name, target := range tc.links {
-					if err := os.Symlink(target, filepath.Join(config, name)); err != nil {
-						t.Fatal(err)
-					}
-				}
-				t.Setenv("CLIAMP_CONFIG_DIR", config)
-				done := make(chan error, 1)
-				go func() { done <- guardOp(t, op) }()
-				select {
-				case err := <-done:
-					if !errors.Is(err, errNoStandIn) {
-						t.Errorf("%s through %s = %v, want the guard's refusal", op, tc.name, err)
-					}
-				case <-time.After(5 * time.Second):
-					t.Fatalf("%s through %s did not return", op, tc.name)
-				}
-				entries, err := os.ReadDir(config)
-				if err != nil || len(entries) != len(tc.links) {
-					t.Errorf("the config directory was changed: %d entries, %v", len(entries), err)
-				}
-			})
+		if _, err := os.Lstat(file); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the credential file is still there after deletion: %v", err)
 		}
 	}
+	t.Run("a config directory that exists", func(t *testing.T) {
+		_, inside, _ := guardDirs(t)
+		config := filepath.Join(inside, "config")
+		if err := os.Mkdir(config, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("CLIAMP_CONFIG_DIR", config)
+		if _, err := loadCreds(); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("loadCreds() with no file yet = %v, want not-exist", err)
+		}
+		roundTrip(t, config)
+	})
+	t.Run("a config directory two levels down that does not exist yet", func(t *testing.T) {
+		_, inside, _ := guardDirs(t)
+		config := filepath.Join(inside, "not", "yet")
+		t.Setenv("CLIAMP_CONFIG_DIR", config)
+		roundTrip(t, config)
+	})
+	t.Run("a temporary directory reached through a link", func(t *testing.T) {
+		base, inside, outside := guardDirs(t)
+		alias := filepath.Join(base, "alias")
+		if err := os.Symlink(inside, alias); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("TMPDIR", alias)
+		t.Setenv("CLIAMP_CONFIG_DIR", filepath.Join(alias, "config"))
+		path, err := credsFile()
+		if want := filepath.Join(inside, "config", "spotify_credentials.json"); err != nil || path != want {
+			t.Errorf("credsFile() = %q, %v, want the resolved spelling %q", path, err, want)
+		}
+		roundTrip(t, filepath.Join(inside, "config"))
+		// Its sibling is still outside.
+		t.Setenv("CLIAMP_CONFIG_DIR", outside)
+		if _, err := credsFile(); !errors.Is(err, errNoStandIn) {
+			t.Errorf("credsFile() beside a linked temporary directory = %v, want the guard's refusal", err)
+		}
+	})
 }
