@@ -345,7 +345,7 @@ func TestSpotifyListStates(t *testing.T) {
 			wantView(t, "Spotify's menu", m, []string{"sync failed"}, signInRow, "sign-in required", "cached")
 			m = pressAll(t, m, "enter")
 			wantView(t, "Albums", m, []string{failedRow, "sync failed"}, signInPrompt, syncingRow, "cached")
-			if m = pressAll(t, m, "enter"); l.prov.auths != 0 {
+			if _ = pressAll(t, m, "enter"); l.prov.auths != 0 {
 				t.Errorf("Enter on a failed list signed in after %v", err)
 			}
 		}
@@ -385,7 +385,7 @@ func TestDuplicateSignInIsIgnored(t *testing.T) {
 	if first == nil || second != nil {
 		t.Fatalf("first Enter started a sign-in: %v; second started another: %v", first != nil, second != nil)
 	}
-	m = runAll(t, m, first)
+	_ = runAll(t, m, first)
 	if l.prov.auths != 1 || len(l.refreshes) != 1 {
 		t.Errorf("sign-ins = %d, syncs requested = %d, want 1 and 1", l.prov.auths, len(l.refreshes))
 	}
@@ -442,7 +442,7 @@ func TestFailedSignInKeepsPrompt(t *testing.T) {
 	wantView(t, "after a failed sign-in", m, []string{signInRow, "Spotify sign-in required", "access_denied"}, signingIn)
 
 	l.prov.authErr = nil
-	m = pressAll(t, m, "enter")
+	_ = pressAll(t, m, "enter")
 	if l.prov.auths != 2 || len(l.refreshes) != 1 {
 		t.Errorf("after trying again: sign-ins = %d, syncs requested = %d, want 2 and 1", l.prov.auths, len(l.refreshes))
 	}
@@ -742,7 +742,7 @@ func TestPlaybackAuthFailureOffersSignIn(t *testing.T) {
 	wantView(t, "after the refused stream", m, []string{"Spotify sign-in required · cached"})
 	m = pressAll(t, m, "enter")
 	wantView(t, "Spotify's menu", m, []string{signInRow})
-	m = pressAll(t, m, "enter")
+	_ = pressAll(t, m, "enter")
 	if l.prov.auths != 1 || len(l.refreshes) != 1 {
 		t.Errorf("sign-ins = %d, syncs requested = %d, want 1 and 1", l.prov.auths, len(l.refreshes))
 	}
@@ -861,7 +861,7 @@ func TestQuitDuringSignIn(t *testing.T) {
 	updated, _ = m.Update(libKey("q"))
 	m = updated.(Model)
 	l.prov.authErr = context.Canceled // what the provider returns once closed
-	m = runAll(t, m, cmd)
+	_ = runAll(t, m, cmd)
 	if len(l.refreshes) != 0 {
 		t.Error("a sign-in that ended after quit started a sync")
 	}
