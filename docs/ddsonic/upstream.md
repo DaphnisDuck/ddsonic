@@ -53,3 +53,20 @@ These build, install or present cliamp, so ddsonic deleted them rather than carr
 When upstream changes one of them, the merge reports a modify/delete conflict. Keep it deleted (`git rm <path>`); a file upstream adds under these paths is deleted the same way. ddsonic's own icon and launcher are new files under ddsonic's names: the artwork in `assets/branding`, the entry in `packaging/linux/ddsonic.desktop`, installed by `packaging/desktop.sh`. A website, when it exists, is added the same way. ddsonic has no Nix package.
 
 The `protocol` and `open` commands' code (`cmd/protocol*.go`, with its `cliamp-url-handler.desktop` template) stays: it is upstream Go code that ddsonic's command line doesn't reach (`cli_ddsonic.go`).
+
+## Upstream Spotify code ddsonic replaced
+
+In `external/spotify`, ddsonic's token coordinator, playback bundle and build phases (the `*_ddsonic.go` files; design in [design/spotify-token-coordinator.md](design/spotify-token-coordinator.md)) replace parts of upstream's `session.go` and `provider.go`. A merge that touches these will conflict; keep ddsonic's side and port what upstream changed into it by hand:
+
+- Removed from `session.go`: `persistingTokenSource`, `webAPITokenSource`, `Session.webApiWithBody`, `awaitSpotifyStream`, the bodies of `NewStream`, `Close`, `Reconnect`, `ReconnectInteractive` and `reconnect` (now in `playback_ddsonic.go` and `session_auth_ddsonic.go`), and the `sess`, `player`, `devID` and `tokenSource` fields of `Session`. `Session.mu` is a plain mutex.
+- Removed from `provider.go`: the body of `ensureSession` (now `build_ddsonic.go`), and the retry loop of `webAPIWithBody` (now `request_ddsonic.go`).
+- Removed upstream tests, each re-expressed against ddsonic's code: `TestAwaitSpotifyStreamTimeoutCancelsTransportAndReleasesReadLock`, `TestAwaitSpotifyStreamRecoversSetupPanic`, `TestPersistingTokenSourcePersistsRotationOnce`, `TestPersistingTokenSourceDoesNotBlockOnSaveFailure`, `TestWebAPITokenSourcePersistsRotatedRefreshToken` (`session_test.go`) and `TestWebAPITokenRefreshIsBounded` (`token_timeout_test.go`).
+- `testmain_test.go` in `external/spotify` and `external/ytmusic` sets `HOME` to a temporary directory; upstream's leaves it alone. Keep ddsonic's: with upstream's, a test that sets no config directory reads and writes the user's own stored sign-in.
+
+## Bumping go-librespot
+
+The contract gate (`make sdk-contract`, [acceptance.md](acceptance.md#the-go-librespot-contract-gate)) is written against one version. A bump of `github.com/devgianlu/go-librespot` in `go.mod`:
+
+1. changes `sdkPin` in `external/spotify/sdkcontract/runner_test.go` in the same change;
+2. runs the gate. If the helper or a test in `testdata` no longer compiles against the SDK's internals, port it;
+3. reads each failure by what its test says of itself. A test marked **STOP** is an assumption the design depends on: the bump waits until section 4.3 of the design has been re-examined. A test marked as a **reviewed expectation** pins a limitation ddsonic works around; if the SDK has lifted it the test fails with "EXPECTATION CHANGED", ddsonic stays correct, and the expectation is updated in a change the reviewer sees, never silently.

@@ -121,6 +121,29 @@ go run ./acceptance/cmd/acceptance run \
 
 It prints the summary for the release record and writes the evidence bundle. It exits non-zero while the gate is not met. `--manual` takes the hand-recorded results, which must name this exact candidate ([acceptance/human.md](acceptance/human.md#recording-what-you-find)).
 
+### The go-librespot contract gate
+
+```sh
+make sdk-contract
+```
+
+This is a separate gate, and it is mandatory: for the full validation of a change to the Spotify session code, for every release candidate, and for any change that touches the boundary with go-librespot or the version of it that `go.mod` selects. It is not part of `make check`, `make test` or `go test ./...` (it is behind the build tag `sdkcontract`); `make ci` runs it.
+
+It runs eleven tests inside go-librespot's own packages, at the pinned version (v0.9.1), that pin what ddsonic's session code relies on and the exported API does not say: that the access point's `Done` closes before `Close` can block, that a stalled audio key request is released by it and not by its context, that the first audio chunk request ends with its HTTP client's context, that an identity getter waits for a lock a reconnect holds, and that an MP3 decoder is released by `Close` and nothing else. The runner starts from the toolchain that built it, checked against the repository's pin (Go 1.27.2); uses private, empty caches and an offline module source verified against `go.sum`; stages a byte-identical copy of the SDK outside the module cache; builds a scratch module that is the repository's `go.mod` and `go.sum` plus one replacement, and checks its graph against the repository's; and requires all eleven tests to be shown to have run and passed under the race detector. It fails, and never skips, when a prerequisite is missing: the pinned Go, cgo with the codec libraries (mpg123, FLAC, Vorbis), the race detector, or the modules in the module download cache (any earlier build or test fills it).
+
+It takes about 14 seconds on the development machine (32 cores), nearly all of it compiling the SDK from an empty build cache. It is unverified on macOS: CI's macOS job does not have the pinned toolchain and does not run it.
+
+When go-librespot is bumped, see [upstream.md](upstream.md#bumping-go-librespot).
+
+### Owed by the next candidate's live and platform acceptance
+
+Recorded here so that none of it is waived by silence. Each is a check on the real candidate, by hand or on the real service, that no scripted case covers:
+
+- The browser opens by itself for the Spotify sign-in, and the sign-in address's link works in Kitty, in Ghostty and through tmux (owner, 2026-10-12).
+- LIVE-SPOT-001 again, in a fresh scratch home.
+- Real librespot behaviour that the tests reach only through stand-ins: playback recovery after a stream is refused (the silent playback rebuild), a long track that keeps playing across a sign-in, and the teardown of a replaced session.
+- **MP3 memory growth (owner, 2026-10-13; a release decision depends on it).** ddsonic does not close a track's decoder when the track ends, by a policy older than this work, and go-librespot's MP3 decoder is released only by being closed, so each MP3 track played is expected to leave its decoder in memory. During long-playback acceptance, on each required platform where practical, measure: the process's memory and native resources across many MP3 tracks played one after another; whether they grow with every track without coming back; roughly what one track costs; and whether a long session degrades noticeably. The result goes to the owner for an explicit decision: a small cost is documented as a 1.0 limitation with a fix after 1.0; a material or unbounded one is fixed before 1.0. This is tracked separately from the sign-in work and is not waived by it.
+
 ## Artifact identity
 
 A release run tests **the binary extracted from the draft release's archive**, and refuses to start otherwise. It computes the archive's and the binary's checksums itself, and requires all of this to agree exactly:
