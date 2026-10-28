@@ -1,0 +1,66 @@
+package ap
+
+// ddsonic contract helper for patch 0002. Like ap_helper.go.txt, this file
+// exists only in the overlay the contract runner builds over the staged
+// active tree; it is in no real copy of the SDK and in no ddsonic build. It
+// names what patch 0002 adds, so it is never compiled into the base.
+
+import (
+	"runtime"
+	"strings"
+	"sync/atomic"
+)
+
+// ddsonicStage is the test's publication stage hook. The package's hook is
+// set once, here, before any access point exists, so no test writes it while
+// a publication may read it.
+var ddsonicStage atomic.Pointer[func()]
+
+func init() {
+	testHookStageAfterAnnounce = func() {
+		if f := ddsonicStage.Load(); f != nil {
+			(*f)()
+		}
+	}
+}
+
+// DDSonicSetStageAfterAnnounce runs f in every publication from now on,
+// after the announcement and before the new generation is stored, until
+// restore is called.
+func DDSonicSetStageAfterAnnounce(f func()) (restore func()) {
+	ddsonicStage.Store(&f)
+	return func() { ddsonicStage.Store(nil) }
+}
+
+// DDSonicStackHas reports whether some goroutine's stack holds every one of
+// parts.
+func DDSonicStackHas(parts ...string) bool {
+	buf := make([]byte, 8<<20)
+	for _, g := range strings.Split(string(buf[:runtime.Stack(buf, true)]), "\n\n") {
+		all := true
+		for _, part := range parts {
+			if !strings.Contains(g, part) {
+				all = false
+				break
+			}
+		}
+		if all {
+			return true
+		}
+	}
+	return false
+}
+
+// DDSonicDeliveryWaiting reports whether an access point's receive loop is
+// parked in its delivery to a subscriber, the one blocking select in that
+// loop. One access point is live at a time in these tests.
+func DDSonicDeliveryWaiting() bool {
+	buf := make([]byte, 8<<20)
+	for _, g := range strings.Split(string(buf[:runtime.Stack(buf, true)]), "\n\n") {
+		head, _, _ := strings.Cut(g, "\n")
+		if strings.Contains(head, "[select") && strings.Contains(g, "ap.(*Accesspoint).recvLoop(") {
+			return true
+		}
+	}
+	return false
+}

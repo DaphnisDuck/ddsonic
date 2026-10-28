@@ -1,0 +1,1739 @@
+package audio
+
+// ddsonic's contract with patch 0002's key provider: the fenced request
+// lifecycle (E1-E5, L1-L7), its writer and receiver, connection stamps and
+// their typed dispositions. The real Accesspoint and KeyProvider run against
+// the synthetic access point (ap.DDSonicContractFakeAP); the provider's test
+// hooks are barriers these tests arm. Test comments name the rows of the
+// design's governing test table. B1-RED and B2-RED mark the assertions the
+// runner's behavioural mutations must break.
+
+import (
+	"context"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"runtime"
+	"slices"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	librespot "github.com/devgianlu/go-librespot"
+	"github.com/devgianlu/go-librespot/ap"
+	"github.com/devgianlu/go-librespot/internal/keylink"
+)
+
+const kpLimit = 10 * time.Second
+
+// kpGate is a barrier a hook runs into once it is armed: the hook reports
+// its arrival and waits for the release. Unarmed, it lets the hook through.
+type kpGate struct {
+	mu      sync.Mutex
+	armed   bool
+	seq     int64 // the sequence number it is armed for, or -1 for any
+	arrived chan struct{}
+	release chan struct{}
+}
+
+func (g *kpGate) armSeq(t *testing.T, seq int64) (arrived <-chan struct{}, release func()) {
+	t.Helper()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	a, r := make(chan struct{}), make(chan struct{})
+	g.armed, g.seq, g.arrived, g.release = true, seq, a, r
+	var once sync.Once
+	rel := func() { once.Do(func() { close(r) }) }
+	t.Cleanup(rel)
+	return a, rel
+}
+
+func (g *kpGate) arm(t *testing.T) (<-chan struct{}, func()) { t.Helper(); return g.armSeq(t, -1) }
+
+func (g *kpGate) hitSeq(seq int64) {
+	g.mu.Lock()
+	if !g.armed || (g.seq >= 0 && g.seq != seq) {
+		g.mu.Unlock()
+		return
+	}
+	g.armed = false
+	a, r := g.arrived, g.release
+	g.mu.Unlock()
+	close(a)
+	<-r
+}
+
+func (g *kpGate) hit() { g.hitSeq(-1) }
+
+func kpWait(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(kpLimit):
+		t.Fatalf("%s: not within %v", what, kpLimit)
+	}
+}
+
+// kpUntil polls cond, within a bound.
+func kpUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(kpLimit)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: not within %v\ngoroutines at the failure:\n%s", what, kpLimit, contractStacks())
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func klClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
+type kpRec struct {
+	live     bool
+	state    keyState
+	stamp    uint64
+	expiring bool
+}
+
+// kpRecord reads one record under p.mu. Never while the receiver is held
+// at the l7 gate, which holds p.mu.
+func kpRecord(p *KeyProvider, seq uint32) kpRec {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	r, ok := p.table[seq]
+	if !ok {
+		return kpRec{}
+	}
+	return kpRec{true, r.state, r.stamp, r.expiring}
+}
+
+type kpCounts struct {
+	table, queue     int
+	next, unknown    uint64
+	pending          uint64
+	registered, gone bool
+}
+
+func kpState(p *KeyProvider) kpCounts {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return kpCounts{len(p.table), len(p.queue), p.next, p.unknown, p.pendingGen, p.registered, p.receiverGone}
+}
+
+// kpExpiry is the windows the tests fire themselves.
+type kpExpiry struct {
+	mu sync.Mutex
+	ch map[uint32]chan time.Time
+}
+
+func (e *kpExpiry) get(seq uint32) chan time.Time {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.ch == nil {
+		e.ch = map[uint32]chan time.Time{}
+	}
+	c, ok := e.ch[seq]
+	if !ok {
+		c = make(chan time.Time, 1)
+		e.ch[seq] = c
+	}
+	return c
+}
+
+func (e *kpExpiry) fire(seq uint32) { e.get(seq) <- time.Now() }
+
+// kpHarness is an owner key provider on a live synthetic access point at
+// generation 1, with every hook wired to a gate or a record.
+type kpHarness struct {
+	f *ap.DDSonicFakeAP
+	a *ap.Accesspoint
+	c *ap.DDSonicFakeConn
+	p *KeyProvider
+
+	exp                                             kpExpiry
+	admit, wait, stampBefore, stampAfter, afterSend kpGate
+	step0, step1, l6l7, l7, pass                    kpGate
+	receipt                                         map[string]*kpGate
+	// l7Probe, when set, runs in the receiver holding p.mu, before L7.
+	l7Probe atomic.Pointer[func()]
+
+	started  atomic.Uint64 // passes begun
+	cur      uint64        // the pass under way; the receiver's only
+	passes   chan uint64   // passes completed, by number
+	inStep3  chan struct{}
+	exits    chan string
+	mu       sync.Mutex
+	receipts []string
+	stamps   map[uint32]int
+	sendErrs map[uint32]error
+	sub      atomic.Pointer[<-chan ap.Packet]
+}
+
+type kpOption func(*kpHarness)
+
+// kpRealWindow leaves the provider's own 15 second window in place.
+func kpRealWindow(h *kpHarness) { h.p.hooks.expiry = nil }
+
+// kpTestChannel gives the receiver a subscription the test owns.
+func kpTestChannel(ch chan ap.Packet) kpOption {
+	return func(h *kpHarness) { h.p.subscribe = func() <-chan ap.Packet { return ch } }
+}
+
+func newKP(t *testing.T, before func(*ap.Accesspoint), opts ...kpOption) *kpHarness {
+	t.Helper()
+	f, a, c := agedAP(t)
+	if before != nil {
+		before(a)
+	}
+	return kpOn(f, a, c, &librespot.NullLogger{}, opts...)
+}
+
+func kpOn(f *ap.DDSonicFakeAP, a *ap.Accesspoint, c *ap.DDSonicFakeConn, log librespot.Logger, opts ...kpOption) *kpHarness {
+	h := &kpHarness{
+		f: f, a: a, c: c,
+		receipt:  map[string]*kpGate{"step1": {}, "step3": {}},
+		passes:   make(chan uint64, 4096),
+		inStep3:  make(chan struct{}, 1),
+		exits:    make(chan string, 1),
+		stamps:   map[uint32]int{},
+		sendErrs: map[uint32]error{},
+	}
+	h.p = NewAudioKeyProvider(log, a)
+	real := h.p.subscribe
+	h.p.subscribe = func() <-chan ap.Packet {
+		ch := real()
+		h.sub.Store(&ch)
+		return ch
+	}
+	h.p.hooks = &keyHooks{
+		expiry:      func(seq uint32) <-chan time.Time { return h.exp.get(seq) },
+		beforeAdmit: h.admit.hit,
+		beforeWait:  func(seq uint32) { h.wait.hitSeq(int64(seq)) },
+		beforeStamp: func(seq uint32, _ uint64) {
+			h.mu.Lock()
+			h.stamps[seq]++
+			h.mu.Unlock()
+			h.stampBefore.hitSeq(int64(seq))
+		},
+		afterStamp: func(seq uint32) { h.stampAfter.hitSeq(int64(seq)) },
+		afterSend: func(seq uint32, err error) {
+			h.mu.Lock()
+			h.sendErrs[seq] = err
+			h.mu.Unlock()
+			h.afterSend.hitSeq(int64(seq))
+		},
+		beforeStep0: func() {
+			h.cur = h.started.Add(1)
+			h.step0.hit()
+		},
+		beforeStep1: h.step1.hit,
+		afterReceipt: func(site string) {
+			h.mu.Lock()
+			h.receipts = append(h.receipts, site)
+			h.mu.Unlock()
+			h.receipt[site].hit()
+		},
+		betweenL6L7: h.l6l7.hit,
+		l7Locked: func() {
+			if f := h.l7Probe.Load(); f != nil {
+				(*f)()
+			}
+			h.l7.hit()
+		},
+		passDone: func() {
+			select {
+			case h.passes <- h.cur:
+			default:
+			}
+			h.pass.hit()
+		},
+		inStep3: func() {
+			select {
+			case h.inStep3 <- struct{}{}:
+			default:
+			}
+		},
+		exited: func(site string) { h.exits <- site },
+	}
+	for _, o := range opts {
+		o(h)
+	}
+	return h
+}
+
+// sent waits for the next key request on c, checks its sequence number, and
+// waits for the provider to record the write.
+func (h *kpHarness) sent(t *testing.T, c *ap.DDSonicFakeConn, seq uint32) ap.Packet {
+	t.Helper()
+	req, ok := c.Wait(ap.PacketTypeRequestKey, kpLimit)
+	if !ok {
+		t.Fatalf("key request %d did not reach the access point", seq)
+	}
+	if got := kpSeq(req); got != seq {
+		t.Fatalf("the key request reaching the access point is %d, want %d", got, seq)
+	}
+	kpUntil(t, fmt.Sprintf("request %d recorded as written", seq), func() bool {
+		r := kpRecord(h.p, seq)
+		return !r.live || r.state == keySent
+	})
+	return req
+}
+
+// parkInStep3 waits until the receiver enters its step-3 select with no
+// kick pending.
+func (h *kpHarness) parkInStep3(t *testing.T) {
+	t.Helper()
+	for i := 0; ; i++ {
+		select {
+		case <-h.inStep3:
+		default:
+		}
+		kick(h.p.kickR)
+		kpWait(t, h.inStep3, "the receiver entering step 3")
+		if len(h.p.kickR) == 0 {
+			return
+		}
+		if i == 100 {
+			t.Fatal("the receiver never parked in step 3 with no kick pending")
+		}
+	}
+}
+
+// afterNow waits for a completed receiver pass that began after the call.
+func (h *kpHarness) afterNow(t *testing.T, what string) {
+	t.Helper()
+	s0 := h.started.Load()
+	kick(h.p.kickR)
+	deadline := time.After(kpLimit)
+	for {
+		select {
+		case n := <-h.passes:
+			if n > s0 {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("%s: no receiver pass completed within %v", what, kpLimit)
+		}
+	}
+}
+
+func (h *kpHarness) exit(t *testing.T) string {
+	t.Helper()
+	select {
+	case site := <-h.exits:
+		return site
+	case <-time.After(kpLimit):
+		t.Fatalf("the receiver did not leave within %v", kpLimit)
+		return ""
+	}
+}
+
+func (h *kpHarness) receiptSites() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.receipts...)
+}
+
+func (h *kpHarness) stampCalls(seq uint32) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.stamps[seq]
+}
+
+// subClosed reports whether the receiver's real subscription is closed. It
+// takes a packet if one is waiting, so it is used only when none is sent.
+func (h *kpHarness) subClosed() bool {
+	ch := h.sub.Load()
+	if ch == nil {
+		return false
+	}
+	select {
+	case _, ok := <-*ch:
+		return !ok
+	default:
+		return false
+	}
+}
+
+// reconnect closes the current connection from the peer's side and waits for
+// the access point to publish generation want on a new one.
+func (h *kpHarness) reconnect(t *testing.T, want uint64) *ap.DDSonicFakeConn {
+	t.Helper()
+	if err := h.c.PeerClose(); err != nil {
+		t.Fatal(err)
+	}
+	c := h.f.Next(kpLimit)
+	if c == nil {
+		t.Fatal("the access point did not reconnect")
+	}
+	kpUntil(t, fmt.Sprintf("generation %d published", want), func() bool { g, _ := h.a.Generation(); return g == want })
+	h.c = c
+	return c
+}
+
+func kpSeq(pkt ap.Packet) uint32 {
+	return binary.BigEndian.Uint32(pkt.Payload[len(pkt.Payload)-6:])
+}
+
+func kpAnswerSeq(c *ap.DDSonicFakeConn, seq uint32, key []byte) error {
+	return c.Send(ap.PacketTypeAesKey, append(binary.BigEndian.AppendUint32(nil, seq), key...))
+}
+
+func kpReplaced(t *testing.T, what string, err error, sent, now uint64) {
+	t.Helper()
+	var cre *ConnectionReplacedError
+	if !errors.As(err, &cre) || cre.Sent != sent || cre.Now != now {
+		t.Fatalf("%s = %v, want ConnectionReplacedError{%d, %d}", what, err, sent, now)
+	}
+}
+
+func kpKey(t *testing.T, what string, r keyResult) {
+	t.Helper()
+	if r.err != nil || string(r.key) != string(contractKey) {
+		t.Fatalf("%s = %x, %v; want the key", what, r.key, r.err)
+	}
+}
+
+// T-S3 and T-H4: the hook is installed before audio runs, and only a nil
+// error from it makes a provider the owner.
+func TestDDSonicContractKeylinkOwnershipRule(t *testing.T) {
+	if keylink.AttachAnnouncer == nil {
+		t.Fatal("T-S3: keylink.AttachAnnouncer is nil when package audio runs")
+	}
+	if !ownerFrom(nil) || ownerFrom(keylink.ErrTaken) || ownerFrom(errors.New("another error")) {
+		t.Fatal("T-H4: ownerFrom is not true for nil only")
+	}
+}
+
+// T-S4, B1's target: two concurrent constructors on one access point make
+// exactly one owner.
+func TestDDSonicContractOneOwnerPerAccessPoint(t *testing.T) {
+	for trial := 0; trial < 20; trial++ {
+		a := ap.NewAccesspoint(&librespot.NullLogger{}, nil, "")
+		var ps [2]*KeyProvider
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for i := range ps {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				ps[i] = NewAudioKeyProvider(&librespot.NullLogger{}, a)
+			}()
+		}
+		close(start)
+		wg.Wait()
+		owners := 0
+		for _, p := range ps {
+			if p.owner {
+				owners++
+			}
+		}
+		a.Close()
+		if owners != 1 {
+			t.Fatalf("B1-RED: trial %d: %d of two concurrent constructors own the access point, want exactly 1", trial, owners)
+		}
+	}
+}
+
+// S41: a second provider on a live access point refuses every request with
+// no record, write or goroutine; the owner is unaffected and still announced
+// to.
+func TestDDSonicContractSecondProviderIsInert(t *testing.T) {
+	h := newKP(t, nil)
+	second := NewAudioKeyProvider(&librespot.NullLogger{}, h.a)
+	if second.owner || !h.p.owner {
+		t.Fatalf("owner flags: first %t, second %t; want true, false", h.p.owner, second.owner)
+	}
+	if _, err := second.Request(context.Background(), make([]byte, 16), make([]byte, 20)); !errors.Is(err, ErrKeyProviderNotOwner) {
+		t.Fatalf("the second provider's request = %v, want ErrKeyProviderNotOwner", err)
+	}
+	launched := false
+	second.startOnce.Do(func() { launched = true })
+	if st := kpState(second); !launched || st.table != 0 || st.queue != 0 || st.next != 0 {
+		t.Fatalf("the inert provider: service launched %t, state %+v", !launched, st)
+	}
+	out := requestKey(context.Background(), h.p)
+	answer(t, h.c)
+	kpKey(t, "the owner's request", awaitKey(t, "the owner's request", out, kpLimit))
+	h.reconnect(t, 2)
+	kpUntil(t, "the owner announced to", func() bool { return kpState(h.p).pending == 2 })
+	if kpState(second).pending != 0 {
+		t.Fatal("the inert provider was announced to")
+	}
+}
+
+// T-S5: an access point and its provider become collectable together; no
+// global retains them. (A finite wait, not a universal guarantee.)
+func TestDDSonicContractProviderAndAccessPointCollectTogether(t *testing.T) {
+	apGone, pGone := make(chan struct{}), make(chan struct{})
+	func() {
+		a := ap.NewAccesspoint(&librespot.NullLogger{}, nil, "")
+		p := NewAudioKeyProvider(&librespot.NullLogger{}, a)
+		runtime.AddCleanup(a, func(ch chan struct{}) { close(ch) }, apGone)
+		runtime.AddCleanup(p, func(ch chan struct{}) { close(ch) }, pGone)
+	}()
+	deadline := time.Now().Add(kpLimit)
+	for !klClosed(apGone) || !klClosed(pGone) {
+		if time.Now().After(deadline) {
+			t.Fatal("the access point and its provider were not both collected")
+		}
+		runtime.GC()
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// T-S6: registration while a reconnect holds the connection lock waits for
+// that publication; the first stamp is at least the published generation,
+// and a later reconnect is announced.
+func TestDDSonicContractRegistrationWaitsForReconnect(t *testing.T) {
+	f, a, c1 := agedAP(t)
+	service(a)
+	release := f.Hold()
+	t.Cleanup(release)
+	if err := c1.PeerClose(); err != nil {
+		t.Fatal(err)
+	}
+	kpUntil(t, "a reconnect holding the connection lock", func() bool {
+		return ap.DDSonicStackHas("ap.(*Accesspoint).reconnect(")
+	})
+	got := make(chan *KeyProvider, 1)
+	go func() { got <- NewAudioKeyProvider(&librespot.NullLogger{}, a) }()
+	kpUntil(t, "the constructor waiting for the connection lock", func() bool {
+		return ap.DDSonicStackHas("audio.NewAudioKeyProvider(", "sync.(*RWMutex).Lock(")
+	})
+	select {
+	case <-got:
+		t.Fatal("registration completed while a reconnect held the connection lock")
+	default:
+	}
+	release()
+	var p *KeyProvider
+	select {
+	case p = <-got:
+	case <-time.After(kpLimit):
+		t.Fatal("registration did not complete after the reconnect")
+	}
+	if g, _ := a.Generation(); g != 2 || !p.owner {
+		t.Fatalf("after registration: generation %d, owner %t; want 2, true", g, p.owner)
+	}
+	c2 := f.Next(kpLimit)
+	if c2 == nil {
+		t.Fatal("no new connection")
+	}
+	out := requestKey(context.Background(), p)
+	req, ok := c2.Wait(ap.PacketTypeRequestKey, kpLimit)
+	if !ok {
+		t.Fatal("no key request")
+	}
+	if r := kpRecord(p, 0); r.live && r.stamp < 2 {
+		t.Fatalf("the first request was stamped %d, below the published generation 2", r.stamp)
+	}
+	if err := c2.AnswerKey(req, contractKey); err != nil {
+		t.Fatal(err)
+	}
+	kpKey(t, "the first request", awaitKey(t, "the first request", out, kpLimit))
+	if err := c2.PeerClose(); err != nil {
+		t.Fatal(err)
+	}
+	if f.Next(kpLimit) == nil {
+		t.Fatal("no reconnect")
+	}
+	kpUntil(t, "the later reconnect announced", func() bool { return kpState(p).pending == 3 })
+}
+
+// T-E1: the E1-E3 refusals come before anything is launched: no
+// subscription, no record or queue entry, no sequence number, no service.
+func TestDDSonicContractEntryRefusalsLaunchNothing(t *testing.T) {
+	for _, tc := range []struct{ cancelled, inert, done bool }{
+		{true, false, false}, {true, true, false}, {true, false, true}, {true, true, true},
+		{false, true, false}, {false, true, true}, {false, false, true},
+	} {
+		name := fmt.Sprintf("cancelled=%t inert=%t done=%t", tc.cancelled, tc.inert, tc.done)
+		a := ap.NewAccesspoint(&librespot.NullLogger{}, nil, "")
+		target := NewAudioKeyProvider(&librespot.NullLogger{}, a)
+		if tc.inert {
+			target = NewAudioKeyProvider(&librespot.NullLogger{}, a)
+		}
+		var subs atomic.Int32
+		real := target.subscribe
+		target.subscribe = func() <-chan ap.Packet { subs.Add(1); return real() }
+		if tc.done {
+			a.Close()
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		if tc.cancelled {
+			cancel()
+		}
+		_, err := target.Request(ctx, make([]byte, 16), make([]byte, 20))
+		var want error
+		switch {
+		case tc.cancelled:
+			want = context.Canceled
+		case tc.inert:
+			want = ErrKeyProviderNotOwner
+		default:
+			want = ap.ErrAccesspointClosed
+		}
+		if !errors.Is(err, want) {
+			t.Errorf("%s: %v, want %v", name, err, want)
+		}
+		launched := false
+		target.startOnce.Do(func() { launched = true })
+		st := kpState(target)
+		if !launched || subs.Load() != 0 || st.table != 0 || st.queue != 0 || st.next != 0 || st.registered {
+			t.Errorf("%s: service launched %t, %d subscriptions, state %+v", name, !launched, subs.Load(), st)
+		}
+		cancel()
+		a.Close()
+	}
+	h := newKP(t, nil)
+	out := requestKey(context.Background(), h.p)
+	answer(t, h.c)
+	kpKey(t, "the admitted request", awaitKey(t, "the admitted request", out, kpLimit))
+}
+
+// T-E2: an E5 refusal after E4's launch leaves no record, queue entry or
+// write, and does not tear the shared service down.
+func TestDDSonicContractAdmissionRefusalsAfterLaunch(t *testing.T) {
+	h := newKP(t, nil)
+
+	// (a) the caller's context ends at the barrier.
+	arrived, release := h.admit.arm(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	out := requestKey(ctx, h.p)
+	kpWait(t, arrived, "(a) the barrier between E4 and E5")
+	cancel()
+	release()
+	if r := awaitKey(t, "(a)", out, kpLimit); !errors.Is(r.err, context.Canceled) {
+		t.Fatalf("(a) = %v, want context.Canceled", r.err)
+	}
+	if st := kpState(h.p); st.table != 0 || st.queue != 0 || st.next != 0 {
+		t.Fatalf("(a) left %+v", st)
+	}
+	kpUntil(t, "(a) the service still running", func() bool { st := kpState(h.p); return st.registered && !st.gone })
+	out = requestKey(context.Background(), h.p)
+	h.sent(t, h.c, 0)
+	if err := kpAnswerSeq(h.c, 0, contractKey); err != nil {
+		t.Fatal(err)
+	}
+	kpKey(t, "(a) the next request", awaitKey(t, "(a) the next request", out, kpLimit))
+
+	// (c) the sequence numbers run out at the barrier.
+	arrived, release = h.admit.arm(t)
+	out = requestKey(context.Background(), h.p)
+	kpWait(t, arrived, "(c) the barrier")
+	h.p.mu.Lock()
+	h.p.next = 1 << 32
+	h.p.mu.Unlock()
+	release()
+	if r := awaitKey(t, "(c)", out, kpLimit); !errors.Is(r.err, ErrKeySequenceExhausted) {
+		t.Fatalf("(c) = %v, want ErrKeySequenceExhausted", r.err)
+	}
+	if st := kpState(h.p); st.table != 0 || st.queue != 0 || st.next != 1<<32 {
+		t.Fatalf("(c) left %+v", st)
+	}
+	if _, ok := h.c.Wait(ap.PacketTypeRequestKey, 200*time.Millisecond); ok {
+		t.Fatal("(c) a refused request was written")
+	}
+
+	// (b) the access point closes at the barrier.
+	arrived, release = h.admit.arm(t)
+	out = requestKey(context.Background(), h.p)
+	kpWait(t, arrived, "(b) the barrier")
+	h.a.Close()
+	release()
+	if r := awaitKey(t, "(b)", out, kpLimit); !errors.Is(r.err, ap.ErrAccesspointClosed) {
+		t.Fatalf("(b) = %v, want ErrAccesspointClosed", r.err)
+	}
+	if site := h.exit(t); site != "step0-done" && site != "step3-done" {
+		t.Fatalf("(b) the receiver left at %s, want its Done fence", site)
+	}
+	if st := kpState(h.p); st.table != 0 || st.queue != 0 {
+		t.Fatalf("(b) left %+v", st)
+	}
+}
+
+// T-R2: Done closes while the access point's delivery to the held receiver
+// waits. The receiver leaves at step 0 without taking the packet, and the
+// delivery gives up on Done (P5).
+func TestDDSonicContractReceiverLeavesAtStepZeroOnDone(t *testing.T) {
+	h := newKP(t, nil)
+	out := requestKey(context.Background(), h.p)
+	req := h.sent(t, h.c, 0)
+	arrived, release := h.step0.arm(t)
+	kick(h.p.kickR)
+	kpWait(t, arrived, "the receiver held before step 0")
+	u0 := kpState(h.p).unknown
+	if err := h.c.AnswerKey(req, contractKey); err != nil {
+		t.Fatal(err)
+	}
+	kpUntil(t, "the delivery waiting on the held receiver", ap.DDSonicDeliveryWaiting)
+	h.a.Close()
+	kpUntil(t, "the delivery given up on Done", func() bool { return !ap.DDSonicDeliveryWaiting() })
+	release()
+	if site := h.exit(t); site != "step0-done" {
+		t.Fatalf("the receiver left at %s, want step 0", site)
+	}
+	r := awaitKey(t, "the request", out, kpLimit)
+	if !errors.Is(r.err, ap.ErrAccesspointClosed) || r.key != nil {
+		t.Fatalf("the request = %x, %v; want ErrAccesspointClosed", r.key, r.err)
+	}
+	if st := kpState(h.p); st.unknown != u0 || st.table != 0 || len(h.receiptSites()) != 0 {
+		t.Fatalf("the waiting packet was taken: %+v, receipts %v", st, h.receiptSites())
+	}
+}
+
+// T-R3: under continuous offered packets, Done ends the receiver promptly
+// and it takes nothing more.
+func TestDDSonicContractReceiverLeavesUnderContinuousPackets(t *testing.T) {
+	h := newKP(t, nil)
+	out := requestKey(context.Background(), h.p)
+	h.sent(t, h.c, 0)
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if kpAnswerSeq(h.c, 999, contractKey) != nil {
+				return
+			}
+		}
+	}()
+	kpUntil(t, "packets being taken", func() bool { return kpState(h.p).unknown >= 50 })
+	h.a.Close()
+	if site := h.exit(t); site != "step0-done" && site != "step3-done" {
+		t.Fatalf("the receiver left at %s, want a Done fence", site)
+	}
+	u := kpState(h.p).unknown
+	time.Sleep(50 * time.Millisecond)
+	if kpState(h.p).unknown != u {
+		t.Fatal("the receiver took packets after it left")
+	}
+	if r := awaitKey(t, "the request", out, kpLimit); !errors.Is(r.err, ap.ErrAccesspointClosed) {
+		t.Fatalf("the request = %v, want ErrAccesspointClosed", r.err)
+	}
+}
+
+// T-R4a: the subscription is closed by the terminal receive-loop exit while
+// the receiver is between step 0 and step 1: step 1's closed branch fences
+// and leaves; no zero-value packet is answered.
+func TestDDSonicContractReceiverStepOneSeesClosedSubscription(t *testing.T) {
+	h := newKP(t, nil)
+	out := requestKey(context.Background(), h.p)
+	h.sent(t, h.c, 0)
+	arrived, release := h.step1.arm(t)
+	kick(h.p.kickR)
+	kpWait(t, arrived, "the receiver held before step 1")
+	u0 := kpState(h.p).unknown
+	h.a.Close()
+	kpUntil(t, "the subscription closed by the receive loop's exit", h.subClosed)
+	release()
+	if site := h.exit(t); site != "step1-closed" {
+		t.Fatalf("the receiver left at %s, want step 1's closed branch", site)
+	}
+	if st := kpState(h.p); st.unknown != u0 || st.table != 0 || len(h.receiptSites()) != 0 {
+		t.Fatalf("a zero-value packet was handled: %+v, receipts %v", st, h.receiptSites())
+	}
+	if r := awaitKey(t, "the request", out, kpLimit); !errors.Is(r.err, ap.ErrAccesspointClosed) {
+		t.Fatalf("the request = %v, want ErrAccesspointClosed", r.err)
+	}
+}
+
+// T-R4b(a): twenty bounded real-AP trials of a terminal close with the
+// receiver at its step-3 select. Each must leave, fence and answer no
+// zero-value packet; which branch it left by is recorded, not required.
+func TestDDSonicContractReceiverStepThreeTerminalCloseTrials(t *testing.T) {
+	f, err := ap.DDSonicContractFakeAP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(f.Close)
+	// R70-1: after every trial's access point's own cleanup below and before
+	// the fake's, nothing of the SDK's loops is left.
+	t.Cleanup(func() { quietLoops(t, "after the trials' access points were closed") })
+	branches := map[string]int{}
+	for trial := 0; trial < 20; trial++ {
+		ctx, cancel := context.WithTimeout(context.Background(), kpLimit)
+		a, err := f.Connect(ctx)
+		cancel()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// R70-1: owned on every path. On the normal one the trial has
+		// already closed it, and Close is idempotent.
+		t.Cleanup(func() { closeJoined(t, "cleanup", a) })
+		c := f.Next(kpLimit)
+		if c == nil {
+			t.Fatal("no login")
+		}
+		h := kpOn(f, a, c, &librespot.NullLogger{})
+		out := requestKey(context.Background(), h.p)
+		h.sent(t, c, 0)
+		h.parkInStep3(t)
+		u0 := kpState(h.p).unknown
+		a.Close()
+		site := h.exit(t)
+		branches[site]++
+		if site != "step3-done" && site != "step3-closed" && site != "step0-done" {
+			t.Fatalf("trial %d: the receiver left at %s", trial, site)
+		}
+		if r := awaitKey(t, "the request", out, kpLimit); !errors.Is(r.err, ap.ErrAccesspointClosed) {
+			t.Fatalf("trial %d: the request = %v, want ErrAccesspointClosed", trial, r.err)
+		}
+		if st := kpState(h.p); st.unknown != u0 || st.table != 0 || len(h.receiptSites()) != 0 {
+			t.Fatalf("trial %d: %+v, receipts %v", trial, st, h.receiptSites())
+		}
+	}
+	t.Logf("T-R4b(a) exits by branch (recorded, not required): %v", branches)
+}
+
+// T-R4b(b): the actual receiver over a subscription the test owns, with
+// Done open: the step-3 closed branch, the step-3 Done branch and the step-1
+// closed branch, each the only ready case.
+func TestDDSonicContractReceiverBranchesDeterministic(t *testing.T) {
+	for _, tc := range []struct{ name, want string }{
+		{"step-3 closed", "step3-closed"},
+		{"step-3 Done", "step3-done"},
+		{"step-1 closed", "step1-closed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ch := make(chan ap.Packet)
+			h := newKP(t, nil, kpTestChannel(ch))
+			out := requestKey(context.Background(), h.p)
+			h.sent(t, h.c, 0)
+			switch tc.want {
+			case "step3-closed", "step3-done":
+				h.parkInStep3(t)
+				if _, changed := h.a.Generation(); len(h.p.kickR) != 0 || klClosed(changed) || klClosed(h.a.Done()) {
+					t.Fatal("another case is ready at the step-3 select")
+				}
+				if tc.want == "step3-closed" {
+					close(ch)
+				} else {
+					h.a.Close()
+				}
+			case "step1-closed":
+				arrived, release := h.step1.arm(t)
+				kick(h.p.kickR)
+				kpWait(t, arrived, "the receiver held before step 1")
+				close(ch)
+				release()
+			}
+			if site := h.exit(t); site != tc.want {
+				t.Fatalf("the receiver left at %s, want %s", site, tc.want)
+			}
+			if r := awaitKey(t, "the request", out, kpLimit); !errors.Is(r.err, ap.ErrAccesspointClosed) {
+				t.Fatalf("the request = %v, want ErrAccesspointClosed", r.err)
+			}
+			if st := kpState(h.p); st.table != 0 || st.queue != 0 || !st.gone || st.unknown != 0 || len(h.receiptSites()) != 0 {
+				t.Fatalf("after the fence: %+v, receipts %v", st, h.receiptSites())
+			}
+		})
+	}
+}
+
+// T-R5a and T-R7: once L5 has given a request its answer, that outcome
+// stands, though the caller's context ends, and on the last request the
+// access point closes, before the caller's select runs.
+func TestDDSonicContractReplyOutcomeStands(t *testing.T) {
+	h := newKP(t, nil)
+	for i := uint32(0); i < 10; i++ {
+		arrived, release := h.wait.armSeq(t, int64(i))
+		ctx, cancel := context.WithCancel(context.Background())
+		out := requestKey(ctx, h.p)
+		kpWait(t, arrived, "the caller held after the commit")
+		req := h.sent(t, h.c, i)
+		if err := h.c.AnswerKey(req, contractKey); err != nil {
+			t.Fatal(err)
+		}
+		kpUntil(t, "L5 done", func() bool { return !kpRecord(h.p, i).live })
+		cancel()
+		if i == 9 {
+			h.a.Close()
+		}
+		release()
+		kpKey(t, fmt.Sprintf("request %d", i), awaitKey(t, "the request", out, kpLimit))
+	}
+}
+
+// T-R6a-d: the caller's context or Done wins the request's terminal while
+// the receiver holds its packet before L5, at step 1 and at step 3. L5 then
+// discards the packet: no resurrection, no second write.
+func TestDDSonicContractFenceFirstDiscardsHeldPacket(t *testing.T) {
+	for _, tc := range []struct{ site, end string }{
+		{"step1", "ctx"}, {"step1", "Done"}, {"step3", "ctx"}, {"step3", "Done"},
+	} {
+		t.Run(tc.site+" "+tc.end, func(t *testing.T) {
+			h := newKP(t, nil)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			out := requestKey(ctx, h.p)
+			req := h.sent(t, h.c, 0)
+			arrived, release := h.receipt[tc.site].arm(t)
+			if tc.site == "step1" {
+				s1, rel1 := h.step1.arm(t)
+				kick(h.p.kickR)
+				kpWait(t, s1, "the receiver held before step 1")
+				if err := h.c.AnswerKey(req, contractKey); err != nil {
+					t.Fatal(err)
+				}
+				kpUntil(t, "the delivery waiting", ap.DDSonicDeliveryWaiting)
+				rel1()
+			} else {
+				h.parkInStep3(t)
+				if err := h.c.AnswerKey(req, contractKey); err != nil {
+					t.Fatal(err)
+				}
+			}
+			kpWait(t, arrived, "the packet received, before L5")
+			u0 := kpState(h.p).unknown
+			want := context.Canceled
+			if tc.end == "Done" {
+				h.a.Close()
+				want = ap.ErrAccesspointClosed
+			} else {
+				cancel()
+			}
+			if r := awaitKey(t, "the request", out, kpLimit); !errors.Is(r.err, want) || r.key != nil {
+				t.Fatalf("the request = %x, %v; want %v", r.key, r.err, want)
+			}
+			release()
+			kpUntil(t, "L5 discarding the packet", func() bool { return kpState(h.p).unknown == u0+1 })
+			if st := kpState(h.p); st.table != 0 || st.next != 1 {
+				t.Fatalf("after the discard: %+v", st)
+			}
+			if tc.end == "ctx" {
+				if _, ok := h.c.Wait(ap.PacketTypeRequestKey, 200*time.Millisecond); ok {
+					t.Fatal("a second write")
+				}
+			}
+		})
+	}
+}
+
+// S19′: a reply the receiver holds before L5 is not pre-empted by the
+// window or by a replacement: after the release, L5 wins.
+func TestDDSonicContractHeldReplyWinsOverExpiryAndReplacement(t *testing.T) {
+	h := newKP(t, nil)
+	out := requestKey(context.Background(), h.p)
+	req := h.sent(t, h.c, 0)
+	h.parkInStep3(t)
+	arrived, release := h.receipt["step3"].arm(t)
+	if err := h.c.AnswerKey(req, contractKey); err != nil {
+		t.Fatal(err)
+	}
+	kpWait(t, arrived, "the reply held before L5")
+	h.reconnect(t, 2)
+	h.exp.fire(0)
+	kpUntil(t, "the window expired", func() bool { return kpRecord(h.p, 0).expiring })
+	release()
+	kpKey(t, "the held reply", awaitKey(t, "the request", out, kpLimit))
+}
+
+// S20″: with the access point live at step 0 and its delivery actually
+// waiting (and a kick ready too), the packet is taken at step 1.
+func TestDDSonicContractWaitingPacketTakenAtStepOne(t *testing.T) {
+	h := newKP(t, nil)
+	out := requestKey(context.Background(), h.p)
+	req := h.sent(t, h.c, 0)
+	arrived, release := h.step1.arm(t)
+	kick(h.p.kickR)
+	kpWait(t, arrived, "the receiver held before step 1")
+	if err := h.c.AnswerKey(req, contractKey); err != nil {
+		t.Fatal(err)
+	}
+	kpUntil(t, "the delivery waiting", ap.DDSonicDeliveryWaiting)
+	kick(h.p.kickR)
+	release()
+	kpKey(t, "the request", awaitKey(t, "the request", out, kpLimit))
+	if got := h.receiptSites(); !slices.Equal(got, []string{"step1"}) {
+		t.Fatalf("the packet was received at %v, want step 1", got)
+	}
+}
+
+// S21′: the writer commits in admission order under continuous inbound
+// packets.
+func TestDDSonicContractWriterIsFIFOUnderInboundPackets(t *testing.T) {
+	h := newKP(t, nil)
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if kpAnswerSeq(h.c, 9999, contractKey) != nil {
+				return
+			}
+			time.Sleep(100 * time.Microsecond)
+		}
+	}()
+	const n = 8
+	var outs []<-chan keyResult
+	for i := uint64(0); i < n; i++ {
+		outs = append(outs, requestKey(context.Background(), h.p))
+		kpUntil(t, "admission", func() bool { return kpState(h.p).next == i+1 })
+	}
+	var reqs []ap.Packet
+	for i := uint32(0); i < n; i++ {
+		reqs = append(reqs, h.sent(t, h.c, i))
+	}
+	for i, req := range reqs {
+		if err := h.c.AnswerKey(req, contractKey); err != nil {
+			t.Fatal(err)
+		}
+		kpKey(t, fmt.Sprintf("request %d", i), awaitKey(t, "a request", outs[i], kpLimit))
+	}
+}
+
+// S25: R1 is sent on generation 1; the writer is held on R2; the connection
+// is replaced and R1's window fires. R1 is replaced, never expired, and R2
+// is classified on its own stamp.
+func TestDDSonicContractReplacementWhileWriterHeld(t *testing.T) {
+	h := newKP(t, nil)
+	out1 := requestKey(context.Background(), h.p)
+	h.sent(t, h.c, 0)
+	arrived, release := h.stampAfter.armSeq(t, 1)
+	out2 := requestKey(context.Background(), h.p)
+	kpWait(t, arrived, "R2 stamped and held before its write")
+	h.reconnect(t, 2)
+	h.exp.fire(0)
+	kpReplaced(t, "R1", awaitKey(t, "R1", out1, kpLimit).err, 1, 2)
+	release()
+	kpReplaced(t, "R2", awaitKey(t, "R2", out2, kpLimit).err, 1, 2)
+}
+
+// S26: the receiver is held just before its pass; the connection is replaced
+// and the window fires; after the release, replacement.
+func TestDDSonicContractReplacementBeforeHeldPass(t *testing.T) {
+	h := newKP(t, nil)
+	out := requestKey(context.Background(), h.p)
+	h.sent(t, h.c, 0)
+	arrived, release := h.step0.arm(t)
+	kick(h.p.kickR)
+	kpWait(t, arrived, "the receiver held before its pass")
+	h.reconnect(t, 2)
+	h.exp.fire(0)
+	kpUntil(t, "the window expired", func() bool { return kpRecord(h.p, 0).expiring })
+	release()
+	kpReplaced(t, "the request", awaitKey(t, "the request", out, kpLimit).err, 1, 2)
+}
+
+// S26b: with no publication before the receiver's expiry pass, the request
+// ends with DeadlineExceeded, final; a later publication and a stray reply
+// do not revive it.
+func TestDDSonicContractExpiryWithoutPublicationIsFinal(t *testing.T) {
+	h := newKP(t, nil)
+	out := requestKey(context.Background(), h.p)
+	req := h.sent(t, h.c, 0)
+	h.exp.fire(0)
+	if r := awaitKey(t, "the request", out, kpLimit); !errors.Is(r.err, context.DeadlineExceeded) {
+		t.Fatalf("the request = %v, want DeadlineExceeded", r.err)
+	}
+	u0 := kpState(h.p).unknown
+	h.reconnect(t, 2)
+	kpUntil(t, "the publication announced", func() bool { return kpState(h.p).pending == 2 })
+	if err := kpAnswerSeq(h.c, kpSeq(req), contractKey); err != nil {
+		t.Fatal(err)
+	}
+	kpUntil(t, "the stray reply discarded", func() bool { return kpState(h.p).unknown == u0+1 })
+	if st := kpState(h.p); st.table != 0 {
+		t.Fatalf("the expired request came back: %+v", st)
+	}
+}
+
+// The provider's own window, unchanged: an unanswered request on a
+// connection nobody replaces ends after 15 seconds with DeadlineExceeded.
+func TestDDSonicContractUnansweredRequestEndsAtWindow(t *testing.T) {
+	h := newKP(t, nil, kpRealWindow)
+	out := requestKey(context.Background(), h.p)
+	h.sent(t, h.c, 0)
+	r := awaitKey(t, "the unanswered request", out, 25*time.Second)
+	if !errors.Is(r.err, context.DeadlineExceeded) || r.in < 14*time.Second {
+		t.Fatalf("the unanswered request = %v after %v; want DeadlineExceeded at the 15 second window", r.err, r.in)
+	}
+}
+
+// S32: the receiver is held after its snapshot and L6, before L7, without
+// p.mu; the request is expiring; the reconnect announces and publishes
+// generation 2. L7 defers, and the next pass replaces the request.
+func TestDDSonicContractExpiryDefersToAnnouncedPublication(t *testing.T) {
+	h := newKP(t, nil)
+	out := requestKey(context.Background(), h.p)
+	h.sent(t, h.c, 0)
+	arrived, release := h.l6l7.arm(t)
+	kick(h.p.kickR)
+	kpWait(t, arrived, "the receiver held between L6 and L7")
+	h.exp.fire(0)
+	kpUntil(t, "the window expired", func() bool { return kpRecord(h.p, 0).expiring })
+	h.reconnect(t, 2)
+	if st := kpState(h.p); st.pending != 2 {
+		t.Fatalf("pendingGen = %d after the publication, want 2", st.pending)
+	}
+	release()
+	kpReplaced(t, "the request", awaitKey(t, "the request", out, kpLimit).err, 1, 2)
+}
+
+// S32b and S44 (L7 first): the receiver is held before its pass while the
+// request's window expires, so the request is live and expiring when the
+// receiver then takes p.mu and stops before L7. The publisher reaches its
+// announcement and waits for p.mu. L7 decides first (DeadlineExceeded, with
+// no announcement beyond the request's stamp), and the publication's store
+// comes after that terminal.
+func TestDDSonicContractExpiryBeforeAnnouncementWhenL7HoldsLock(t *testing.T) {
+	h := newKP(t, nil)
+	out := requestKey(context.Background(), h.p)
+	h.sent(t, h.c, 0)
+	held, releaseHeld := h.step0.arm(t)
+	kick(h.p.kickR)
+	kpWait(t, held, "the receiver held before its pass")
+	h.exp.fire(0)
+	kpUntil(t, "the window expired", func() bool { return kpRecord(h.p, 0).expiring })
+	if r := kpRecord(h.p, 0); !r.live || r.state != keySent {
+		t.Fatalf("before L7: the request is %+v, want live and sent", r)
+	}
+	var atL7 struct {
+		live, expiring bool
+		pending        uint64
+	}
+	probe := func() { // the receiver holds p.mu here
+		r, live := h.p.table[0]
+		atL7.live, atL7.expiring, atL7.pending = live, live && r.expiring, h.p.pendingGen
+	}
+	h.l7Probe.Store(&probe)
+	arrived, release := h.l7.arm(t)
+	releaseHeld()
+	kpWait(t, arrived, "the receiver holding p.mu before L7")
+	if !atL7.live || !atL7.expiring || atL7.pending > 1 {
+		t.Fatalf("at L7's section: live %t, expiring %t, pendingGen %d; want a live expiring request and no announcement beyond its stamp, 1", atL7.live, atL7.expiring, atL7.pending)
+	}
+	h.l7Probe.Store(nil)
+	var terminalAtStore atomic.Bool
+	restore := ap.DDSonicSetStageAfterAnnounce(func() {
+		h.p.mu.Lock()
+		_, live := h.p.table[0]
+		h.p.mu.Unlock()
+		terminalAtStore.Store(!live)
+	})
+	defer restore()
+	if err := h.c.PeerClose(); err != nil {
+		t.Fatal(err)
+	}
+	kpUntil(t, "the publisher waiting for p.mu", func() bool {
+		return ap.DDSonicStackHas("audio.(*KeyProvider).announce(", "sync.(*Mutex).Lock(")
+	})
+	if g, _ := h.a.Generation(); g != 1 {
+		t.Fatalf("generation %d stored while the announcement waits", g)
+	}
+	release()
+	if r := awaitKey(t, "the request", out, kpLimit); !errors.Is(r.err, context.DeadlineExceeded) {
+		t.Fatalf("the request = %v, want DeadlineExceeded (L7 first)", r.err)
+	}
+	kpUntil(t, "the publication completed", func() bool { g, _ := h.a.Generation(); return g == 2 })
+	if !terminalAtStore.Load() {
+		t.Fatal("the publication reached its store before L7's terminal")
+	}
+}
+
+// S44 (no expiring record): the receiver holds p.mu while the publisher
+// reaches its announcement; the publisher waits, then completes.
+func TestDDSonicContractPublisherWaitsForReceiverLock(t *testing.T) {
+	h := newKP(t, nil)
+	out := requestKey(context.Background(), h.p)
+	h.sent(t, h.c, 0)
+	arrived, release := h.l7.arm(t)
+	kick(h.p.kickR)
+	kpWait(t, arrived, "the receiver holding p.mu")
+	if err := h.c.PeerClose(); err != nil {
+		t.Fatal(err)
+	}
+	kpUntil(t, "the publisher waiting for p.mu", func() bool {
+		return ap.DDSonicStackHas("audio.(*KeyProvider).announce(", "sync.(*Mutex).Lock(")
+	})
+	release()
+	kpUntil(t, "the publication completed", func() bool { g, _ := h.a.Generation(); return g == 2 })
+	kpReplaced(t, "the request", awaitKey(t, "the request", out, kpLimit).err, 1, 2)
+}
+
+// S33: the stamp callback is held after the write's generation was read;
+// the connection is replaced meanwhile. Replacement, or a send error on
+// generation 1; never DeadlineExceeded.
+func TestDDSonicContractDelayedStampAcrossPublication(t *testing.T) {
+	h := newKP(t, nil)
+	arrived, release := h.stampBefore.armSeq(t, 0)
+	out := requestKey(context.Background(), h.p)
+	kpWait(t, arrived, "the stamp callback held")
+	h.reconnect(t, 2)
+	release()
+	r := awaitKey(t, "the request", out, kpLimit)
+	var cre *ConnectionReplacedError
+	var kse *KeySendError
+	switch {
+	case errors.As(r.err, &cre) && cre.Sent == 1 && cre.Now == 2:
+	case errors.As(r.err, &kse) && kse.Gen == 1:
+	default:
+		t.Fatalf("the request = %v, want ConnectionReplacedError{1, 2} or KeySendError on 1", r.err)
+	}
+}
+
+// S34: a committed request whose writer waits for the connection lock
+// behind a held reconnect: (a) its window ends it with DeadlineExceeded,
+// (b) its context with the context's error, (c) Done before the write's
+// snapshot with ErrAccesspointClosed and no stamp callback. The receiver is
+// subscribed first: its subscription, too, waits for the connection lock, and
+// the writer commits nothing before it.
+func TestDDSonicContractCommittedBehindHeldReconnect(t *testing.T) {
+	for _, end := range []string{"window", "ctx", "Done"} {
+		t.Run(end, func(t *testing.T) {
+			h := newKP(t, nil)
+			first := requestKey(context.Background(), h.p)
+			answer(t, h.c)
+			kpKey(t, "the first request", awaitKey(t, "the first request", first, kpLimit))
+			hold := h.f.Hold()
+			t.Cleanup(hold)
+			if err := h.c.PeerClose(); err != nil {
+				t.Fatal(err)
+			}
+			kpUntil(t, "a reconnect holding the connection lock", func() bool {
+				return ap.DDSonicStackHas("ap.(*Accesspoint).reconnect(")
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			out := requestKey(ctx, h.p)
+			kpUntil(t, "the writer waiting for the connection lock", func() bool {
+				return ap.DDSonicStackHas("audio.(*KeyProvider).writer(", "sync.(*RWMutex).RLock(")
+			})
+			if r := kpRecord(h.p, 1); r.state != keyCommitted {
+				t.Fatalf("the request is in state %d, want committed", r.state)
+			}
+			var want error
+			switch end {
+			case "window":
+				h.exp.fire(1)
+				want = context.DeadlineExceeded
+			case "ctx":
+				cancel()
+				want = context.Canceled
+			case "Done":
+				go h.a.Close()
+				kpWait(t, h.a.Done(), "Done")
+				want = ap.ErrAccesspointClosed
+			}
+			if r := awaitKey(t, "the request", out, kpLimit); !errors.Is(r.err, want) {
+				t.Fatalf("the request = %v, want %v", r.err, want)
+			}
+			if h.stampCalls(1) != 0 {
+				t.Fatal("the committed request was stamped while the writer waited")
+			}
+			hold()
+			// The held reconnect completes and the writer's send returns
+			// before the subtest ends, so nothing of it is left behind.
+			kpUntil(t, "the reconnect published", func() bool { g, _ := h.a.Generation(); return g == 2 })
+			kpUntil(t, "the writer's send returned", func() bool {
+				return !ap.DDSonicStackHas("audio.(*KeyProvider).writer(", "sync.(*RWMutex).RLock(")
+			})
+			if end == "Done" {
+				if h.stampCalls(1) != 0 {
+					t.Fatal("the send on a closed access point called its stamp callback")
+				}
+			} else {
+				kpUntil(t, "the late send's callback", func() bool { return h.stampCalls(1) == 1 })
+				if r := kpRecord(h.p, 1); r.live {
+					t.Fatal("the late stamp revived the request")
+				}
+			}
+		})
+	}
+}
+
+// S35 and T-R1: cancellation before and after the stamp. The physical write
+// still happens once; the request's terminal stands; the late stamp, write
+// result and reply create nothing.
+func TestDDSonicContractCancelledAroundStampIsNotResurrected(t *testing.T) {
+	for _, where := range []string{"before stamp", "after stamp"} {
+		t.Run(where, func(t *testing.T) {
+			h := newKP(t, nil)
+			gate := &h.stampBefore
+			if where == "after stamp" {
+				gate = &h.stampAfter
+			}
+			arrived, release := gate.armSeq(t, 0)
+			ctx, cancel := context.WithCancel(context.Background())
+			out := requestKey(ctx, h.p)
+			kpWait(t, arrived, "the writer held at the stamp")
+			cancel()
+			if r := awaitKey(t, "the request", out, kpLimit); !errors.Is(r.err, context.Canceled) {
+				t.Fatalf("the request = %v, want context.Canceled", r.err)
+			}
+			release()
+			req, ok := h.c.Wait(ap.PacketTypeRequestKey, kpLimit)
+			if !ok || kpSeq(req) != 0 {
+				t.Fatal("the committed write did not complete")
+			}
+			u0 := kpState(h.p).unknown
+			if err := h.c.AnswerKey(req, contractKey); err != nil {
+				t.Fatal(err)
+			}
+			kpUntil(t, "the late reply discarded", func() bool { return kpState(h.p).unknown == u0+1 })
+			if st := kpState(h.p); st.table != 0 || st.queue != 0 || st.next != 1 {
+				t.Fatalf("after the late events: %+v", st)
+			}
+			if _, ok := h.c.Wait(ap.PacketTypeRequestKey, 200*time.Millisecond); ok {
+				t.Fatal("a second write")
+			}
+		})
+	}
+}
+
+// kpCountingLogger counts every logging call.
+type kpCountingLogger struct {
+	librespot.NullLogger
+	n atomic.Int64
+}
+
+func (l *kpCountingLogger) Tracef(string, ...interface{})                  { l.n.Add(1) }
+func (l *kpCountingLogger) Debugf(string, ...interface{})                  { l.n.Add(1) }
+func (l *kpCountingLogger) Infof(string, ...interface{})                   { l.n.Add(1) }
+func (l *kpCountingLogger) Warnf(string, ...interface{})                   { l.n.Add(1) }
+func (l *kpCountingLogger) Errorf(string, ...interface{})                  { l.n.Add(1) }
+func (l *kpCountingLogger) Trace(...interface{})                           { l.n.Add(1) }
+func (l *kpCountingLogger) Debug(...interface{})                           { l.n.Add(1) }
+func (l *kpCountingLogger) Info(...interface{})                            { l.n.Add(1) }
+func (l *kpCountingLogger) Warn(...interface{})                            { l.n.Add(1) }
+func (l *kpCountingLogger) Error(...interface{})                           { l.n.Add(1) }
+func (l *kpCountingLogger) WithField(string, interface{}) librespot.Logger { return l }
+func (l *kpCountingLogger) WithError(error) librespot.Logger               { return l }
+
+// S36: the receiver logs nothing: unknown-sequence replies and replacement
+// are counted, not logged. The writer's one debug line per write stays.
+func TestDDSonicContractReceiverDoesNotLog(t *testing.T) {
+	f, a, c := agedAP(t)
+	log := &kpCountingLogger{}
+	h := kpOn(f, a, c, log)
+	out := requestKey(context.Background(), h.p)
+	answer(t, h.c)
+	kpKey(t, "the request", awaitKey(t, "the request", out, kpLimit))
+	n0 := log.n.Load()
+	for i := 0; i < 5; i++ {
+		if err := kpAnswerSeq(h.c, 999, contractKey); err != nil {
+			t.Fatal(err)
+		}
+	}
+	kpUntil(t, "the unknown replies counted", func() bool { return kpState(h.p).unknown == 5 })
+	out = requestKey(context.Background(), h.p)
+	h.sent(t, h.c, 1)
+	h.reconnect(t, 2)
+	kpReplaced(t, "the replaced request", awaitKey(t, "the request", out, kpLimit).err, 1, 2)
+	if n := log.n.Load(); n != n0+1 {
+		t.Fatalf("%d logging calls by the provider after the first answer, want 1 (the second write's)", n-n0)
+	}
+}
+
+// S37: two generations in quick succession. The request was sent on 1; the
+// receiver holds a snapshot of 1 while publication 2 completes and
+// publication 3 is announced and held before its store. With only the
+// announcement of 3 beyond its snapshot, the receiver's L7 defers and
+// nothing ends the request; its next pass replaces it with {1, 2}.
+func TestDDSonicContractTwoRapidGenerations(t *testing.T) {
+	h := newKP(t, nil)
+	out := requestKey(context.Background(), h.p)
+	h.sent(t, h.c, 0)
+	held, releaseHeld := h.l6l7.arm(t)
+	kick(h.p.kickR)
+	kpWait(t, held, "the receiver held with snapshot 1")
+	h.exp.fire(0)
+	kpUntil(t, "the window expired", func() bool { return kpRecord(h.p, 0).expiring })
+	c2 := h.reconnect(t, 2)
+	var stage kpGate
+	stageAt, releaseStage := stage.arm(t)
+	restore := ap.DDSonicSetStageAfterAnnounce(stage.hit)
+	defer restore()
+	if err := c2.PeerClose(); err != nil {
+		t.Fatal(err)
+	}
+	kpWait(t, stageAt, "publication 3 held before its store")
+	if st := kpState(h.p); st.pending != 3 {
+		t.Fatalf("pendingGen = %d, want 3", st.pending)
+	}
+	passAt, releasePass := h.pass.arm(t)
+	releaseHeld()
+	kpWait(t, passAt, "the receiver's pass with snapshot 1 complete")
+	if r := kpRecord(h.p, 0); !r.live || r.state != keySent {
+		t.Fatal("the request ended while only the announcement of 3 was beyond the receiver's snapshot")
+	}
+	releasePass()
+	kpReplaced(t, "the request", awaitKey(t, "the request", out, kpLimit).err, 1, 2)
+	releaseStage()
+	kpUntil(t, "publication 3 completed", func() bool { g, _ := h.a.Generation(); return g == 3 })
+}
+
+// S38, B2's control: the announcement of generation 2 is made and its store
+// held; the request, sent on 1 and never answered, with its caller's
+// context live, expires, and a whole receiver pass completes after that. The
+// request stays live (L7 defers to the announcement); after the release it
+// is replaced with {1, 2}. Under B2's mutation the announcement is lost, L7
+// ends the request with DeadlineExceeded, and the B2-RED assertions fail.
+func TestDDSonicContractAnnouncementDefersExpiry(t *testing.T) {
+	h := newKP(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out := requestKey(ctx, h.p)
+	h.sent(t, h.c, 0)
+	var stage kpGate
+	stageAt, releaseStage := stage.arm(t)
+	restore := ap.DDSonicSetStageAfterAnnounce(stage.hit)
+	defer restore()
+	if err := h.c.PeerClose(); err != nil {
+		t.Fatal(err)
+	}
+	c2 := h.f.Next(kpLimit)
+	if c2 == nil {
+		t.Fatal("the reconnect did not authenticate")
+	}
+	kpWait(t, stageAt, "the publication of 2 held after its announcement")
+	if g, _ := h.a.Generation(); g != 1 {
+		t.Fatalf("generation %d at the held store, want 1", g)
+	}
+	h.exp.fire(0)
+	kpUntil(t, "the window expired", func() bool { r := kpRecord(h.p, 0); return !r.live || r.expiring })
+	h.afterNow(t, "an L7 pass after the expiry")
+
+	st, rec := kpState(h.p), kpRecord(h.p, 0)
+	t.Logf("B2-OBSERVED at the held store: pendingGen=%d live=%t", st.pending, rec.live)
+	if st.pending != 2 {
+		t.Errorf("B2-RED: pendingGen = %d at the held store, want 2", st.pending)
+	}
+	if !rec.live {
+		t.Errorf("B2-RED: the request ended while the publication of 2 was announced and held")
+	}
+	releaseStage()
+	r := awaitKey(t, "the request", out, kpLimit)
+	var cre *ConnectionReplacedError
+	switch {
+	case errors.As(r.err, &cre):
+		t.Logf("B2-OUTCOME replaced{%d,%d}", cre.Sent, cre.Now)
+	case errors.Is(r.err, context.DeadlineExceeded):
+		t.Logf("B2-OUTCOME deadline")
+	default:
+		t.Logf("B2-OUTCOME other: %v", r.err)
+	}
+	if cre == nil || cre.Sent != 1 || cre.Now != 2 {
+		t.Errorf("B2-RED: the request = %v, want ConnectionReplacedError{1, 2}", r.err)
+	}
+	kpUntil(t, "generation 2 stored", func() bool { g, _ := h.a.Generation(); return g == 2 })
+	u0 := kpState(h.p).unknown
+	if err := kpAnswerSeq(c2, 0, contractKey); err != nil {
+		t.Fatal(err)
+	}
+	kpUntil(t, "the stray reply discarded", func() bool { return kpState(h.p).unknown == u0+1 })
+	if st := kpState(h.p); st.table != 0 {
+		t.Errorf("the request came back: %+v", st)
+	} else {
+		t.Logf("B2-NORESURRECTION ok")
+	}
+}
+
+// T-D1: Done closes between the announcement and the store. The store
+// still completes; the live request is fenced with ErrAccesspointClosed and
+// nothing waits.
+func TestDDSonicContractDoneBetweenAnnouncementAndStore(t *testing.T) {
+	h := newKP(t, nil)
+	out := requestKey(context.Background(), h.p)
+	h.sent(t, h.c, 0)
+	var stage kpGate
+	stageAt, releaseStage := stage.arm(t)
+	restore := ap.DDSonicSetStageAfterAnnounce(stage.hit)
+	defer restore()
+	if err := h.c.PeerClose(); err != nil {
+		t.Fatal(err)
+	}
+	kpWait(t, stageAt, "the publication held after its announcement")
+	go h.a.Close()
+	kpWait(t, h.a.Done(), "Done")
+	if r := awaitKey(t, "the request", out, kpLimit); !errors.Is(r.err, ap.ErrAccesspointClosed) {
+		t.Fatalf("the request = %v, want ErrAccesspointClosed", r.err)
+	}
+	releaseStage()
+	kpUntil(t, "the store completed", func() bool { g, _ := h.a.Generation(); return g == 2 })
+	if site := h.exit(t); site != "step0-done" && site != "step3-done" {
+		t.Fatalf("the receiver left at %s, want its Done fence", site)
+	}
+	if st := kpState(h.p); st.table != 0 || st.queue != 0 {
+		t.Fatalf("after Done: %+v", st)
+	}
+}
+
+// S27a: the writer held between its stamp and its write, before the send
+// lock: pings are answered and replies accepted meanwhile.
+func TestDDSonicContractWriterHeldBeforeSendLock(t *testing.T) {
+	h := newKP(t, nil)
+	out1 := requestKey(context.Background(), h.p)
+	req1 := h.sent(t, h.c, 0)
+	arrived, release := h.stampAfter.armSeq(t, 1)
+	out2 := requestKey(context.Background(), h.p)
+	kpWait(t, arrived, "R2 held before its write")
+	if err := h.c.Send(ap.PacketTypePing, []byte{0, 0, 0, 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := h.c.Wait(ap.PacketTypePong, kpLimit); !ok {
+		t.Fatal("no pong while the writer was held before the send lock")
+	}
+	if err := h.c.AnswerKey(req1, contractKey); err != nil {
+		t.Fatal(err)
+	}
+	kpKey(t, "R1", awaitKey(t, "R1", out1, kpLimit))
+	release()
+	req2 := h.sent(t, h.c, 1)
+	if err := h.c.AnswerKey(req2, contractKey); err != nil {
+		t.Fatal(err)
+	}
+	kpKey(t, "R2", awaitKey(t, "R2", out2, kpLimit))
+}
+
+// S27b: the writer holding the send lock in a blocked write. No progress is
+// claimed for pings; a reply delivered before the stall is answered, and a
+// publication before the stall is classified while the write stays blocked.
+func TestDDSonicContractWriterHoldingSendLock(t *testing.T) {
+	var gate *ap.DDSonicWriteGate
+	h := newKP(t, func(a *ap.Accesspoint) { gate = ap.DDSonicContractGateWrites(a) })
+	out0 := requestKey(context.Background(), h.p)
+	answer(t, h.c)
+	kpKey(t, "R0", awaitKey(t, "R0", out0, kpLimit))
+	out1 := requestKey(context.Background(), h.p)
+	h.sent(t, h.c, 1)
+	arrived, release := h.stampBefore.armSeq(t, 2)
+	out2 := requestKey(context.Background(), h.p)
+	kpWait(t, arrived, "R2 held after its snapshot of generation 1")
+	h.reconnect(t, 2)
+	kpReplaced(t, "R1", awaitKey(t, "R1", out1, kpLimit).err, 1, 2)
+	entered := gate.Arm()
+	t.Cleanup(gate.Release)
+	release()
+	kpWait(t, entered, "R2's write blocked holding the send lock")
+	kpReplaced(t, "R2", awaitKey(t, "R2", out2, kpLimit).err, 1, 2)
+	gate.Release()
+}
+
+// S3/S4 and L4's disposition: a write that fails while the access point is
+// open and its generation unchanged ends the request with KeySendError on
+// that generation, with the cause kept, the record gone and nothing sent
+// again. If the access point is done by the time L4 decides, and neither the
+// caller nor the receiver has ended the request first, L4 ends it with
+// ErrAccesspointClosed instead.
+func TestDDSonicContractWriteErrorDisposition(t *testing.T) {
+	injected := errors.New("ddsonic contract: injected write failure")
+	setup := func(t *testing.T) (*kpHarness, *ap.DDSonicWriteGate) {
+		var gate *ap.DDSonicWriteGate
+		h := newKP(t, func(a *ap.Accesspoint) { gate = ap.DDSonicContractGateWrites(a) })
+		t.Cleanup(gate.Release)
+		out := requestKey(context.Background(), h.p)
+		answer(t, h.c)
+		kpKey(t, "the first request", awaitKey(t, "the first request", out, kpLimit))
+		return h, gate
+	}
+
+	t.Run("unchanged generation", func(t *testing.T) {
+		h, gate := setup(t)
+		gate.Fail(injected)
+		out := requestKey(context.Background(), h.p)
+		r := awaitKey(t, "the request", out, kpLimit)
+		var kse *KeySendError
+		if !errors.As(r.err, &kse) || kse.Gen != 1 || !errors.Is(r.err, injected) {
+			t.Fatalf("the request = %v; want KeySendError on generation 1 wrapping the write's cause", r.err)
+		}
+		var cre *ConnectionReplacedError
+		if errors.As(r.err, &cre) {
+			t.Fatal("a write error on an unchanged generation was reported as a replacement")
+		}
+		if g, _ := h.a.Generation(); g != 1 {
+			t.Fatalf("generation %d: the test did not keep the generation unchanged", g)
+		}
+		if st := kpState(h.p); st.table != 0 || st.queue != 0 || st.next != 2 {
+			t.Fatalf("after the failed write: %+v", st)
+		}
+		time.Sleep(50 * time.Millisecond)
+		if n := h.stampCalls(1); n != 1 {
+			t.Fatalf("the request was attempted %d times, want once (no replay)", n)
+		}
+	})
+
+	t.Run("Done before L4", func(t *testing.T) {
+		h, gate := setup(t)
+		gate.Fail(injected)
+		waitAt, releaseWait := h.wait.armSeq(t, 1)
+		sendAt, releaseSend := h.afterSend.armSeq(t, 1)
+		out := requestKey(context.Background(), h.p)
+		kpWait(t, waitAt, "the caller held after the commit")
+		kpWait(t, sendAt, "the writer held after its failed write, before L4")
+		h.mu.Lock()
+		sendErr := h.sendErrs[1]
+		h.mu.Unlock()
+		if !errors.Is(sendErr, injected) || errors.Is(sendErr, ap.ErrAccesspointClosed) {
+			t.Fatalf("the write returned %v; want the injected failure, with the access point open", sendErr)
+		}
+		s0, releaseStep0 := h.step0.arm(t)
+		kick(h.p.kickR)
+		kpWait(t, s0, "the receiver held before its pass")
+		h.a.Close()
+		kpWait(t, h.a.Done(), "Done")
+		if r := kpRecord(h.p, 1); !r.live {
+			t.Fatal("the request ended before L4 decided")
+		}
+		releaseSend()
+		kpUntil(t, "L4's terminal", func() bool { return !kpRecord(h.p, 1).live })
+		releaseStep0()
+		releaseWait()
+		r := awaitKey(t, "the request", out, kpLimit)
+		var kse *KeySendError
+		if !errors.Is(r.err, ap.ErrAccesspointClosed) || errors.As(r.err, &kse) {
+			t.Fatalf("the request = %v; want ErrAccesspointClosed decided at L4", r.err)
+		}
+	})
+}
+
+// S17: the last sequence number, 0xffffffff, is issued once; the next
+// request is refused with ErrKeySequenceExhausted and writes nothing; a late
+// answer for the last number after its terminal is discarded.
+func TestDDSonicContractLastSequenceIssuedOnce(t *testing.T) {
+	h := newKP(t, nil)
+	first := requestKey(context.Background(), h.p)
+	answer(t, h.c)
+	kpKey(t, "the first request", awaitKey(t, "the first request", first, kpLimit))
+	h.p.mu.Lock()
+	h.p.next = 1<<32 - 1
+	h.p.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	last := requestKey(ctx, h.p)
+	req := h.sent(t, h.c, 0xffffffff)
+	if _, err := h.p.Request(context.Background(), make([]byte, 16), make([]byte, 20)); !errors.Is(err, ErrKeySequenceExhausted) {
+		t.Fatalf("the request after the last number = %v, want ErrKeySequenceExhausted", err)
+	}
+	if st := kpState(h.p); st.next != 1<<32 || st.table != 1 || st.queue != 0 {
+		t.Fatalf("after exhaustion: %+v; want next 2^32 and only the last request live", st)
+	}
+	cancel()
+	if r := awaitKey(t, "the last request", last, kpLimit); !errors.Is(r.err, context.Canceled) {
+		t.Fatalf("the last request = %v, want context.Canceled", r.err)
+	}
+	u0 := kpState(h.p).unknown
+	if err := h.c.AnswerKey(req, contractKey); err != nil {
+		t.Fatal(err)
+	}
+	kpUntil(t, "the late answer discarded", func() bool { return kpState(h.p).unknown == u0+1 })
+	if st := kpState(h.p); st.table != 0 {
+		t.Fatalf("the late answer revived the request: %+v", st)
+	}
+	if pkt, ok := h.c.Wait(ap.PacketTypeRequestKey, 200*time.Millisecond); ok {
+		t.Fatalf("a request was written after exhaustion: sequence %d", kpSeq(pkt))
+	}
+}
+
+// S13: the service's first subscription is held behind a reconnect. Callers
+// of an already-constructed provider are admitted and queued, nothing is
+// committed or written, and when they cancel they return at once with no
+// record left, while that subscription is still held.
+func TestDDSonicContractFirstRegistrationHeldCallersCancel(t *testing.T) {
+	f, a, c1 := agedAP(t)
+	service(a)
+	h := kpOn(f, a, c1, &librespot.NullLogger{})
+	hold := f.Hold()
+	t.Cleanup(hold)
+	if err := c1.PeerClose(); err != nil {
+		t.Fatal(err)
+	}
+	kpUntil(t, "a reconnect holding the connection lock", func() bool {
+		return ap.DDSonicStackHas("ap.(*Accesspoint).reconnect(")
+	})
+	const n = 4
+	var cancels []context.CancelFunc
+	var outs []<-chan keyResult
+	for i := 0; i < n; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancels = append(cancels, cancel)
+		outs = append(outs, requestKey(ctx, h.p))
+	}
+	kpUntil(t, "the first subscription waiting for the connection lock", func() bool {
+		return ap.DDSonicStackHas("audio.(*KeyProvider).receiver(", "sync.(*RWMutex).RLock(")
+	})
+	kpUntil(t, "every caller admitted", func() bool { st := kpState(h.p); return st.table == n && st.queue == n })
+	if st := kpState(h.p); st.registered {
+		t.Fatal("the receiver registered while its subscription was held")
+	}
+	for _, cancel := range cancels {
+		cancel()
+	}
+	for i, out := range outs {
+		if r := awaitKey(t, fmt.Sprintf("caller %d", i), out, kpLimit); !errors.Is(r.err, context.Canceled) {
+			t.Fatalf("caller %d = %v, want context.Canceled", i, r.err)
+		}
+	}
+	if st := kpState(h.p); st.table != 0 || st.queue != 0 || st.registered {
+		t.Fatalf("after the cancellations: %+v; want no records and the subscription still held", st)
+	}
+	if !ap.DDSonicStackHas("audio.(*KeyProvider).receiver(", "sync.(*RWMutex).RLock(") {
+		t.Fatal("the subscription was no longer held when the callers returned")
+	}
+	for seq := uint32(0); seq < n; seq++ {
+		if h.stampCalls(seq) != 0 {
+			t.Fatalf("request %d was committed", seq)
+		}
+	}
+	hold()
+	kpUntil(t, "the reconnect published", func() bool { g, _ := a.Generation(); return g == 2 })
+	kpUntil(t, "the receiver registered", func() bool { return kpState(h.p).registered })
+}
+
+// S6: a request admitted and queued behind a held write is cancelled before
+// the writer commits it: it returns with its context's error, its record is
+// gone, and it is never committed or written.
+func TestDDSonicContractQueuedRequestCancelledBeforeCommit(t *testing.T) {
+	h := newKP(t, nil)
+	first := requestKey(context.Background(), h.p)
+	answer(t, h.c)
+	kpKey(t, "the first request", awaitKey(t, "the first request", first, kpLimit))
+	arrived, release := h.stampAfter.armSeq(t, 1)
+	held := requestKey(context.Background(), h.p)
+	kpWait(t, arrived, "the writer held on request 1")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	queued := requestKey(ctx, h.p)
+	kpUntil(t, "request 2 admitted and queued", func() bool {
+		r := kpRecord(h.p, 2)
+		return r.live && r.state == keyAdmitted && kpState(h.p).queue == 1
+	})
+	cancel()
+	if r := awaitKey(t, "the queued request", queued, kpLimit); !errors.Is(r.err, context.Canceled) {
+		t.Fatalf("the queued request = %v, want context.Canceled", r.err)
+	}
+	if r, st := kpRecord(h.p, 2), kpState(h.p); r.live || st.queue != 0 {
+		t.Fatalf("after the cancellation: record %+v, state %+v", r, st)
+	}
+	release()
+	req := h.sent(t, h.c, 1)
+	if err := h.c.AnswerKey(req, contractKey); err != nil {
+		t.Fatal(err)
+	}
+	kpKey(t, "request 1", awaitKey(t, "request 1", held, kpLimit))
+	if pkt, ok := h.c.Wait(ap.PacketTypeRequestKey, 200*time.Millisecond); ok {
+		t.Fatalf("a cancelled request was written: sequence %d", kpSeq(pkt))
+	}
+	if h.stampCalls(2) != 0 {
+		t.Fatal("the cancelled request was committed")
+	}
+}

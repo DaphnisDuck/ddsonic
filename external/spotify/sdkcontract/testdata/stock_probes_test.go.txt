@@ -1,0 +1,296 @@
+package spotify
+
+// ddsonic composed STOCK probes (M3B2-S3c; plan v9 §4.3-4.4, §6.1 "Stock
+// I5", §8 I11, §9 step 15): the old product's I2 and I5 negatives, run on the
+// archived rc.4 package (P) with the shared core H' and the stock adapter.
+// Overlaid only in the stock stage, as
+// external/spotify/zz_ddsonic_composed_stock_probes_test.go: the composed
+// file prefix keeps every creator in Q, and this file has no go statement
+// (its workers start through h.Go).
+//
+// Each probe PASSES only when its red is shown. It first logs, for every
+// live precondition, "I11-PRECONDITION-OK: <row> <what>", then exactly one
+// "I11-STOCK-RED: <row> <what>". A precondition that does not hold is
+// t.Fatal "I11-PRECONDITION-FAIL" (a setup failure, never credit). A red
+// that is not shown is t.Error "I11-NOT-SHOWN" (never credit). The harness's
+// own failures (cleanup, poison, quiescence, T9) fail the test: setup.
+
+import (
+	"context"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/devgianlu/go-librespot/ap"
+)
+
+// stockLimit bounds each wait for a precondition.
+const stockLimit = 15 * time.Second
+
+// stockControlSeq is the consumption control's sequence: never requested
+// (the provider counts up from 0, one per request).
+const stockControlSeq uint32 = 0xFFFFFF00
+
+func stockPre(t *testing.T, row, what string) {
+	t.Helper()
+	t.Logf("I11-PRECONDITION-OK: %s %s", row, what)
+}
+
+func stockFail(t *testing.T, row, format string, args ...any) {
+	t.Helper()
+	t.Fatalf("I11-PRECONDITION-FAIL: %s "+format, append([]any{row}, args...)...)
+}
+
+// stockUntil polls cond every 10 ms until it holds or d passes.
+func stockUntil(d time.Duration, cond func() bool) bool {
+	for end := time.Now().Add(d); ; time.Sleep(10 * time.Millisecond) {
+		if cond() {
+			return true
+		}
+		if time.Now().After(end) {
+			return false
+		}
+	}
+}
+
+// stockSeq is a key request's sequence (the four bytes before the trailing
+// two, as F-AP's AnswerKey reads them).
+func stockSeq(req ap.Packet) uint32 {
+	p := req.Payload
+	return binary.BigEndian.Uint32(p[len(p)-6 : len(p)-2])
+}
+
+// stockP0 is P0, the stored startup: one SC with plan v9 §3.2's counts
+// (rc.4's session.go stored path is the current one's, and the SDK's
+// session package is unpatched in both). A difference is a precondition
+// failure, reported with its counts (STOP 8), never edited to fit.
+//
+// The exact snapshot is taken only after D10 has published the first
+// authenticated connection (R59-2): F-AP counts a login only after its
+// handshake has sent the welcome, so the client can return first, and
+// h.ap.Conn(0, …) returns only after that count and the connection's
+// registration. This is the row's one first-connection wait (5 s); the
+// connection is returned for the row to use.
+func stockP0(t *testing.T, h *composedHarness, p *SpotifyProvider, row string) *ap.DDSonicComposedConn {
+	t.Helper()
+	h.Phase("P0")
+	if err := p.ensureSession(); err != nil {
+		stockFail(t, row, "P0: the stored startup failed: %v", err)
+	}
+	c1 := h.ap.Conn(0, 5*time.Second)
+	if c1 == nil {
+		stockFail(t, row, "P0: D10 did not publish the first authenticated connection within 5 s")
+	}
+	r := h.router
+	got := fmt.Sprintf("A1=%d A2=%d A3=%d A7=%d A8=%d", r.Count("P0", "A1"), r.Count("P0", "A2"), r.Count("P0", "A3"), r.Count("P0", "A7"), r.Count("P0", "A8"))
+	d1, _, _, d5, _, _ := h.Counts()
+	acc, logins, viol := h.ap.Accepted(), h.ap.Logins(), len(r.Violations())
+	if got != "A1=1 A2=3 A3=1 A7=1 A8=0" || d1 != 1 || d5 != 0 || acc != 1 || logins != 1 || viol != 0 {
+		stockFail(t, row, "P0 SC: %s D1=%d D5=%d accepted=%d logins=%d violations=%d; want A1=1 A2=3 A3=1 A7=1 A8=0 D1=1 D5=0 accepted=1 logins=1 violations=0 (plan v9 §3.2)", got, d1, d5, acc, logins, viol)
+	}
+	stockPre(t, row, "P0 SC "+got+" D1=1 D5=0 accepted=1 logins=1 violations=0")
+	return c1
+}
+
+// TestDDSonicStockI2 is I11's I2 negative (plan v9 §8 I2, §4.4): the key
+// request on c1 is withheld, the peer closes c1, and the real reconnect
+// completes while the open is pending. rc.4 has no same-session reopen: the
+// open ends at the stock key provider's own 15 s window and the error is
+// returned, with one setup and no key request on c2. (The current product
+// reopens once: 2 setups, key writes c1=1 c2=1, I2.)
+func TestDDSonicStockI2(t *testing.T) {
+	const row = "StockI2"
+	tr := composedMP3Track(t, 40)
+	withComposed(t, composedOptions{}, func(h *composedHarness) {
+		h.fx.Add(tr)
+		p := h.Provider()
+		c1 := stockP0(t, h, p, row)
+		h.Phase("P1")
+		_, a := h.Bundle(p)
+		if a == nil || c1 == nil {
+			stockFail(t, row, "no bundle or no first connection")
+		}
+		d1Before, _, _, _, _, _ := h.Counts()
+		out := composedOpenAsync(h, "StockI2-play", p, tr.URI())
+		// W: the open's key request on c1, withheld (no auto key is set).
+		if _, ok := c1.Wait(ap.PacketTypeRequestKey, stockLimit); !ok {
+			stockFail(t, row, "W: the key request was not observed on c1")
+		}
+		atW := time.Now()
+		stockPre(t, row, "W the open's key request observed on c1; withheld")
+		// R: the peer closes c1; the real reconnect completes (F-AP's second
+		// connection and login 2) while the open is still pending, on the
+		// same live bundle.
+		if err := c1.C.PeerClose(); err != nil {
+			stockFail(t, row, "R: peer close: %v", err)
+		}
+		c2 := h.ap.Conn(1, stockLimit)
+		if c2 == nil || !stockUntil(stockLimit, func() bool { return h.ap.Logins() == 2 }) {
+			stockFail(t, row, "R: the reconnect did not complete (c2 %t, logins %d)", c2 != nil, h.ap.Logins())
+		}
+		if res, done := composedWithin(out, 0); done {
+			if res.s != nil {
+				h.KeepCloser(res.s)
+			}
+			stockFail(t, row, "R: the open had returned before the reconnect completed (%v)", res.err)
+		}
+		if _, b := h.Bundle(p); b != a || a.ctx.Err() != nil {
+			stockFail(t, row, "R: the original bundle is not current and live (same %t, ctx %v)", b == a, a.ctx.Err())
+		}
+		stockPre(t, row, "R c1 closed by the peer; c2 accepted and login 2 completed with the open pending, on the same live bundle")
+		// The outcome: bounded by 45 s (the window is 15 s from the request).
+		res, ok := composedWithin(out, 45*time.Second)
+		if !ok {
+			t.Errorf("I11-NOT-SHOWN: %s NewStreamer did not return within 45 s", row)
+			return
+		}
+		if res.s != nil {
+			h.KeepCloser(res.s)
+		}
+		// Settle: nothing reopens later.
+		time.Sleep(2 * time.Second)
+		d1, _, d3, d5, _, d4 := h.Counts()
+		_, b := h.Bundle(p)
+		k1, k2 := composedKeyWrites(h, 0), composedKeyWrites(h, 1)
+		if res.err == nil || res.s != nil || d3 != 1 || k1 != 1 || k2 != 0 || len(d4) != 0 || d1 != d1Before || d5 != 0 || b != a || a.ctx.Err() != nil {
+			t.Errorf("I11-NOT-SHOWN: %s want an error, no stream, 1 setup, key writes c1=1 c2=0, 0 rebuilds, D1 +0, D5 0, the same live bundle: err %v, stream %t, setups %d, key writes c1=%d c2=%d, rebuilds %v, D1 %d->%d, D5 %d, same %t, ctx %v",
+				row, res.err, res.s != nil, d3, k1, k2, d4, d1Before, d1, d5, b == a, a.ctx.Err())
+			return
+		}
+		t.Logf("I11-STOCK-RED: %s no same-session reopen after the connection was replaced: NewStreamer returned %q %s after the request was observed; setups 1; key writes c1=1 c2=0; rebuilds 0; D1 +0; the bundle unchanged and live",
+			row, res.err.Error(), res.at.Sub(atW).Round(time.Millisecond))
+	})
+}
+
+// TestDDSonicStockI5 is I11's I5 negative (plan v9 §6.1 "Stock I5"): the
+// E-direct W/C/R/N chronology on rc.4's Session.NewStream, then the
+// separate late-answer phase observed only through D9. The stock pump keeps
+// a cancelled request's record (v0.9.1 audio/provider.go: reqs is deleted
+// only when an answer for it arrives), so the late answer to the cancelled
+// sequence is taken with no invalid-sequence warning, and a repeat answer
+// for it then warns. (The current product drops the record at the
+// cancellation: both answers warn, I5-D.)
+func TestDDSonicStockI5(t *testing.T) {
+	const row = "StockI5"
+	tr := composedMP3Track(t, 41)
+	withComposed(t, composedOptions{}, func(h *composedHarness) {
+		d9 := h.installStockD9() // first: W1's condition (no constructor, no reader yet)
+		h.fx.Add(tr)
+		p := h.Provider()
+		c1 := stockP0(t, h, p, row)
+		if n := d9.Wrapped(); n != 1 {
+			stockFail(t, row, "D9: the one P0 constructor's opts.Log was not wrapped (wrapped %d)", n)
+		}
+		stockPre(t, row, "D9 installed before the first constructor; the one constructor's opts.Log wrapped")
+		h.Phase("P1")
+		s, a := h.Bundle(p)
+		if s == nil || a == nil || c1 == nil {
+			stockFail(t, row, "no session, no bundle or no first connection")
+		}
+		d1Before, _, _, _, _, _ := h.Counts()
+		// W: the open runs on A; its key request is received on c1.
+		ctx, cancel := h.Context()
+		out := make(chan error, 1)
+		h.Go("StockI5-open", func() {
+			_, sc, err := s.NewStream(ctx, tr.ID, 320)
+			if err == nil {
+				sc()
+			}
+			out <- err
+		})
+		pkt, ok := c1.Wait(ap.PacketTypeRequestKey, stockLimit)
+		if !ok {
+			stockFail(t, row, "W: the key request was not received on c1")
+		}
+		seq := stockSeq(pkt)
+		stockPre(t, row, fmt.Sprintf("W the open's key request (sequence %d) received on c1; withheld", seq))
+		// C: the test cancels its context.
+		cancel()
+		err, ok := composedWithin(out, 5*time.Second)
+		if !ok || !errors.Is(err, context.Canceled) {
+			stockFail(t, row, "C: NewStream returns context.Canceled: returned %t, err %v", ok, err)
+		}
+		// C, the setup worker (R58-1): nothing orders the worker's
+		// openHook("worker-before-publish") or its D3 Done before the
+		// caller's result, so both positive facts are awaited, together,
+		// under ONE deadline: the declared 1 s worker budget. D3's Done
+		// precedes the worker's deferred openHook, so the join is awaited
+		// first and the event is then polled for the rest of the same
+		// deadline (stockUntil checks once even when no time is left). Each
+		// is required; neither wait is extended or reset.
+		workerBy := time.Now().Add(time.Second)
+		joined := waitGroupWithin(&h.d3wg, time.Until(workerBy))
+		event := stockUntil(time.Until(workerBy), func() bool { return h.EventSeq("open:worker-before-publish") > 0 })
+		// R106-1: both facts are accepted only if both were observed before the
+		// same workerBy, checked once after both observations (stockUntil tests
+		// its condition before its timeout). A late observation fails this
+		// precondition; it is not proof that the worker returned late.
+		onTime := time.Now().Before(workerBy)
+		if !event || !joined || !onTime {
+			stockFail(t, row, "C: within 1 s, the setup worker's openHook(\"worker-before-publish\") recorded %t and its D3 work joined %t, both observed before the 1 s deadline %t (all required)", event, joined, onTime)
+		}
+		stockPre(t, row, "C NewStream returned context.Canceled; the setup worker returned")
+		keysAtC := composedKeyWrites(h, 0)
+		// R: the peer closes c1; c2 and login 2 follow; no answer is sent.
+		if err := c1.C.PeerClose(); err != nil {
+			stockFail(t, row, "R: peer close: %v", err)
+		}
+		c2 := h.ap.Conn(1, stockLimit)
+		if c2 == nil || !stockUntil(stockLimit, func() bool { return h.ap.Logins() == 2 }) {
+			stockFail(t, row, "R: the reconnect did not complete (c2 %t, logins %d)", c2 != nil, h.ap.Logins())
+		}
+		stockPre(t, row, "R c1 closed by the peer; c2 accepted and login 2 completed; no answer sent")
+		// N: 3 s with no play, no answer and no harness action.
+		time.Sleep(3 * time.Second)
+		_, b := h.Bundle(p)
+		d1, d2N, d3N, d5, _, d4 := h.Counts()
+		if b != a || a.ctx.Err() != nil || composedAPDoneOf(a) || len(d4) != 0 || d1 != d1Before || d5 != 0 ||
+			composedKeyWrites(h, 0) != keysAtC || composedKeyWrites(h, 1) != 0 || len(d9.Seqs()) != 0 {
+			stockFail(t, row, "N: A current and live, its AP not Done, D4 0, D1 +0, D5 0, no key packet since C, no D9 warning: same %t, ctx %v, AP done %t, D4 %v, D1 %d->%d, D5 %d, key packets since C c1 %d c2 %d, D9 %v",
+				b == a, a.ctx.Err(), composedAPDoneOf(a), d4, d1Before, d1, d5, composedKeyWrites(h, 0)-keysAtC, composedKeyWrites(h, 1), d9.Seqs())
+		}
+		// N, continued (the R51-1 predicate): the cancelled open's reference
+		// on A (b.users, rc.4 playback_ddsonic.go:216 and :226) is joined,
+		// bounded, while A is current and live; no new user is admitted (D2
+		// and D3 unchanged).
+		usersJoined := waitGroupWithin(&a.users, composedJoin)
+		_, d2U, d3U, _, _, _ := h.Counts()
+		_, bU := h.Bundle(p)
+		if !usersJoined || d2U != d2N || d3U != d3N || bU != a || a.ctx.Err() != nil {
+			stockFail(t, row, "N: A.users joined (0) with D2+0 D3+0, A current and live: joined %t, D2 +%d, D3 +%d, current %t, ctx %v", usersJoined, d2U-d2N, d3U-d3N, bU == a, a.ctx.Err())
+		}
+		stockPre(t, row, "N 3 s quiet: the same bundle A current and live, its AP not Done, D1 +0, D4 0, D5 0, no key packet since C, no D9 warning; A.users joined (0) with D2+0 D3+0")
+		// L-late, the separate late-answer phase observed only through D9:
+		// (1) F-AP answers the cancelled sequence on c2; (2) the consumption
+		// control: an answer for a sequence never requested, on c2 after it,
+		// which the pump must take after (1) and warn about; (3) the
+		// cancelled sequence is answered again.
+		if err := c2.C.AnswerKey(pkt, tr.Key); err != nil {
+			stockFail(t, row, "L-late: the late answer: %v", err)
+		}
+		ctl := append(binary.BigEndian.AppendUint32(nil, stockControlSeq), tr.Key...)
+		if err := c2.C.Send(ap.PacketTypeAesKey, ctl); err != nil {
+			stockFail(t, row, "L-late: the control answer: %v", err)
+		}
+		if !stockUntil(5*time.Second, func() bool { return d9.CountSeq(stockControlSeq) == 1 }) {
+			stockFail(t, row, "L-late: the control answer (sequence %d) was not counted by D9 within 5 s: D9 %v", stockControlSeq, d9.Seqs())
+		}
+		stockPre(t, row, fmt.Sprintf("L-late source and consumption control: D9 counted the stock provider's own warning (its exact format) for the never-requested sequence %d, answered on c2 after the late answer, so the pump had taken the late answer first", stockControlSeq))
+		late := d9.Seqs()
+		if err := c2.C.AnswerKey(pkt, tr.Key); err != nil {
+			stockFail(t, row, "L-late: the repeat answer: %v", err)
+		}
+		if !stockUntil(5*time.Second, func() bool { return len(d9.Seqs()) > len(late) }) {
+			stockFail(t, row, "L-late: the repeat answer for sequence %d was not taken within 5 s: D9 %v", seq, d9.Seqs())
+		}
+		final := d9.Seqs()
+		if len(late) != 1 || late[0] != stockControlSeq || len(final) != 2 || final[1] != seq {
+			t.Errorf("I11-NOT-SHOWN: %s want the late answer for sequence %d taken with no warning (D9 [%d] after the control), then the repeat answer warned (D9 [%d %d]): after the control %v, after the repeat %v",
+				row, seq, stockControlSeq, stockControlSeq, seq, late, final)
+			return
+		}
+		t.Logf("I11-STOCK-RED: %s the cancelled sequence %d's record outlived its cancellation: its late answer on c2 was taken with no invalid-sequence warning, and a repeat answer then found no record (D9 %v)", row, seq, final)
+	})
+}

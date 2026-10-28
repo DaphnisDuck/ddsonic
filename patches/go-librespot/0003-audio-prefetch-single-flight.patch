@@ -1,0 +1,78 @@
+--- a/audio/chunked-reader.go
++++ b/audio/chunked-reader.go
+@@ -1,3 +1,7 @@
++// Modified by ddsonic on 2026-10-15: single-flight prefetch admission. A
++// prefetch worker starts only after it reserves its chunk, and never waits on
++// the chunk's condition (patches/go-librespot/0003-audio-prefetch-single-flight.patch).
++
+ package audio
+ 
+ import (
+@@ -261,6 +265,9 @@
+ 	}
+ }
+ 
++// startPrefetch reserves chunk idx and starts its worker, or does nothing when
++// the chunk has data or an owner already. It reports false once the reader is
++// closed.
+ func (r *HttpChunkedReader) startPrefetch(idx int) bool {
+ 	r.prefetchMu.Lock()
+ 	defer r.prefetchMu.Unlock()
+@@ -269,15 +276,53 @@
+ 		return false
+ 	}
+ 
++	chunk := r.chunks[idx]
++	chunk.L.Lock()
++	defer chunk.L.Unlock()
++	if chunk.data != nil || chunk.fetching {
++		return true
++	}
++
++	chunk.fetching = true // the reservation, released only by its worker
+ 	r.prefetchWg.Add(1)
+-	go func() {
+-		defer r.prefetchWg.Done()
+-		_, _ = r.fetchChunk(idx)
+-	}()
++	go r.prefetchWorker(idx)
+ 
+ 	return true
+ }
+ 
++// prefetchWorker owns chunk idx's reservation from admission. On failure the
++// reservation is released and the worker's WaitGroup accounting ends in one
++// critical section, so a later admission of idx is ordered after this
++// worker's Done. On success the cached data forbids any further admission.
++func (r *HttpChunkedReader) prefetchWorker(idx int) {
++	chunk := r.chunks[idx]
++
++	var data []byte
++	err := net.ErrClosed
++	if !r.isClosed() {
++		data, err = r.downloadAndRead(idx)
++	}
++	if err != nil {
++		chunk.L.Lock()
++		chunk.fetching = false
++		chunk.Broadcast()
++		r.prefetchWg.Done()
++		chunk.L.Unlock()
++		return
++	}
++
++	chunk.L.Lock()
++	chunk.data = data
++	chunk.fetching = false
++	chunk.Broadcast()
++	chunk.L.Unlock()
++
++	r.markChunkComplete()
++
++	r.log.Debugf("fetched chunk %d/%d, size: %d", idx, len(r.chunks)-1, len(data))
++	r.prefetchWg.Done()
++}
++
+ func (r *HttpChunkedReader) Read(p []byte) (n int, err error) {
+ 	n, err = r.ReadAt(p, r.pos)
+ 	r.pos += int64(n)

@@ -1,0 +1,367 @@
+package audio
+
+// ddsonic composed-stage D7 (M3b2 plan v9 §2.7): the composed rows' view of
+// a key provider's request lifecycle (I5-D, I5-O, L5, I9, I10), and, for the
+// rows that need them (M3B2-S4 bundle, A-2), the SDK's own per-provider test
+// hooks: each write's stamp, the generation of the connection selected for
+// it and what its send returned; I10-OD's disclosed never-firing expiry
+// control; and I18's sequence exhaustion, set at the provider's pre-request
+// boundary. For the step-5 rows (M3B2-S5, G1) it also offers, by option
+// only, the SDK's own afterStamp, betweenL6L7 and passDone points as
+// one-shot holds (I26 pre-send, I28, I30), a window the test fires (I28,
+// I30, as the SDK contract's S32 and S37 fire theirs), and a read of one
+// record and of the announced generation. Like the other composed helpers
+// it exists only in the overlay the composed stage builds over a staged
+// copy of go-librespot (the active stage only; never in the stock O): no
+// shipped SDK byte changes. Nothing here is installed by default: a
+// provider nobody hooked keeps p.hooks == nil, as in production.
+
+import (
+	"errors"
+	"sync"
+	"time"
+)
+
+// DDSonicComposedKeyState is p's record table size, its writer queue length
+// and how many answers it took that found no live request, read together
+// under the provider's leaf lock.
+func DDSonicComposedKeyState(p *KeyProvider) (records, queue int, unknown uint64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.table), len(p.queue), p.unknown
+}
+
+// DDSonicComposedKeyAttempt is one write of a key request as the provider's
+// own hooks saw it (provider.go :325-337). Stamped: the stamp callback ran,
+// with the request's sequence and the generation of the connection selected
+// for it, before the write. Returned: SendStamped returned, with Err, and
+// APDone tells whether the access point was already Done at that moment. A
+// stamp is not a physical write: Err is what the write path returned, and a
+// send that returned before selecting a connection has no stamp.
+type DDSonicComposedKeyAttempt struct {
+	Seq      uint32
+	Gen      uint64
+	Stamped  bool
+	Returned bool
+	Err      error
+	APDone   bool
+}
+
+// DDSonicComposedKeyHooks are the hooks installed on one provider and what
+// they saw.
+type DDSonicComposedKeyHooks struct {
+	mu       sync.Mutex
+	attempts []DDSonicComposedKeyAttempt
+	armings  []uint32
+
+	// The step-5 options (G1); each is nil or false unless set.
+	p          *KeyProvider
+	holds      bool
+	onDemand   bool
+	windows    map[uint32]*ddsonicComposedWindow
+	afterStamp map[uint32]*ddsonicComposedHold
+	l6l7, pass *ddsonicComposedHold
+}
+
+// ddsonicComposedHold is one armed one-shot hold: the first call of its
+// point takes it, closes reached and waits for release; later calls pass.
+type ddsonicComposedHold struct {
+	reached chan struct{}
+	release chan struct{}
+	relOnce sync.Once
+}
+
+func newDDSonicComposedHold() *ddsonicComposedHold {
+	return &ddsonicComposedHold{reached: make(chan struct{}), release: make(chan struct{})}
+}
+
+// Release lets the hold's call through, once and for all; it is idempotent
+// and takes no lock (T1).
+func (x *ddsonicComposedHold) Release() { x.relOnce.Do(func() { close(x.release) }) }
+
+// wait is the taken hold's one call: it never runs under p.mu or k.mu.
+func (x *ddsonicComposedHold) wait() {
+	close(x.reached)
+	<-x.release
+}
+
+// ddsonicComposedWindow is one request's on-demand window.
+type ddsonicComposedWindow struct {
+	ch   chan time.Time
+	once sync.Once
+}
+
+// DDSonicComposedKeyOptions selects what DDSonicComposedInstallKeyHooksWith
+// installs. The zero value installs the write observation only.
+type DDSonicComposedKeyOptions struct {
+	// NeverExpire is I10-OD's disclosed control: a committed request's
+	// window never fires, in place of the SDK's 15 s keyWindow.
+	NeverExpire bool
+	// ExpireOnDemand (I28, I30) makes each committed request's window a
+	// channel that only Expire fires, in place of the SDK's 15 s keyWindow:
+	// a disclosed control of I10-OD's class, as S32 and S37 fire theirs.
+	ExpireOnDemand bool
+	// Holds (I26 pre-send, I28, I30) installs the SDK's afterStamp,
+	// betweenL6L7 and passDone points as holds that pass until armed.
+	Holds bool
+}
+
+// take removes and returns the armed hold *x, if any, under k.mu.
+func (k *DDSonicComposedKeyHooks) take(x **ddsonicComposedHold) *ddsonicComposedHold {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	h := *x
+	*x = nil
+	return h
+}
+
+// arm arms *x with a new hold; one at a time, and only with Holds.
+func (k *DDSonicComposedKeyHooks) arm(x **ddsonicComposedHold, what string) (reached <-chan struct{}, release func(), err error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if !k.holds {
+		return nil, nil, errors.New("ddsonic composed: " + what + ": the key hooks were installed without Holds")
+	}
+	if *x != nil {
+		return nil, nil, errors.New("ddsonic composed: " + what + " is already armed")
+	}
+	h := newDDSonicComposedHold()
+	*x = h
+	return h.reached, h.Release, nil
+}
+
+// ArmAfterStamp holds the write of sequence seq at the SDK's afterStamp
+// point: after L3.5 stamped the record with its selected connection's
+// generation, before the write is attempted (provider.go :322-330), outside
+// p.mu. One-shot: the first call for seq waits for release.
+func (k *DDSonicComposedKeyHooks) ArmAfterStamp(seq uint32) (reached <-chan struct{}, release func(), err error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if !k.holds {
+		return nil, nil, errors.New("ddsonic composed: afterStamp: the key hooks were installed without Holds")
+	}
+	if k.afterStamp[seq] != nil {
+		return nil, nil, errors.New("ddsonic composed: afterStamp is already armed for this sequence")
+	}
+	h := newDDSonicComposedHold()
+	k.afterStamp[seq] = h
+	return h.reached, h.Release, nil
+}
+
+// ArmBetweenL6L7 holds the receiver's next pass at the SDK's betweenL6L7
+// point: after its L6 section against its snapshot, before L7, with p.mu
+// released (provider.go :528-542). One-shot.
+func (k *DDSonicComposedKeyHooks) ArmBetweenL6L7() (reached <-chan struct{}, release func(), err error) {
+	return k.arm(&k.l6l7, "betweenL6L7")
+}
+
+// ArmPassDone holds the receiver's next pass at the SDK's passDone point:
+// after its step 2 (L6 and L7) completed, with p.mu released (provider.go
+// :447-450). One-shot.
+func (k *DDSonicComposedKeyHooks) ArmPassDone() (reached <-chan struct{}, release func(), err error) {
+	return k.arm(&k.pass, "passDone")
+}
+
+// window is seq's on-demand window, made on first use; k.mu is held.
+func (k *DDSonicComposedKeyHooks) window(seq uint32) *ddsonicComposedWindow {
+	w := k.windows[seq]
+	if w == nil {
+		w = &ddsonicComposedWindow{ch: make(chan time.Time)}
+		k.windows[seq] = w
+	}
+	return w
+}
+
+// Expire fires sequence seq's on-demand window (ExpireOnDemand only): its
+// Request takes the SDK's own expiry branch (provider.go :232-241). It is
+// idempotent; a window fired before its request armed it fires at arming.
+func (k *DDSonicComposedKeyHooks) Expire(seq uint32) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if !k.onDemand {
+		return errors.New("ddsonic composed: Expire: the key hooks were installed without ExpireOnDemand")
+	}
+	w := k.window(seq)
+	w.once.Do(func() { close(w.ch) })
+	return nil
+}
+
+// DDSonicComposedKeyRecord is one live record as the provider holds it,
+// read under p.mu. Live false: the record is not (or no longer) in the
+// table; a terminal record leaves it (L2, provider.go :276-291).
+type DDSonicComposedKeyRecord struct {
+	Live     bool
+	State    string // admitted, committed, writing, sent
+	Stamp    uint64
+	Expiring bool
+}
+
+// Record reads sequence seq's record under the provider's leaf lock. It is
+// never called from a hook.
+func (k *DDSonicComposedKeyHooks) Record(seq uint32) DDSonicComposedKeyRecord {
+	p := k.p
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	r, ok := p.table[seq]
+	if !ok {
+		return DDSonicComposedKeyRecord{}
+	}
+	state := "terminal"
+	switch r.state {
+	case keyAdmitted:
+		state = "admitted"
+	case keyCommitted:
+		state = "committed"
+	case keyWriting:
+		state = "writing"
+	case keySent:
+		state = "sent"
+	}
+	return DDSonicComposedKeyRecord{Live: true, State: state, Stamp: r.stamp, Expiring: r.expiring}
+}
+
+// KickReceiver makes the provider's receiver run one more pass, with the
+// SDK's own non-blocking kick on its kickR channel (provider.go :165-170),
+// as S32 and S37 do: a pass that would happen at the next kick anyway,
+// brought forward so that an armed hold is reached before the test induces
+// anything. It changes no record and no classification.
+func (k *DDSonicComposedKeyHooks) KickReceiver() { kick(k.p.kickR) }
+
+// Pending is the highest generation the access point has announced to the
+// provider (provider.go :155-163), read under its leaf lock.
+func (k *DDSonicComposedKeyHooks) Pending() uint64 {
+	k.p.mu.Lock()
+	defer k.p.mu.Unlock()
+	return k.p.pendingGen
+}
+
+// Attempts is a copy of the writes seen so far, in order.
+func (k *DDSonicComposedKeyHooks) Attempts() []DDSonicComposedKeyAttempt {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return append([]DDSonicComposedKeyAttempt(nil), k.attempts...)
+}
+
+// Armings are the sequences whose window the never-firing expiry control
+// replaced (I10-OD), in order.
+func (k *DDSonicComposedKeyHooks) Armings() []uint32 {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return append([]uint32(nil), k.armings...)
+}
+
+// DDSonicComposedInstallKeyHooks installs the SDK's keyHooks on p: the write
+// observation and, when neverExpire is set, I10-OD's disclosed control, a
+// committed request's window that never fires in place of the SDK's 15 s
+// keyWindow (provider.go :213-219), each arming recorded. Production has no
+// hooks; the SDK requires a test to set them before the provider's first
+// request (provider.go :114-117), so a provider that already has hooks, or
+// has admitted a request, is refused. The hooks take only their own lock and
+// never wait.
+func DDSonicComposedInstallKeyHooks(p *KeyProvider, neverExpire bool) (*DDSonicComposedKeyHooks, error) {
+	return DDSonicComposedInstallKeyHooksWith(p, DDSonicComposedKeyOptions{NeverExpire: neverExpire})
+}
+
+// DDSonicComposedInstallKeyHooksWith is DDSonicComposedInstallKeyHooks with
+// the step-5 options (G1). With only NeverExpire it installs exactly what
+// DDSonicComposedInstallKeyHooks always did: afterStamp, betweenL6L7 and
+// passDone stay nil. Holds adds those three points, each passing until
+// armed; ExpireOnDemand replaces the window by one Expire fires. An armed
+// hold waits outside p.mu and k.mu, and only in its own call; nothing else
+// here waits. NeverExpire and ExpireOnDemand exclude each other.
+func DDSonicComposedInstallKeyHooksWith(p *KeyProvider, o DDSonicComposedKeyOptions) (*DDSonicComposedKeyHooks, error) {
+	if o.NeverExpire && o.ExpireOnDemand {
+		return nil, errors.New("ddsonic composed: NeverExpire and ExpireOnDemand exclude each other")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.hooks != nil || p.next != 0 {
+		return nil, errors.New("ddsonic composed: key hooks must be installed before the provider's first request")
+	}
+	k := &DDSonicComposedKeyHooks{
+		p:          p,
+		holds:      o.Holds,
+		onDemand:   o.ExpireOnDemand,
+		windows:    map[uint32]*ddsonicComposedWindow{},
+		afterStamp: map[uint32]*ddsonicComposedHold{},
+	}
+	hooks := &keyHooks{
+		beforeStamp: func(seq uint32, gen uint64) {
+			k.mu.Lock()
+			k.attempts = append(k.attempts, DDSonicComposedKeyAttempt{Seq: seq, Gen: gen, Stamped: true})
+			k.mu.Unlock()
+		},
+		afterSend: func(seq uint32, err error) {
+			done := false
+			select {
+			case <-p.ap.Done():
+				done = true
+			default:
+			}
+			k.mu.Lock()
+			defer k.mu.Unlock()
+			for i := len(k.attempts) - 1; i >= 0; i-- {
+				if a := &k.attempts[i]; a.Seq == seq && a.Stamped && !a.Returned {
+					a.Returned, a.Err, a.APDone = true, err, done
+					return
+				}
+			}
+			k.attempts = append(k.attempts, DDSonicComposedKeyAttempt{Seq: seq, Returned: true, Err: err, APDone: done})
+		},
+	}
+	if o.NeverExpire {
+		never := make(chan time.Time)
+		hooks.expiry = func(seq uint32) <-chan time.Time {
+			k.mu.Lock()
+			k.armings = append(k.armings, seq)
+			k.mu.Unlock()
+			return never
+		}
+	}
+	if o.ExpireOnDemand {
+		hooks.expiry = func(seq uint32) <-chan time.Time {
+			k.mu.Lock()
+			defer k.mu.Unlock()
+			k.armings = append(k.armings, seq)
+			return k.window(seq).ch
+		}
+	}
+	if o.Holds {
+		hooks.afterStamp = func(seq uint32) {
+			k.mu.Lock()
+			h := k.afterStamp[seq]
+			delete(k.afterStamp, seq)
+			k.mu.Unlock()
+			if h != nil {
+				h.wait()
+			}
+		}
+		hooks.betweenL6L7 = func() {
+			if h := k.take(&k.l6l7); h != nil {
+				h.wait()
+			}
+		}
+		hooks.passDone = func() {
+			if h := k.take(&k.pass); h != nil {
+				h.wait()
+			}
+		}
+	}
+	p.hooks = hooks
+	return k, nil
+}
+
+// DDSonicComposedExhaust sets p's sequence allocator to its end, at the
+// provider's pre-request boundary and under its own lock, so that its next
+// real admission returns the SDK's own ErrKeySequenceExhausted (provider.go
+// :255-260). The allocator's check is unchanged; a provider that has
+// admitted a request is refused.
+func DDSonicComposedExhaust(p *KeyProvider) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.next != 0 || len(p.table) != 0 {
+		return errors.New("ddsonic composed: the provider has already admitted a request")
+	}
+	p.next = 1 << 32
+	return nil
+}

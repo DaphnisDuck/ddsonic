@@ -1,0 +1,1512 @@
+package audio
+
+// ddsonic: the reader correction's contract (patch 0003; design
+// reader-correction-design-proposal-rev5 sections 8-9, review 41). C1-C10
+// drive the real HttpChunkedReader over a real loopback HTTP server and
+// observe its goroutines from complete stack snapshots.
+//
+// Every assertion prints one line "ASSERT <id> expect=<..> actual=<..> PASS"
+// or, failing, "... RED [<id>]". A test that cannot establish its positive
+// precondition fails with "SETUP:", which is never a behavioural red.
+//
+// Populations (rev5 section 8.1), each from one complete snapshot S:
+//   - PF(S): every goroutine created by (*HttpChunkedReader).startPrefetch,
+//     in any state, retirees included;
+//   - FG(S): the test's own reader callers (HIST ids) still live in S;
+//   - ROSTER(S): PF, FG and any other goroutine whose frames reference a
+//     *HttpChunkedReader method.
+// HIST, the caller id and result records, is never counted.
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"regexp"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	librespot "github.com/devgianlu/go-librespot"
+)
+
+// The predeclared limits (the sealed manifest binds the same values).
+const (
+	pfSetupPoll    = 10 * time.Second // every positive precondition and cut
+	pfC3Quiesce    = 4 * time.Second  // C3': full-roster quiescence after the cut
+	pfC6Foreground = 9 * time.Second  // C6: the foreground's error after the cut
+	pfC6Quiesce    = 4 * time.Second  // C6: full-roster quiescence after it returns
+	pfC9Foreground = 5 * time.Second  // C9: the foreground phase's error
+	pfC10Wait      = 1 * time.Second  // C10: prefetchWg.Wait after the release
+	pfC5Close      = 5 * time.Second  // C5: each direct Close returns
+	pfC8Wake       = 5 * time.Second  // C8: the parked foreground's result
+	pfCleanup      = 5 * time.Second  // cleanup after a recorded result
+)
+
+// ddsonicPrefetchM1Gate is read only by the scratch mutant M1, never shipped:
+// its failure path waits here between Unlock and Done.
+var ddsonicPrefetchM1Gate chan struct{}
+
+func ddsonicPrefetchM1Wait() {
+	if g := ddsonicPrefetchM1Gate; g != nil {
+		<-g
+	}
+}
+
+// ---- assertions ----
+
+func pfAssert(t *testing.T, id string, ok bool, expect, actual string) {
+	t.Helper()
+	if ok {
+		t.Logf("ASSERT %s expect=%s actual=%s PASS", id, expect, actual)
+		return
+	}
+	t.Errorf("ASSERT %s expect=%s actual=%s RED [%s]", id, expect, actual, id)
+}
+
+// ---- the loopback CDN ----
+
+type pfAction int
+
+const (
+	pfServe pfAction = iota
+	pfHold
+	pfFail500
+	pfTruncate
+)
+
+func (a pfAction) String() string {
+	return [...]string{"serve", "hold", "500", "truncate"}[a]
+}
+
+type pfReceipt struct {
+	id     string
+	chunk  int
+	action pfAction
+}
+
+type pfHoldGate struct {
+	ch  chan struct{}
+	how pfAction
+}
+
+type pfServer struct {
+	data []byte
+	srv  *httptest.Server
+
+	mu       sync.Mutex
+	script   map[int][]pfAction // per chunk; consumed per request, the last stays
+	receipts []pfReceipt
+	holds    map[int]*pfHoldGate
+	held     map[int]int // requests waiting at a chunk's hold now
+}
+
+var pfRange = regexp.MustCompile(`^bytes=(\d+)-(\d+)$`)
+
+func newPFServer(t *testing.T, data []byte, script map[int][]pfAction) *pfServer {
+	s := &pfServer{data: data, script: script, holds: map[int]*pfHoldGate{}, held: map[int]int{}}
+	s.srv = httptest.NewServer(s)
+	return s
+}
+
+func (s *pfServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	m := pfRange.FindStringSubmatch(r.Header.Get("Range"))
+	if m == nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	start, _ := strconv.Atoi(m[1])
+	end, _ := strconv.Atoi(m[2])
+	end = min(end, len(s.data)-1)
+	chunk := start / DefaultChunkSize
+	s.mu.Lock()
+	act := pfServe
+	if q := s.script[chunk]; len(q) > 0 {
+		act = q[0]
+		if len(q) > 1 {
+			s.script[chunk] = q[1:]
+		}
+	}
+	// The receipt is recorded before the script is acted on.
+	s.receipts = append(s.receipts, pfReceipt{r.Header.Get("X-Pf-Attempt"), chunk, act})
+	var gate *pfHoldGate
+	if act == pfHold {
+		gate = s.holds[chunk]
+		if gate == nil {
+			gate = &pfHoldGate{ch: make(chan struct{})}
+			s.holds[chunk] = gate
+		}
+		s.held[chunk]++
+	}
+	s.mu.Unlock()
+	if gate != nil {
+		select {
+		case <-gate.ch:
+			act = gate.how
+		case <-r.Context().Done():
+			s.mu.Lock()
+			s.held[chunk]--
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Lock()
+		s.held[chunk]--
+		s.mu.Unlock()
+	}
+	switch act {
+	case pfFail500:
+		w.WriteHeader(http.StatusInternalServerError)
+	case pfServe, pfTruncate:
+		body := s.data[start : end+1]
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(s.data)))
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(http.StatusPartialContent)
+		if act == pfTruncate {
+			_, _ = w.Write(body[:len(body)/2])
+			w.(http.Flusher).Flush()
+			panic(http.ErrAbortHandler) // the connection is cut mid-body
+		}
+		_, _ = w.Write(body)
+	}
+}
+
+// release lets every request held at chunk's hold continue as how.
+func (s *pfServer) release(chunk int, how pfAction) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if g := s.holds[chunk]; g != nil {
+		g.how = how
+		close(g.ch)
+		delete(s.holds, chunk)
+	}
+}
+
+func (s *pfServer) setScript(chunk int, acts ...pfAction) {
+	s.mu.Lock()
+	s.script[chunk] = acts
+	s.mu.Unlock()
+}
+
+func (s *pfServer) heldCount(chunk int) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.held[chunk]
+}
+
+func (s *pfServer) receiptsFor(chunk int) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, r := range s.receipts {
+		if r.chunk == chunk {
+			n++
+		}
+	}
+	return n
+}
+
+func (s *pfServer) receiptIDs() (all map[string]bool, n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	all = map[string]bool{}
+	for _, r := range s.receipts {
+		all[r.id] = true
+	}
+	return all, len(s.receipts)
+}
+
+func (s *pfServer) releaseAll() {
+	s.mu.Lock()
+	chunks := make([]int, 0, len(s.holds))
+	for c := range s.holds {
+		chunks = append(chunks, c)
+	}
+	s.mu.Unlock()
+	for _, c := range chunks {
+		s.release(c, pfServe)
+	}
+}
+
+// ---- the client side: raw outcomes, recorded before they are returned ----
+
+type pfAttempt struct {
+	id       int64
+	chunk    int
+	ctxErr   string // the request context's state at entry
+	terr     error  // the transport's error
+	status   int
+	clen     int64
+	crange   string
+	body     int64 // bytes read
+	bodyErr  error // the terminal Read error, verbatim
+	bodyDone bool
+	closeErr error
+	closed   bool
+}
+
+type pfRecorder struct {
+	base http.RoundTripper
+	mu   sync.Mutex
+	seq  int64
+	atts []*pfAttempt
+}
+
+func pfRangeChunk(h string) int {
+	if m := pfRange.FindStringSubmatch(h); m != nil {
+		start, _ := strconv.Atoi(m[1])
+		return start / DefaultChunkSize
+	}
+	return -1
+}
+
+func (rc *pfRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
+	a := &pfAttempt{chunk: pfRangeChunk(req.Header.Get("Range"))}
+	if e := req.Context().Err(); e != nil {
+		a.ctxErr = e.Error()
+	}
+	rc.mu.Lock()
+	rc.seq++
+	a.id = rc.seq
+	rc.atts = append(rc.atts, a)
+	rc.mu.Unlock()
+	out := req.Clone(req.Context())
+	out.Header.Set("X-Pf-Attempt", strconv.FormatInt(a.id, 10))
+	resp, err := rc.base.RoundTrip(out)
+	rc.mu.Lock()
+	if err != nil {
+		a.terr = err
+	} else {
+		a.status, a.clen, a.crange = resp.StatusCode, resp.ContentLength, resp.Header.Get("Content-Range")
+		resp.Body = &pfBody{rc: rc, a: a, rd: resp.Body}
+	}
+	rc.mu.Unlock()
+	return resp, err
+}
+
+type pfBody struct {
+	rc *pfRecorder
+	a  *pfAttempt
+	rd io.ReadCloser
+}
+
+func (b *pfBody) Read(p []byte) (int, error) {
+	n, err := b.rd.Read(p)
+	b.rc.mu.Lock()
+	b.a.body += int64(n)
+	if err != nil && !b.a.bodyDone {
+		b.a.bodyErr, b.a.bodyDone = err, true
+	}
+	b.rc.mu.Unlock()
+	return n, err
+}
+
+func (b *pfBody) Close() error {
+	err := b.rd.Close()
+	b.rc.mu.Lock()
+	b.a.closeErr, b.a.closed = err, true
+	b.rc.mu.Unlock()
+	return err
+}
+
+func (rc *pfRecorder) snapshot() []pfAttempt {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	out := make([]pfAttempt, len(rc.atts))
+	for i, a := range rc.atts {
+		out[i] = *a
+	}
+	return out
+}
+
+var pfContentRange = regexp.MustCompile(`^bytes (\d+)-(\d+)/(\d+)$`)
+
+// pfClassify is the client-outcome classifier (rev5 section 4.5): exact
+// io.EOF with status 206 and the declared and expected lengths is SUCCESS.
+func pfClassify(a pfAttempt) string {
+	switch {
+	case a.terr != nil:
+		return "FAILURE"
+	case a.status == 0:
+		return "PENDING"
+	case a.status != http.StatusPartialContent:
+		return "FAILURE"
+	}
+	m := pfContentRange.FindStringSubmatch(a.crange)
+	if m == nil {
+		return "NOT-EVALUABLE"
+	}
+	from, _ := strconv.ParseInt(m[1], 10, 64)
+	to, _ := strconv.ParseInt(m[2], 10, 64)
+	switch {
+	case !a.bodyDone:
+		return "PENDING"
+	case a.bodyErr == io.EOF && a.body == a.clen && a.clen == to-from+1:
+		return "SUCCESS"
+	default:
+		return "FAILURE"
+	}
+}
+
+// pfEligible is the eligibility rule: a chunk with a FAILURE or an
+// unclassifiable record is NOT EVALUABLE.
+func pfEligible(atts []pfAttempt, chunk int) string {
+	for _, a := range atts {
+		if a.chunk != chunk {
+			continue
+		}
+		if c := pfClassify(a); c == "FAILURE" || c == "NOT-EVALUABLE" {
+			return "NOT-EVALUABLE"
+		}
+	}
+	return "EVALUABLE"
+}
+
+func pfTerminal(a pfAttempt) bool {
+	return a.terr != nil || (a.status != 0 && (a.status != http.StatusPartialContent || a.bodyDone))
+}
+
+// pfLife is ddsonic's stream transport in miniature (S/session.go:85-96):
+// every request is put on the stream's own context, above the recorder.
+type pfLife struct {
+	life context.Context
+	rc   *pfRecorder
+}
+
+func (l pfLife) RoundTrip(req *http.Request) (*http.Response, error) {
+	return l.rc.RoundTrip(req.Clone(l.life))
+}
+
+// ---- stack snapshots ----
+
+type pfG struct {
+	id      int64
+	state   string
+	creator string
+	text    string
+}
+
+var (
+	pfHeader    = regexp.MustCompile(`^goroutine (\d+) \[([^\]]*)\]:`)
+	pfCreatedBy = regexp.MustCompile(`(?m)^created by (\S+)`)
+)
+
+// pfSnapshot is one complete, untruncated runtime.Stack(all) snapshot. The
+// world is restarted before it returns; nothing here relies on it staying
+// stopped.
+func pfSnapshot() []pfG {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	var gs []pfG
+	for _, block := range strings.Split(string(buf), "\n\n") {
+		m := pfHeader.FindStringSubmatch(block)
+		if m == nil {
+			continue
+		}
+		id, _ := strconv.ParseInt(m[1], 10, 64)
+		g := pfG{id: id, state: strings.TrimSpace(strings.SplitN(m[2], ",", 2)[0]), text: block}
+		if c := pfCreatedBy.FindStringSubmatch(block); c != nil {
+			g.creator = c[1]
+		}
+		gs = append(gs, g)
+	}
+	return gs
+}
+
+func pfSelfID() int64 {
+	buf := make([]byte, 64)
+	buf = buf[:runtime.Stack(buf, false)]
+	id, _ := strconv.ParseInt(strings.Fields(string(buf))[1], 10, 64)
+	return id
+}
+
+const pfReaderType = "audio.(*HttpChunkedReader)."
+
+// pfFrameArgs returns the arguments of the first frame of fn, and whether
+// the frame is present.
+func pfFrameArgs(g pfG, fn string) ([]string, bool) {
+	for _, line := range strings.Split(g.text, "\n") {
+		if strings.HasPrefix(line, "\t") || strings.HasPrefix(line, "created by") {
+			continue
+		}
+		i := strings.Index(line, fn+"(")
+		if i < 0 {
+			continue
+		}
+		args := strings.TrimSuffix(line[i+len(fn)+1:], ")")
+		return strings.Split(args, ", "), true
+	}
+	return nil, false
+}
+
+// pfArgValue reads one traceback argument. An argument the traceback marks
+// "?" (its slot may be stale; Go 1.27.2 runtime/traceback.go:668-699) or
+// elides is never evidence, even when its text matches: reliable is false.
+func pfArgValue(a string) (v int64, reliable bool) {
+	if strings.HasSuffix(a, "?") || a == "..." || a == "_" {
+		return 0, false
+	}
+	u, err := strconv.ParseUint(strings.TrimPrefix(a, "0x"), 16, 64)
+	if err != nil {
+		return 0, false
+	}
+	return int64(u), true
+}
+
+// pfChunk is the chunk a reader goroutine works on, from its prefetchWorker,
+// fetchChunk or downloadChunk frame, and whether the argument is reliable.
+func pfChunk(g pfG) (int, bool) {
+	for _, fn := range []string{pfReaderType + "prefetchWorker", pfReaderType + "fetchChunk", pfReaderType + "downloadChunk"} {
+		args, ok := pfFrameArgs(g, fn)
+		if !ok || len(args) < 2 {
+			continue
+		}
+		v, reliable := pfArgValue(args[1])
+		if !reliable {
+			return -1, false
+		}
+		return int(v), true
+	}
+	return -1, false
+}
+
+func pfIsPF(g pfG) bool { return strings.HasSuffix(g.creator, pfReaderType+"startPrefetch") }
+
+func pfInHTTP(g pfG) bool { return strings.Contains(g.text, "net/http.(*") }
+
+func pfHas(g pfG, fn string) bool { _, ok := pfFrameArgs(g, pfReaderType+fn); return ok }
+
+func pfRefsReader(g pfG) bool { return strings.Contains(g.text, pfReaderType) }
+
+// on is the positive attribution of a reader goroutine to chunk c, for
+// P-HELD, P-SDKWAIT, P-FG and P-CUT. A reliable argument must equal c. An
+// unreliable one is attributed only through the controlled subject: c is the
+// test's single admissible prefetch chunk (e.only; every test that uses
+// these predicates reads only inside chunk n-2), so no other chunk can be
+// prefetched or waited on. Anything else is no attribution.
+func (e *pfEnv) on(g pfG, c int) bool {
+	got, reliable := pfChunk(g)
+	if reliable {
+		return got == c
+	}
+	return c == e.only
+}
+
+// ---- the test caller registry (HIST) ----
+
+type pfCaller struct {
+	id   int64
+	done chan struct{}
+	n    int
+	err  error
+	buf  []byte
+	// started and finished are recorded by the caller goroutine itself,
+	// immediately before and after its reader work (review 42 R42-4).
+	started, finished time.Time
+}
+
+type pfHist struct {
+	mu      sync.Mutex
+	callers map[int64]*pfCaller
+}
+
+func (h *pfHist) start(fn func(c *pfCaller)) *pfCaller {
+	c := &pfCaller{done: make(chan struct{})}
+	ready := make(chan struct{})
+	go func() {
+		c.id = pfSelfID()
+		h.mu.Lock()
+		h.callers[c.id] = c
+		h.mu.Unlock()
+		c.started = time.Now()
+		close(ready)
+		fn(c)
+		c.finished = time.Now()
+		close(c.done)
+	}()
+	<-ready
+	return c
+}
+
+// pfAwait waits for the caller's result until deadline, which the caller
+// anchors to its own recorded start, and reports whether it COMPLETED: true
+// only once c.done has been received, so its result fields are synchronized.
+// Completion is not timeliness (review 43 R43-2): pfForeground judges that
+// from the recorded finish.
+func pfAwait(c *pfCaller, deadline time.Time) bool {
+	select {
+	case <-c.done:
+		return true
+	case <-time.After(time.Until(deadline)):
+	}
+	select {
+	case <-c.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// pfJoinOrReport is the bounded failure cleanup (review 42 R42-4): it waits at
+// most d more for the caller, and returns "" when it returned, otherwise a
+// report of the caller still live. It never blocks past d.
+func pfJoinOrReport(c *pfCaller, d time.Duration) string {
+	select {
+	case <-c.done:
+		return ""
+	case <-time.After(d):
+		return fmt.Sprintf("caller goroutine %d still live %v after its bound", c.id, d)
+	}
+}
+
+// pfFGResult is a foreground caller's outcome against a deadline anchored to
+// its recorded start (review 43). Its fields are copied from the caller only
+// after c.done has been received; an uncompleted caller's result memory is
+// never read.
+type pfFGResult struct {
+	completed bool   // c.done was received: the result is synchronized
+	onTime    bool   // completed, and the recorded finish is not after the deadline
+	err       error  // the caller's error; nil when not completed
+	actual    string // the reported value, built from synchronized fields only
+}
+
+// pfForeground observes c until deadline (R43-1, R43-2). Timeliness is the
+// caller's own recorded finish against the deadline, not the observer's
+// clock: an on-time finish observed late stays on time, and a finish after
+// the deadline is late even if it is observed as already complete.
+func pfForeground(c *pfCaller, deadline time.Time) pfFGResult {
+	limit := deadline.Sub(c.started)
+	if !pfAwait(c, deadline) {
+		return pfFGResult{actual: fmt.Sprintf("not completed within %v of its start; result unavailable (not read)", limit)}
+	}
+	r := pfFGResult{completed: true, onTime: !c.finished.After(deadline), err: c.err}
+	r.actual = fmt.Sprintf("completed after %v (limit %v, on-time=%t) err=%v", c.finished.Sub(c.started).Round(time.Millisecond), limit, r.onTime, c.err)
+	return r
+}
+
+// pfC9FG is C9-FG's predicate: an on-time completion carrying the chunk
+// status error.
+func pfC9FG(r pfFGResult) bool {
+	return r.onTime && r.err != nil && strings.Contains(r.err.Error(), "unexpected chunk response status")
+}
+
+func (h *pfHist) get(id int64) *pfCaller {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.callers[id]
+}
+
+func pfReturned(c *pfCaller) bool {
+	select {
+	case <-c.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// ---- the environment of one test ----
+
+type pfEnv struct {
+	t    *testing.T
+	srv  *pfServer
+	rc   *pfRecorder
+	r    *HttpChunkedReader
+	self int64
+	hist *pfHist
+	n    int
+	only int    // the single admissible prefetch chunk (n-1)
+	recv string // the tested reader, as %p
+	// strictChunk: every reader call of the test reads inside chunk n-2 (or
+	// n-1, for its named foreground), so prefetchChunks (chunked-reader.go
+	// :252-262) can admit only chunk n-1. Off in C4, which reads every chunk.
+	strictChunk bool
+	data        []byte
+	cancel      context.CancelFunc // the stream context, when captured
+}
+
+type pfPop struct{ pf, fg, roster []pfG }
+
+func (e *pfEnv) pop() pfPop {
+	var p pfPop
+	for _, g := range pfSnapshot() {
+		if g.id == e.self {
+			continue
+		}
+		inHist := e.hist.get(g.id) != nil
+		switch {
+		case pfIsPF(g):
+			p.pf = append(p.pf, g)
+			p.roster = append(p.roster, g)
+		case inHist:
+			p.fg = append(p.fg, g)
+			p.roster = append(p.roster, g)
+		case pfRefsReader(g):
+			p.roster = append(p.roster, g)
+		}
+	}
+	return p
+}
+
+// mismatch is the reliable-attribution safeguard (rev5 :413-414): a PF
+// goroutine whose RELIABLE receiver is not the tested reader, or (strict
+// tests) whose RELIABLE chunk is not the single admissible chunk. Receiver
+// and chunk uncertainty stay distinct; an unreliable value is never a match.
+func (e *pfEnv) mismatch(p pfPop) string {
+	for _, g := range p.pf {
+		for _, fn := range []string{pfReaderType + "prefetchWorker", pfReaderType + "fetchChunk", pfReaderType + "downloadChunk"} {
+			args, ok := pfFrameArgs(g, fn)
+			if !ok || len(args) < 2 {
+				continue
+			}
+			if v, reliable := pfArgValue(args[0]); reliable && fmt.Sprintf("0x%x", v) != e.recv {
+				return fmt.Sprintf("goroutine %d works for reader 0x%x, not the tested %s", g.id, v, e.recv)
+			}
+			if v, reliable := pfArgValue(args[1]); reliable && e.strictChunk && int(v) != e.only {
+				return fmt.Sprintf("goroutine %d works on chunk %d, not the single admissible chunk %d", g.id, v, e.only)
+			}
+			break
+		}
+	}
+	return ""
+}
+
+// attest fails the setup loudly on a reliable attribution mismatch.
+func (e *pfEnv) attest(p pfPop) {
+	e.t.Helper()
+	if why := e.mismatch(p); why != "" {
+		e.t.Fatalf("SETUP: reliable attribution mismatch: %s", why)
+	}
+}
+
+func (e *pfEnv) logPop(label string, p pfPop) {
+	e.t.Logf("POP %s PF=%d FG=%d ROSTER=%d", label, len(p.pf), len(p.fg), len(p.roster))
+}
+
+// poll checks cond until it holds or d passes.
+func pfPoll(d time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(d)
+	for {
+		if cond() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// pfParserSelfCheck verifies the snapshot parser against goroutines whose
+// state the test knows: one parked on a sync.Cond inside a known method, one
+// inside a held HTTP round trip. A mismatch is a loud SETUP failure.
+type pfSelfRecv struct{ mu sync.Mutex }
+
+func (s *pfSelfRecv) park(c *sync.Cond, idx int, ready, stop chan struct{}) {
+	c.L.Lock()
+	close(ready)
+	for {
+		select {
+		case <-stop:
+			c.L.Unlock()
+			return
+		default:
+		}
+		c.Wait()
+	}
+}
+
+func pfParserSelfCheck(t *testing.T) {
+	t.Helper()
+	recv := &pfSelfRecv{}
+	cond := sync.NewCond(&recv.mu)
+	ready, stop := make(chan struct{}), make(chan struct{})
+	var parkID atomic.Int64
+	parked := make(chan struct{})
+	go func() {
+		parkID.Store(pfSelfID())
+		close(parked)
+		recv.park(cond, 7, ready, stop)
+	}()
+	<-parked
+	<-ready
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	var getID atomic.Int64
+	got := make(chan struct{})
+	go func() {
+		getID.Store(pfSelfID())
+		resp, err := (&http.Client{Transport: &http.Transport{}}).Get(srv.URL)
+		if err == nil {
+			resp.Body.Close()
+		}
+		close(got)
+	}()
+	ok := pfPoll(pfSetupPoll, func() bool {
+		var condOK, httpOK bool
+		for _, g := range pfSnapshot() {
+			if g.id == parkID.Load() && g.state == "sync.Cond.Wait" {
+				args, found := pfFrameArgs(g, "audio.(*pfSelfRecv).park")
+				// A reliable receiver must be the known one; an unreliable
+				// one ("?") is parsed and flagged, never taken as evidence.
+				if found && len(args) >= 1 {
+					v, reliable := pfArgValue(args[0])
+					condOK = !reliable || fmt.Sprintf("0x%x", v) == fmt.Sprintf("%p", recv)
+				}
+			}
+			if g.id == getID.Load() && pfInHTTP(g) {
+				httpOK = true
+			}
+		}
+		return condOK && httpOK
+	})
+	close(release)
+	<-got
+	srv.Close()
+	recv.mu.Lock()
+	close(stop)
+	cond.Broadcast()
+	recv.mu.Unlock()
+	if !ok {
+		t.Fatal("SETUP: the stack parser self-check failed (parked cond waiter with receiver, held HTTP client frame)")
+	}
+	// The argument classifier: a "?"-flagged address that textually equals
+	// the known receiver is rejected as evidence; the unflagged form is read.
+	addr := fmt.Sprintf("%p", recv)
+	if _, reliable := pfArgValue(addr + "?"); reliable {
+		t.Fatalf("SETUP: the argument classifier took the flagged %s? as evidence", addr)
+	}
+	if v, reliable := pfArgValue(addr); !reliable || fmt.Sprintf("0x%x", v) != addr {
+		t.Fatalf("SETUP: the argument classifier did not read the unflagged %s", addr)
+	}
+	if _, reliable := pfArgValue("..."); reliable {
+		t.Fatal("SETUP: the argument classifier took an elided argument as evidence")
+	}
+}
+
+// pfData is a deterministic object of n chunks, the last one half full.
+func pfData(n int) []byte {
+	d := make([]byte, (n-1)*DefaultChunkSize+DefaultChunkSize/2)
+	for i := range d {
+		d[i] = byte(i*7 + i>>9)
+	}
+	return d
+}
+
+// pfSetup checks that no reader work from an earlier test remains, then
+// builds the server, the client and the reader (whose constructor fetches
+// chunk 0). captured puts the requests on a stream context, reader.ctx live.
+func pfSetup(t *testing.T, n int, captured bool, script map[int][]pfAction) *pfEnv {
+	t.Helper()
+	pfParserSelfCheck(t)
+	self := pfSelfID()
+	clean := pfPoll(pfSetupPoll, func() bool {
+		for _, g := range pfSnapshot() {
+			if g.id != self && (pfIsPF(g) || pfRefsReader(g)) {
+				return false
+			}
+		}
+		return true
+	})
+	if !clean {
+		t.Fatal("SETUP: reader work from an earlier test is still live")
+	}
+	if script == nil {
+		script = map[int][]pfAction{}
+	}
+	e := &pfEnv{t: t, self: self, hist: &pfHist{callers: map[int64]*pfCaller{}}, n: n, only: n - 1, strictChunk: true, data: pfData(n)}
+	e.srv = newPFServer(t, e.data, script)
+	e.rc = &pfRecorder{base: &http.Transport{}}
+	client := &http.Client{Transport: e.rc}
+	if captured {
+		life, cancel := context.WithCancel(context.Background())
+		e.cancel = cancel
+		client = &http.Client{Transport: pfLife{life, e.rc}}
+	}
+	r, err := NewHttpChunkedReader(&librespot.NullLogger{}, client, e.srv.srv.URL+"/audio")
+	if err != nil {
+		t.Fatalf("SETUP: NewHttpChunkedReader: %v", err)
+	}
+	if len(r.chunks) != n {
+		t.Fatalf("SETUP: the reader has %d chunks, want %d", len(r.chunks), n)
+	}
+	e.r, e.recv = r, fmt.Sprintf("%p", r)
+	t.Cleanup(e.cleanup)
+	return e
+}
+
+// cleanup runs after every result is recorded: holds are released, the
+// stream context ended, and the reader's work must leave within pfCleanup;
+// otherwise the reader is closed directly and the remainder is reported.
+func (e *pfEnv) cleanup() {
+	e.srv.releaseAll()
+	if e.cancel != nil {
+		e.cancel()
+	}
+	empty := func() bool { return len(e.pop().roster) == 0 }
+	if !pfPoll(pfCleanup, empty) {
+		e.t.Logf("CLEANUP: reader work still live %v after the result; closing the reader directly", pfCleanup)
+		done := make(chan struct{})
+		go func() { _ = e.r.Close(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(pfCleanup):
+			e.t.Errorf("CLEANUP: the reader's Close did not return within %v", pfCleanup)
+		}
+		if !pfPoll(pfCleanup, empty) {
+			e.t.Errorf("CLEANUP: reader work still live after the reader's Close")
+		}
+	}
+	e.srv.srv.Close()
+	e.rc.base.(*http.Transport).CloseIdleConnections()
+}
+
+func (e *pfEnv) off(chunk int) int64 { return int64(chunk)*DefaultChunkSize + 10 }
+
+func (e *pfEnv) readAt(chunk int) ([]byte, error) {
+	buf := make([]byte, 64)
+	n, err := e.r.ReadAt(buf, e.off(chunk))
+	return buf[:n], err
+}
+
+func (e *pfEnv) want(chunk int) []byte {
+	o := e.off(chunk)
+	return e.data[o : o+64]
+}
+
+// heldPF is P-HELD(c): a PF goroutine in a downloadChunk frame inside a
+// net/http client frame for c, while the server holds a received request
+// for c. P-OWN additionally needs the prefetchWorker frame.
+func (e *pfEnv) heldPF(c int, own bool) bool {
+	if e.srv.heldCount(c) == 0 {
+		return false
+	}
+	for _, g := range e.pop().pf {
+		if pfHas(g, "downloadChunk") && pfInHTTP(g) && e.on(g, c) && (!own || pfHas(g, "prefetchWorker")) {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *pfEnv) needHeld(c int, own bool) {
+	e.t.Helper()
+	if !pfPoll(pfSetupPoll, func() bool { return e.heldPF(c, own) }) {
+		e.t.Fatalf("SETUP: P-HELD/P-OWN(%d) (own=%t) not established within %v", c, own, pfSetupPoll)
+	}
+	e.attest(e.pop())
+}
+
+// parked is P-FG(g, c): the named caller is parked in the real wait.
+func (e *pfEnv) parked(c *pfCaller, chunk int) bool {
+	for _, g := range pfSnapshot() {
+		if g.id == c.id {
+			return g.state == "sync.Cond.Wait" && pfHas(g, "fetchChunk") && e.on(g, chunk)
+		}
+	}
+	return false
+}
+
+func (e *pfEnv) needParked(c *pfCaller, chunk int) {
+	e.t.Helper()
+	if !pfPoll(pfSetupPoll, func() bool { return e.parked(c, chunk) }) {
+		e.t.Fatalf("SETUP: P-FG(%d, %d) not established within %v", c.id, chunk, pfSetupPoll)
+	}
+}
+
+func (e *pfEnv) released(c int) bool {
+	ch := e.r.chunks[c]
+	ch.L.Lock()
+	defer ch.L.Unlock()
+	return !ch.fetching && ch.data == nil
+}
+
+func (e *pfEnv) needReleased(c int) {
+	e.t.Helper()
+	if !pfPoll(pfSetupPoll, func() bool { return e.released(c) }) {
+		e.t.Fatalf("SETUP: P-REL(%d) not observed within %v", c, pfSetupPoll)
+	}
+}
+
+func (e *pfEnv) cached(c int) bool {
+	ch := e.r.chunks[c]
+	ch.L.Lock()
+	defer ch.L.Unlock()
+	return ch.data != nil
+}
+
+func (e *pfEnv) attemptsFor(c int) []pfAttempt {
+	var out []pfAttempt
+	for _, a := range e.rc.snapshot() {
+		if a.chunk == c {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// pfCut is the established cut: where the client attempts and the server
+// receipts stood.
+type pfCut struct {
+	seq      int64
+	receipts int
+}
+
+// needCut is P-CUT for held chunk c (rev5 section 8.1): every ROSTER member
+// holds a stable role, then the dispatched and received id sets are equal.
+func (e *pfEnv) needCut(c int) pfCut {
+	e.t.Helper()
+	var why string
+	var cut pfCut
+	ok := pfPoll(pfSetupPoll, func() bool {
+		p := e.pop()
+		r1 := 0
+		for _, g := range p.roster {
+			caller := e.hist.get(g.id)
+			switch {
+			case pfIsPF(g) && pfHas(g, "downloadChunk") && pfInHTTP(g) && e.on(g, c):
+				r1++ // R1
+			case pfIsPF(g) && g.state == "sync.Cond.Wait" && pfHas(g, "fetchChunk") && e.on(g, c):
+				// R2: an SDK waiter behind the held owner (the base only)
+			case caller != nil && g.state == "sync.Cond.Wait" && pfHas(g, "fetchChunk") && e.on(g, c):
+				// R3: the parked test foreground
+			case caller != nil && pfReturned(caller):
+				// R4: a returned caller, possibly still in its epilogue
+			default:
+				why = fmt.Sprintf("goroutine %d [%s] holds no stable role", g.id, g.state)
+				return false
+			}
+		}
+		atts := e.rc.snapshot()
+		recv, n := e.srv.receiptIDs()
+		open := 0
+		for _, a := range atts {
+			if !recv[strconv.FormatInt(a.id, 10)] {
+				why = fmt.Sprintf("attempt %d is dispatched and not received", a.id)
+				return false
+			}
+			if !pfTerminal(a) {
+				if a.chunk != c {
+					why = fmt.Sprintf("attempt %d for chunk %d has no terminal client record", a.id, a.chunk)
+					return false
+				}
+				open++
+			}
+		}
+		if len(recv) != len(atts) || n != len(atts) {
+			why = fmt.Sprintf("%d attempts dispatched, %d received", len(atts), n)
+			return false
+		}
+		if held := e.srv.heldCount(c); r1 != open || open != held || held == 0 {
+			why = fmt.Sprintf("R1=%d, open attempts for chunk %d=%d, held=%d", r1, c, open, held)
+			return false
+		}
+		e.rc.mu.Lock()
+		cut.seq = e.rc.seq
+		e.rc.mu.Unlock()
+		cut.receipts = n
+		return true
+	})
+	if !ok {
+		e.t.Fatalf("SETUP: P-CUT not established within %v: %s", pfSetupPoll, why)
+	}
+	e.attest(e.pop())
+	return cut
+}
+
+func (e *pfEnv) afterCut(cut pfCut) (attempts, endedAtEntry, receipts int) {
+	for _, a := range e.rc.snapshot() {
+		if a.id > cut.seq {
+			attempts++
+			if a.ctxErr != "" {
+				endedAtEntry++
+			}
+		}
+	}
+	_, n := e.srv.receiptIDs()
+	return attempts, endedAtEntry, n - cut.receipts
+}
+
+// pfCountChunk is the PF members charged to chunk c: on c, or unresolved.
+func pfCountChunk(pf []pfG, c int) (n, unresolved int) {
+	for _, g := range pf {
+		if got, ok := pfChunk(g); !ok {
+			n++
+			unresolved++
+		} else if got == c {
+			n++
+		}
+	}
+	return n, unresolved
+}
+
+// ---- C1-C10 ----
+
+// C1: with chunk k+1 = 5 held, 1,000 reads in chunk 4 admit one worker.
+func TestDDSonicContractPrefetchC1SingleFlight(t *testing.T) {
+	e := pfSetup(t, 6, false, map[int][]pfAction{5: {pfHold}})
+	if _, err := e.readAt(4); err != nil {
+		t.Fatalf("SETUP: the first read in chunk 4: %v", err)
+	}
+	e.needHeld(5, false)
+	for range 999 {
+		if _, err := e.readAt(4); err != nil {
+			t.Fatalf("SETUP: a read in chunk 4: %v", err)
+		}
+	}
+	p := e.pop()
+	e.attest(p)
+	e.logPop("C1", p)
+	n, un := pfCountChunk(p.pf, 5)
+	pfAssert(t, "C1-A1", n <= 1, "PF(chunk 5)<=1+rel(0)", fmt.Sprintf("%d(unresolved %d)", n, un))
+	pfAssert(t, "C1-A2", len(p.pf) <= e.n-1, fmt.Sprintf("|PF|<=%d", e.n-1), strconv.Itoa(len(p.pf)))
+	got := e.srv.receiptsFor(5)
+	pfAssert(t, "C1-A3", got == 1, "requests(chunk 5)=1", strconv.Itoa(got))
+}
+
+// C2: 64 concurrent reads in chunk 4 admit one worker for chunk 5.
+func TestDDSonicContractPrefetchC2AtomicReservation(t *testing.T) {
+	e := pfSetup(t, 6, false, map[int][]pfAction{5: {pfHold}})
+	var callers []*pfCaller
+	gate := make(chan struct{})
+	for range 64 {
+		callers = append(callers, e.hist.start(func(c *pfCaller) {
+			<-gate
+			c.buf, c.err = e.readAt(4)
+		}))
+	}
+	close(gate)
+	for _, c := range callers {
+		select {
+		case <-c.done:
+			if c.err != nil {
+				t.Fatalf("SETUP: a concurrent read in chunk 4: %v", c.err)
+			}
+		case <-time.After(pfSetupPoll):
+			t.Fatalf("SETUP: a concurrent read in chunk 4 did not return within %v", pfSetupPoll)
+		}
+	}
+	e.needHeld(5, false)
+	p := e.pop()
+	e.attest(p)
+	e.logPop("C2", p)
+	n, un := pfCountChunk(p.pf, 5)
+	pfAssert(t, "C2-A1", n <= 1, "PF(chunk 5)<=1+rel(0)", fmt.Sprintf("%d(unresolved %d)", n, un))
+	pfAssert(t, "C2-A2", len(p.pf) <= e.n-1, fmt.Sprintf("|PF|<=%d", e.n-1), strconv.Itoa(len(p.pf)))
+	got := e.srv.receiptsFor(5)
+	pfAssert(t, "C2-A3", got == 1, "requests(chunk 5)=1", strconv.Itoa(got))
+}
+
+// C3': the stream context ends with chunk 5 held and 200 reads made; no
+// overlapping read. The whole roster must be empty within pfC3Quiesce.
+func TestDDSonicContractPrefetchC3CancelledStreamQuiesces(t *testing.T) {
+	e := pfSetup(t, 6, true, map[int][]pfAction{5: {pfHold}})
+	reader := e.hist.start(func(c *pfCaller) {
+		for range 200 {
+			if c.buf, c.err = e.readAt(4); c.err != nil {
+				return
+			}
+		}
+	})
+	select {
+	case <-reader.done:
+		if reader.err != nil {
+			t.Fatalf("SETUP: the reads in chunk 4: %v", reader.err)
+		}
+	case <-time.After(pfSetupPoll):
+		t.Fatalf("SETUP: the reads in chunk 4 did not return within %v", pfSetupPoll)
+	}
+	e.needHeld(5, false)
+	cut := e.needCut(5)
+	e.logPop("C3-at-cut", e.pop())
+	e.cancel()
+	at := time.Now()
+	empty := pfPoll(pfC3Quiesce, func() bool { return len(e.pop().roster) == 0 })
+	took := time.Since(at)
+	p := e.pop()
+	e.logPop("C3-after", p)
+	pfAssert(t, "C3-A4", empty, fmt.Sprintf("ROSTER empty<=%v", pfC3Quiesce), fmt.Sprintf("empty=%t after %v (PF=%d FG=%d ROSTER=%d)", empty, took.Round(time.Millisecond), len(p.pf), len(p.fg), len(p.roster)))
+	atts, ended, rcpt := e.afterCut(cut)
+	pfAssert(t, "C3-A5", atts == ended, "post-cut attempts all ended at entry", fmt.Sprintf("%d of %d", ended, atts))
+	pfAssert(t, "C3-A6", rcpt == 0, "receipts after cut=0", strconv.Itoa(rcpt))
+}
+
+// C4: a full sequential read returns the object, one request per chunk,
+// and every outcome is SUCCESS.
+func TestDDSonicContractPrefetchC4SuccessPath(t *testing.T) {
+	e := pfSetup(t, 6, false, nil)
+	e.strictChunk = false // C4 reads every chunk and uses no chunk attribution
+	got, err := io.ReadAll(io.NewSectionReader(e.r, 0, int64(len(e.data))))
+	pfAssert(t, "C4-BYTES", err == nil && bytes.Equal(got, e.data), "the whole object", fmt.Sprintf("%d bytes, err=%v, equal=%t", len(got), err, bytes.Equal(got, e.data)))
+	reqOK, reqs := true, []string{}
+	for c := range e.n {
+		n := e.srv.receiptsFor(c)
+		reqs = append(reqs, strconv.Itoa(n))
+		reqOK = reqOK && n == 1
+	}
+	pfAssert(t, "C4-REQ", reqOK, "one request per chunk", strings.Join(reqs, ","))
+	quiet := pfPoll(pfCleanup, func() bool { return len(e.pop().pf) == 0 })
+	var classes []string
+	allOK := quiet
+	for _, a := range e.rc.snapshot() {
+		cl := pfClassify(a)
+		classes = append(classes, fmt.Sprintf("%d:%s", a.chunk, cl))
+		allOK = allOK && cl == "SUCCESS"
+		if a.closeErr != nil {
+			t.Logf("CLOSE-ERROR flag: attempt %d chunk %d: %v (reported, not a failure)", a.id, a.chunk, a.closeErr)
+		}
+	}
+	pfAssert(t, "C4-CLS", allOK, "every outcome SUCCESS (exact io.EOF, 206, full length)", strings.Join(classes, " "))
+	ev := []string{}
+	evOK := true
+	for c := range e.n {
+		r := pfEligible(e.rc.snapshot(), c)
+		ev = append(ev, r)
+		evOK = evOK && r == "EVALUABLE"
+	}
+	pfAssert(t, "C4-ELIG", evOK, "every chunk EVALUABLE", strings.Join(ev, ","))
+}
+
+// C5: the SDK's own Close (a plain client: reader.ctx reaches the request).
+// The SDK lifecycle only, not ddsonic disposal evidence.
+func TestDDSonicContractPrefetchC5DirectClose(t *testing.T) {
+	e := pfSetup(t, 6, false, map[int][]pfAction{5: {pfHold}})
+	if _, err := e.readAt(4); err != nil {
+		t.Fatalf("SETUP: the read in chunk 4: %v", err)
+	}
+	e.needHeld(5, true)
+	closed := make(chan struct{})
+	go func() { _ = e.r.Close(); close(closed) }()
+	var first bool
+	select {
+	case <-closed:
+		first = true
+	case <-time.After(pfC5Close):
+	}
+	pfAssert(t, "C5-CLOSE", first, fmt.Sprintf("Close returns<=%v", pfC5Close), strconv.FormatBool(first))
+	_, err := e.readAt(4)
+	pfAssert(t, "C5-AFTER", errors.Is(err, net.ErrClosed), "ReadAt after Close: net.ErrClosed", fmt.Sprint(err))
+	again := make(chan struct{})
+	go func() { _ = e.r.Close(); close(again) }()
+	var second bool
+	select {
+	case <-again:
+		second = true
+	case <-time.After(pfC5Close):
+	}
+	pfAssert(t, "C5-TWICE", second, fmt.Sprintf("a second Close returns<=%v", pfC5Close), strconv.FormatBool(second))
+	empty := pfPoll(pfCleanup, func() bool { return len(e.pop().roster) == 0 })
+	pfAssert(t, "C5-Q", empty, fmt.Sprintf("ROSTER empty<=%v", pfCleanup), strconv.FormatBool(empty))
+}
+
+// C6: the stream context ends while the test foreground is parked behind the
+// held prefetch owner of chunk 5.
+func TestDDSonicContractPrefetchC6OverlapForeground(t *testing.T) {
+	e := pfSetup(t, 6, true, map[int][]pfAction{5: {pfHold}})
+	if _, err := e.readAt(4); err != nil {
+		t.Fatalf("SETUP: the read in chunk 4: %v", err)
+	}
+	e.needHeld(5, true)
+	fg := e.hist.start(func(c *pfCaller) { c.buf, c.err = e.readAt(5) })
+	e.needParked(fg, 5)
+	cut := e.needCut(5)
+	e.logPop("C6-at-cut", e.pop())
+	e.cancel()
+	at := time.Now()
+	var returned bool
+	select {
+	case <-fg.done:
+		returned = true
+	case <-time.After(pfC6Foreground):
+	}
+	pfAssert(t, "C6-FG", returned && fg.err != nil, fmt.Sprintf("the foreground returns an error<=%v", pfC6Foreground), fmt.Sprintf("returned=%t after %v err=%v", returned, time.Since(at).Round(time.Millisecond), fg.err))
+	if returned {
+		at2 := time.Now()
+		empty := pfPoll(pfC6Quiesce, func() bool { return len(e.pop().roster) == 0 })
+		p := e.pop()
+		e.logPop("C6-after", p)
+		pfAssert(t, "C6-Q", empty, fmt.Sprintf("ROSTER empty<=%v after the foreground", pfC6Quiesce), fmt.Sprintf("empty=%t after %v (PF=%d FG=%d ROSTER=%d)", empty, time.Since(at2).Round(time.Millisecond), len(p.pf), len(p.fg), len(p.roster)))
+	} else {
+		pfAssert(t, "C6-Q", false, "ROSTER empty after the foreground", "the foreground did not return")
+	}
+	atts, ended, rcpt := e.afterCut(cut)
+	pfAssert(t, "C6-ATT", atts <= 3+4 && atts == ended, "post-cut attempts<=7, all ended at entry", fmt.Sprintf("%d, %d ended", atts, ended))
+	pfAssert(t, "C6-RCPT", rcpt == 0, "receipts after cut=0", strconv.Itoa(rcpt))
+}
+
+// C7: a transient prefetch failure, then re-admission and recovery (N=2).
+func TestDDSonicContractPrefetchC7FailureReadmission(t *testing.T) {
+	e := pfSetup(t, 2, false, map[int][]pfAction{1: {pfTruncate, pfServe}})
+	if _, err := e.readAt(0); err != nil {
+		t.Fatalf("SETUP: the read in chunk 0: %v", err)
+	}
+	if !pfPoll(pfSetupPoll, func() bool { a := e.attemptsFor(1); return len(a) == 1 && pfTerminal(a[0]) }) {
+		t.Fatal("SETUP: chunk 1's first attempt was not recorded with a terminal outcome")
+	}
+	e.needReleased(1)
+	first := e.attemptsFor(1)[0]
+	pfAssert(t, "C7-CLS1", pfClassify(first) == "FAILURE" && first.bodyErr == io.ErrUnexpectedEOF, "FAILURE with raw io.ErrUnexpectedEOF", fmt.Sprintf("%s raw=%v", pfClassify(first), first.bodyErr))
+	n, _ := pfCountChunk(e.pop().pf, 1)
+	pfAssert(t, "C7-L1", n <= 2, "live PF(chunk 1)<=1+rel(1)", strconv.Itoa(n))
+	pfAssert(t, "C7-ELIG", pfEligible(e.rc.snapshot(), 1) == "NOT-EVALUABLE" && pfEligible(e.rc.snapshot(), 0) == "EVALUABLE", "chunk 1 NOT-EVALUABLE, chunk 0 EVALUABLE", pfEligible(e.rc.snapshot(), 1)+","+pfEligible(e.rc.snapshot(), 0))
+	if _, err := e.readAt(0); err != nil {
+		t.Fatalf("SETUP: the second read in chunk 0: %v", err)
+	}
+	if !pfPoll(pfSetupPoll, func() bool { return len(e.attemptsFor(1)) == 2 && e.cached(1) }) {
+		t.Fatal("SETUP: the re-admitted chunk 1 was not fetched and cached")
+	}
+	second := e.attemptsFor(1)[1]
+	pfAssert(t, "C7-CLS2", pfClassify(second) == "SUCCESS", "SUCCESS", pfClassify(second))
+	buf, err := e.readAt(1)
+	pfAssert(t, "C7-BYTES", err == nil && bytes.Equal(buf, e.want(1)), "the correct bytes, no error", fmt.Sprintf("err=%v equal=%t", err, bytes.Equal(buf, e.want(1))))
+	got := e.srv.receiptsFor(1)
+	pfAssert(t, "C7-REQ", got == 2, "requests(chunk 1)=2", strconv.Itoa(got))
+	n, _ = pfCountChunk(e.pop().pf, 1)
+	pfAssert(t, "C7-L2", n <= 2, "live PF(chunk 1)<=1+rel(1)", strconv.Itoa(n))
+}
+
+// C8: the parked foreground wakes on the prefetch owner's failure, becomes
+// the owner and recovers (N=2).
+func TestDDSonicContractPrefetchC8WaiterWakeup(t *testing.T) {
+	e := pfSetup(t, 2, false, map[int][]pfAction{1: {pfHold, pfServe}})
+	if _, err := e.readAt(0); err != nil {
+		t.Fatalf("SETUP: the read in chunk 0: %v", err)
+	}
+	e.needHeld(1, true)
+	fg := e.hist.start(func(c *pfCaller) { c.buf, c.err = e.readAt(1) })
+	e.needParked(fg, 1)
+	e.srv.release(1, pfTruncate)
+	var woke bool
+	select {
+	case <-fg.done:
+		woke = true
+	case <-time.After(pfC8Wake):
+	}
+	pfAssert(t, "C8-WAKE", woke, fmt.Sprintf("the parked foreground returns<=%v", pfC8Wake), strconv.FormatBool(woke))
+	if !woke {
+		// Bounded cleanup after the recorded result: a test-side Broadcast.
+		ch := e.r.chunks[1]
+		ch.L.Lock()
+		ch.Broadcast()
+		ch.L.Unlock()
+		select {
+		case <-fg.done:
+		case <-time.After(pfCleanup):
+			t.Errorf("CLEANUP: the foreground did not return within %v of the test Broadcast", pfCleanup)
+			return
+		}
+	}
+	pfAssert(t, "C8-BYTES", fg.err == nil && bytes.Equal(fg.buf, e.want(1)), "the correct bytes, no error", fmt.Sprintf("err=%v equal=%t", fg.err, bytes.Equal(fg.buf, e.want(1))))
+	got := e.srv.receiptsFor(1)
+	pfAssert(t, "C8-REQ", got == 2, "requests(chunk 1)=2", strconv.Itoa(got))
+	if a := e.attemptsFor(1); len(a) == 2 {
+		pfAssert(t, "C8-CLS", pfClassify(a[0]) == "FAILURE" && pfClassify(a[1]) == "SUCCESS", "FAILURE then SUCCESS", pfClassify(a[0])+","+pfClassify(a[1]))
+	} else {
+		pfAssert(t, "C8-CLS", false, "two attempts for chunk 1", strconv.Itoa(len(a)))
+	}
+}
+
+// C9: a failed prefetch (four 500s), then a failed foreground (four more):
+// the error reaches the caller, and the reader recovers (N=2).
+func TestDDSonicContractPrefetchC9ErrorPropagation(t *testing.T) {
+	e := pfSetup(t, 2, false, map[int][]pfAction{1: {pfFail500}})
+	if _, err := e.readAt(0); err != nil {
+		t.Fatalf("SETUP: the read in chunk 0: %v", err)
+	}
+	if !pfPoll(pfSetupPoll, func() bool { return len(e.attemptsFor(1)) == 4 && e.released(1) }) {
+		t.Fatalf("SETUP: the prefetch phase did not end with 4 attempts and a release (attempts %d)", len(e.attemptsFor(1)))
+	}
+	fg := e.hist.start(func(c *pfCaller) { c.buf, c.err = e.readAt(1) })
+	// The bound is anchored to the caller's own recorded start (R42-4); the
+	// result is read only after completion and judged by its recorded finish
+	// (R43-1, R43-2).
+	r := pfForeground(fg, fg.started.Add(pfC9Foreground))
+	pfAssert(t, "C9-FG", pfC9FG(r), fmt.Sprintf("an 'unexpected chunk response status' error<=%v from the caller's start", pfC9Foreground), r.actual)
+	if !r.completed {
+		// Bounded failure cleanup: the failure stays recorded; a caller still
+		// live after the cleanup bound is reported, never waited for.
+		if r := pfJoinOrReport(fg, pfCleanup); r != "" {
+			e.logPop("C9-unreturned", e.pop())
+			t.Errorf("CLEANUP: C9: %s; C9-ATT and C9-REC not evaluated", r)
+			return
+		}
+	}
+	n := len(e.attemptsFor(1))
+	pfAssert(t, "C9-ATT", n == 8, "attempts(chunk 1)=8 (4 prefetch + 4 foreground)", strconv.Itoa(n))
+	e.srv.setScript(1, pfServe)
+	buf, err := e.readAt(1)
+	pfAssert(t, "C9-REC", err == nil && bytes.Equal(buf, e.want(1)), "the correct bytes after the server recovers", fmt.Sprintf("err=%v equal=%t", err, bytes.Equal(buf, e.want(1))))
+}
+
+// C10: with chunk 1 the only admissible prefetch chunk (N=2), after its
+// failure release is observed, prefetchWg.Wait returns: the worker's Done is
+// ordered before its release.
+func TestDDSonicContractPrefetchC10AccountingOrder(t *testing.T) {
+	gate := make(chan struct{})
+	ddsonicPrefetchM1Gate = gate
+	e := pfSetup(t, 2, false, map[int][]pfAction{1: {pfHold, pfServe}})
+	if _, err := e.readAt(0); err != nil {
+		t.Fatalf("SETUP: the read in chunk 0: %v", err)
+	}
+	e.needHeld(1, true)
+	e.srv.release(1, pfTruncate)
+	e.needReleased(1)
+	done := make(chan struct{})
+	go func() { e.r.prefetchWg.Wait(); close(done) }()
+	var waited bool
+	select {
+	case <-done:
+		waited = true
+	case <-time.After(pfC10Wait):
+	}
+	pfAssert(t, "C10-WAIT", waited, fmt.Sprintf("prefetchWg.Wait returns<=%v after the observed release", pfC10Wait), strconv.FormatBool(waited))
+	// Only now, with the result recorded, is the gate opened (M1 cleanup).
+	close(gate)
+	select {
+	case <-done:
+	case <-time.After(pfCleanup):
+		t.Errorf("CLEANUP: prefetchWg.Wait did not return within %v of opening the gate", pfCleanup)
+		return
+	}
+	if _, err := e.readAt(0); err != nil {
+		t.Fatalf("SETUP: the second read in chunk 0: %v", err)
+	}
+	if !pfPoll(pfSetupPoll, func() bool { return e.cached(1) }) {
+		t.Fatal("SETUP: the re-admitted chunk 1 was not cached")
+	}
+	n, _ := pfCountChunk(e.pop().pf, 1)
+	pfAssert(t, "C10-L", n <= 2, "live PF(chunk 1)<=1+rel(1)", strconv.Itoa(n))
+	// The prefetch-mutant validator's negative controls only (review 42
+	// R42-2; prefetch_mutants_test.go): an extra failure in this same test,
+	// which the validator must refuse. The runner's ordinary runs never set it.
+	switch os.Getenv("DDSONIC_PREFETCH_VALIDATOR_CONTROL") {
+	case "errorf":
+		t.Errorf("CONTROL-EXTRA-FAILURE: an unmarked failure injected by the validator control")
+	case "red":
+		pfAssert(t, "C10-XRED", false, "the validator control's extra assertion", "injected")
+	}
+}
+
+// C9X: the bounded join itself (review 42 R42-4). A caller that never
+// returns is reported by pfAwait/pfJoinOrReport within their bounds, without
+// hanging the test body. No reader is involved.
+func TestDDSonicContractPrefetchC9BoundedJoinControl(t *testing.T) {
+	hist := &pfHist{callers: map[int64]*pfCaller{}}
+	release := make(chan struct{})
+	c := hist.start(func(*pfCaller) { <-release })
+	defer func() {
+		close(release)
+		<-c.done // returns at once: release unblocks the caller
+	}()
+	at := time.Now()
+	returned := pfAwait(c, c.started.Add(200*time.Millisecond))
+	report := ""
+	if !returned {
+		report = pfJoinOrReport(c, 300*time.Millisecond)
+	}
+	took := time.Since(at)
+	pfAssert(t, "C9X-NOTRETURNED", !returned, "a non-returning caller is not reported as returned", strconv.FormatBool(returned))
+	pfAssert(t, "C9X-REPORTED", strings.Contains(report, "still live"), "the live caller is reported", report)
+	pfAssert(t, "C9X-BOUNDED", took < 2*time.Second, "the test body continues within 2s (bounds 200ms + 300ms)", took.Round(time.Millisecond).String())
+}
+
+// C9L: C9's own timeout diagnostic (pfForeground, then the bounded
+// pfJoinOrReport), followed by a LATE result write (review 43 R43-1). The
+// caller writes its result fields on its own clock, with no synchronization
+// from the observer, after both have reported it; under -race, any read of
+// those fields by the diagnostic would be a reported race. The timed-out
+// failure stays reported. No reader is involved.
+func TestDDSonicContractPrefetchC9LateResultControl(t *testing.T) {
+	const wait, join = 200 * time.Millisecond, 300 * time.Millisecond
+	hist := &pfHist{callers: map[int64]*pfCaller{}}
+	var wrote time.Time // written by the caller; read only after its done
+	c := hist.start(func(c *pfCaller) {
+		time.Sleep(time.Until(c.started.Add(wait + join + 300*time.Millisecond)))
+		wrote = time.Now()
+		c.buf, c.err = []byte("late"), errors.New("unexpected chunk response status: the late control result")
+	})
+	at := time.Now()
+	r := pfForeground(c, c.started.Add(wait))
+	report := ""
+	if !r.completed {
+		report = pfJoinOrReport(c, join)
+	}
+	diagnosed := time.Now()
+	joined := pfJoinOrReport(c, pfCleanup) == "" // bounded; synchronizes the late result
+	if !joined {
+		t.Fatalf("SETUP: the late caller did not complete within %v of the diagnostic", pfCleanup)
+	}
+	if !wrote.After(diagnosed) {
+		t.Fatalf("SETUP: the result was written %v before the diagnostic ended, not after it", diagnosed.Sub(wrote))
+	}
+	pfAssert(t, "C9L-NOTCOMPLETED", !r.completed && !r.onTime && r.err == nil && strings.Contains(r.actual, "result unavailable"), "the timeout diagnostic reports not-completed and reads no result", r.actual)
+	pfAssert(t, "C9L-REPORTED", strings.Contains(report, "still live"), "the bounded join reports the live caller", report)
+	pfAssert(t, "C9L-LATEWRITE", c.err != nil && len(c.buf) > 0, "the caller wrote its result after the diagnostic (read after its done)", fmt.Sprintf("wrote %v after the diagnostic ended; err=%v", wrote.Sub(diagnosed).Round(time.Millisecond), c.err))
+	pfAssert(t, "C9L-FAILED", !pfC9FG(r), "C9-FG's predicate stays failed after the late write", fmt.Sprintf("pass=%t", pfC9FG(r)))
+	pfAssert(t, "C9L-BOUNDED", diagnosed.Sub(at) < 2*time.Second, "the diagnostic continues within 2s (bounds 200ms + 300ms)", diagnosed.Sub(at).Round(time.Millisecond).String())
+}
+
+// C9D: C9-FG's deadline boundary (review 43 R43-2), judged from the caller's
+// recorded finish. Negative: a caller positively finished after its deadline
+// before it is observed is completed but not on time, and does not pass.
+// Positive: a caller positively finished before its deadline, observed only
+// after it, stays on time and passes. Each precondition is a barrier (the
+// gate, the caller's done) and the recorded timestamps, checked as SETUP.
+func TestDDSonicContractPrefetchC9DeadlineBoundaryControl(t *testing.T) {
+	const limit = 200 * time.Millisecond
+	status := errors.New("unexpected chunk response status: the boundary control result")
+	hist := &pfHist{callers: map[int64]*pfCaller{}}
+	pastDeadline := func(d time.Time) time.Time {
+		time.Sleep(time.Until(d))
+		for !time.Now().After(d) {
+			time.Sleep(time.Millisecond)
+		}
+		return time.Now()
+	}
+
+	gate := make(chan struct{})
+	late := hist.start(func(c *pfCaller) { <-gate; c.err = status })
+	lateDeadline := late.started.Add(limit)
+	pastDeadline(lateDeadline)
+	close(gate)
+	if pfJoinOrReport(late, pfSetupPoll) != "" {
+		t.Fatalf("SETUP: the late caller did not complete within %v of its gate", pfSetupPoll)
+	}
+	if !late.finished.After(lateDeadline) {
+		t.Fatalf("SETUP: the late caller finished %v before its deadline, not after it", lateDeadline.Sub(late.finished))
+	}
+	lr := pfForeground(late, lateDeadline)
+	pfAssert(t, "C9D-LATE", lr.completed && !lr.onTime && !pfC9FG(lr), "a finish after the deadline, already complete when observed, is not on time and C9-FG does not pass", fmt.Sprintf("%s; finished %v after the deadline; pass=%t", lr.actual, late.finished.Sub(lateDeadline).Round(time.Millisecond), pfC9FG(lr)))
+
+	early := hist.start(func(c *pfCaller) { c.err = status })
+	earlyDeadline := early.started.Add(limit)
+	if pfJoinOrReport(early, pfSetupPoll) != "" {
+		t.Fatalf("SETUP: the on-time caller did not complete within %v", pfSetupPoll)
+	}
+	if early.finished.After(earlyDeadline) {
+		t.Fatalf("SETUP: the on-time caller finished %v after its deadline", early.finished.Sub(earlyDeadline))
+	}
+	observed := pastDeadline(earlyDeadline)
+	er := pfForeground(early, earlyDeadline)
+	pfAssert(t, "C9D-ONTIME", er.completed && er.onTime && pfC9FG(er), "a finish before the deadline, observed after it, stays on time and C9-FG passes", fmt.Sprintf("%s; observed %v after the deadline; pass=%t", er.actual, observed.Sub(earlyDeadline).Round(time.Millisecond), pfC9FG(er)))
+}

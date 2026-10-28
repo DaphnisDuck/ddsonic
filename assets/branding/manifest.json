@@ -1,0 +1,453 @@
+{
+  "package": "ddsonic-branding",
+  "assembly": "Original raster artwork with owner-approved ddsonic lettering",
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 4436,
+      "sha256": "e033737cbcb201a294dded065fa100d85a0092f33069458c0a240413830c0cd2"
+    },
+    {
+      "path": "ddsonic-icon.png",
+      "bytes": 864223,
+      "sha256": "68643b46dbe479565914a19fbe5d1fe0d06a7afdcdad0f59af8d58d51ad7649b",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 1024,
+          "height": 1024
+        }
+      ]
+    },
+    {
+      "path": "ddsonic-logo-horizontal-transparent.png",
+      "bytes": 541912,
+      "sha256": "e9aa9fb0e3d8a72f4ab8101b6785ef1582852b5a3994722bbd82a05af2bc5cef",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 2400,
+          "height": 800
+        }
+      ]
+    },
+    {
+      "path": "ddsonic-logo-horizontal.png",
+      "bytes": 468913,
+      "sha256": "3517d8afdf406117978097bc8daf4d91e9d97ef0b55ce38862b42f0ea61417b2",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 2400,
+          "height": 800
+        }
+      ]
+    },
+    {
+      "path": "ddsonic-logo-transparent.png",
+      "bytes": 809032,
+      "sha256": "751460f5f66cdb78daaa8c28d7b00f6760872a09b5243378da1c5a9e00a79578",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 1400,
+          "height": 1400
+        }
+      ]
+    },
+    {
+      "path": "ddsonic-logo.png",
+      "bytes": 698210,
+      "sha256": "7f3edfada550304e0a0c152241fe1e7f5b5fdd53aafafc5f61ad9c6c7157af8a",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 1400,
+          "height": 1400
+        }
+      ]
+    },
+    {
+      "path": "ddsonic-wordmark.png",
+      "bytes": 256289,
+      "sha256": "5e67f2b15a172e74229157c867f1e719d3153b8c77534dab66f14db82a80406f",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 1357,
+          "height": 238
+        }
+      ]
+    },
+    {
+      "path": "ddsonic.ico",
+      "bytes": 372782,
+      "sha256": "68d411c6a50e7bfe3b3e9247be0f7db668ae821a812315525c7fca4c25b3deef",
+      "images": [
+        {
+          "format": "ICO",
+          "width": 16,
+          "height": 16
+        },
+        {
+          "format": "ICO",
+          "width": 24,
+          "height": 24
+        },
+        {
+          "format": "ICO",
+          "width": 32,
+          "height": 32
+        },
+        {
+          "format": "ICO",
+          "width": 48,
+          "height": 48
+        },
+        {
+          "format": "ICO",
+          "width": 64,
+          "height": 64
+        },
+        {
+          "format": "ICO",
+          "width": 128,
+          "height": 128
+        },
+        {
+          "format": "ICO",
+          "width": 256,
+          "height": 256
+        }
+      ]
+    },
+    {
+      "path": "icons/ddsonic-128.png",
+      "bytes": 26246,
+      "sha256": "9d5bfdc86ce4d98797301140564ca6518a8f0d1660e79ff2fa50753ad70e11f1",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 128,
+          "height": 128
+        }
+      ]
+    },
+    {
+      "path": "icons/ddsonic-16.png",
+      "bytes": 1267,
+      "sha256": "e00b27f0a89b5c950e27c10241ec39aee9a1a5b4f6981a54e5afa78a4cd7a48e",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 16,
+          "height": 16
+        }
+      ]
+    },
+    {
+      "path": "icons/ddsonic-24.png",
+      "bytes": 1830,
+      "sha256": "7590c8e64218cd42147702ebdffeaf896d5ecb80f4fcfe8f080fccb65342f3c8",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 24,
+          "height": 24
+        }
+      ]
+    },
+    {
+      "path": "icons/ddsonic-256.png",
+      "bytes": 80442,
+      "sha256": "8f3143ba2413188702d57d853bc06ced885d87aee2e47ddf2081fe86251ff8b8",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 256,
+          "height": 256
+        }
+      ]
+    },
+    {
+      "path": "icons/ddsonic-32.png",
+      "bytes": 2831,
+      "sha256": "1dd8210aea65b73a5deedfc885263fa36a91182752b22d2882f883a49fb9bed1",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 32,
+          "height": 32
+        }
+      ]
+    },
+    {
+      "path": "icons/ddsonic-48.png",
+      "bytes": 5647,
+      "sha256": "df4c4aa563ce992569171f90af398da610d8d44b1652a5d4b275b8cdff8f98ad",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 48,
+          "height": 48
+        }
+      ]
+    },
+    {
+      "path": "icons/ddsonic-512.png",
+      "bytes": 269851,
+      "sha256": "a2f7be9250a5a4e5828cc34c31eaa823d86ade2534be10466bbfef979a138744",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 512,
+          "height": 512
+        }
+      ]
+    },
+    {
+      "path": "icons/ddsonic-64.png",
+      "bytes": 8956,
+      "sha256": "8361c1828e1317ca0db3ff02ca86fd9d6c8d5190feb29900d7271f85c744259c",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 64,
+          "height": 64
+        }
+      ]
+    },
+    {
+      "path": "masters/ddsonic-icon-master.png",
+      "bytes": 1165599,
+      "sha256": "e0a630a5122e89305fad574e5f207070dd4b9d52868922b56279def72118c6e5",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 1254,
+          "height": 1254
+        }
+      ]
+    },
+    {
+      "path": "masters/ddsonic-icon-monochrome-master.png",
+      "bytes": 1125437,
+      "sha256": "ed30bafc334318034f58d14b1b3e9d327ca61b54854ebb5ff95258c6165e5657",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 1254,
+          "height": 1254
+        }
+      ]
+    },
+    {
+      "path": "masters/ddsonic-mark-master.png",
+      "bytes": 873057,
+      "sha256": "746aa0e87ddba41c31fd6af3441316a29c2f878ca610af0ca89fa5e0fbe99725",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 1254,
+          "height": 1254
+        }
+      ]
+    },
+    {
+      "path": "masters/ddsonic-tagline-master.png",
+      "bytes": 12056,
+      "sha256": "d88730858205a10acc80a457686c479274720f0950545f28d8d69a214b8685b6",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 1959,
+          "height": 73
+        }
+      ]
+    },
+    {
+      "path": "masters/ddsonic-wordmark-master.png",
+      "bytes": 256289,
+      "sha256": "5e67f2b15a172e74229157c867f1e719d3153b8c77534dab66f14db82a80406f",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 1357,
+          "height": 238
+        }
+      ]
+    },
+    {
+      "path": "monochrome/ddsonic-icon-gray.png",
+      "bytes": 300610,
+      "sha256": "cc6c860f83c458c8bb3cf63b5b84195f19d2f719579e2688f7e44ce98d08c5aa",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 1024,
+          "height": 1024
+        }
+      ]
+    },
+    {
+      "path": "monochrome/ddsonic-logo-gray.png",
+      "bytes": 246507,
+      "sha256": "78948cec8c2b6675f68b8260f06ffd3e77b691bc4820d1489ea9eba241ef3c96",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 1400,
+          "height": 1400
+        }
+      ]
+    },
+    {
+      "path": "monochrome/ddsonic-logo-horizontal-gray.png",
+      "bytes": 168648,
+      "sha256": "e3ca109a2669f24ff95a18c48861e0f336e9277c5c3db8c2195f9b1690cfebca",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 2400,
+          "height": 800
+        }
+      ]
+    },
+    {
+      "path": "monochrome/ddsonic-wordmark-dark.png",
+      "bytes": 2493,
+      "sha256": "8f609aa2a2ed59813469caf5dbe85a4ca8186865511ce6fec9359ee03cbef719",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 1357,
+          "height": 238
+        }
+      ]
+    },
+    {
+      "path": "monochrome/ddsonic-wordmark-light.png",
+      "bytes": 4110,
+      "sha256": "a9f3cd6a21c1e0692bbd932959167e19e6ce02efb083c6088c76e87b8e7ab860",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 1357,
+          "height": 238
+        }
+      ]
+    },
+    {
+      "path": "previews/branding-overview.png",
+      "bytes": 923924,
+      "sha256": "5826160c7105cb4e80229168f94730fae2891358f3a2201ada12d56a0eef995e",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 1560,
+          "height": 1120
+        }
+      ]
+    },
+    {
+      "path": "previews/small-icons-enlarged.png",
+      "bytes": 112981,
+      "sha256": "33b474014ab8d18fbb453203dc9daea6bfe5451e4b71392e6218c20bde9c5050",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 1176,
+          "height": 222
+        }
+      ]
+    },
+    {
+      "path": "previews/small-icons-native.png",
+      "bytes": 111400,
+      "sha256": "3715b2d6ea51651b12e6ac99a9779f30a401a75072e138d713c7adca6dcb69b8",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 1100,
+          "height": 235
+        }
+      ]
+    },
+    {
+      "path": "source/approved-ddsonic-horizontal-trial.png",
+      "bytes": 1063436,
+      "sha256": "531ef78fb3aee41551233cc19c1f7a64ce89743347d760c71fea90912a00403a",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 2172,
+          "height": 724
+        }
+      ]
+    },
+    {
+      "path": "source/approved-ddsonic-stacked-trial.png",
+      "bytes": 1140223,
+      "sha256": "5673735db9f4a2f60319de2dcd3b30e1af63d581240c269b23dff0e46ef647ba",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 1254,
+          "height": 1254
+        }
+      ]
+    },
+    {
+      "path": "source/build.py",
+      "bytes": 3750,
+      "sha256": "0ec1f1fba9d0ca1ab18362b4c41cdb5bc554b881fc1950f42a400a8e2c16b28a"
+    },
+    {
+      "path": "source/ddsonic-logo-horizontal.ora",
+      "bytes": 1002559,
+      "sha256": "b5ed6537d52d7acf85a8fe4b7d8b06bc330caeeffc2043fa0fe66dc3d3c7be1d",
+      "canvas": {
+        "width": 2400,
+        "height": 800,
+        "layers": 4
+      }
+    },
+    {
+      "path": "source/ddsonic-logo.ora",
+      "bytes": 1501419,
+      "sha256": "100eb043fd0d00ec1943204271128db0bfc72264986e4a8d456a265f8cec71c4",
+      "canvas": {
+        "width": 1400,
+        "height": 1400,
+        "layers": 4
+      }
+    },
+    {
+      "path": "source/name-trial-notes.md",
+      "bytes": 1237,
+      "sha256": "8511869bce8fa6a8cf1ac5fdb8c869a638475007e763126a2b5ae297040af665"
+    },
+    {
+      "path": "source/original-approved-design-sheet.png",
+      "bytes": 1791523,
+      "sha256": "2a5db3992d9867ad4c1f45a19e414b3121162fe00beba660af233aa7428497f2",
+      "images": [
+        {
+          "format": "PNG",
+          "width": 1536,
+          "height": 1024
+        }
+      ]
+    },
+    {
+      "path": "source/original-production-notes.md",
+      "bytes": 5711,
+      "sha256": "919f2a373a55b218e9f59d0a15bc0836c76b58b21a67369c4e8f702f2204f5b3"
+    },
+    {
+      "path": "source/production-notes.md",
+      "bytes": 1555,
+      "sha256": "45b49871978e1a8a5d5038e8bf0c13eee1145cf0f70302a101d471230d286b84"
+    }
+  ]
+}

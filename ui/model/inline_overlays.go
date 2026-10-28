@@ -1,0 +1,689 @@
+package model
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+
+	"charm.land/lipgloss/v2"
+
+	"github.com/bjarneo/cliamp/lyrics"
+	"github.com/bjarneo/cliamp/playlist"
+	"github.com/bjarneo/cliamp/provider"
+	"github.com/bjarneo/cliamp/theme"
+	"github.com/bjarneo/cliamp/ui"
+)
+
+// Inline overlays render in the playlist region while the now-playing,
+// visualizer, and controls chrome stays live above them. Each overlay supplies
+// three pieces, all the same vertical size as the normal playlist chrome so
+// opening an overlay never shifts the layout height:
+//
+//   - a header line   (via overlayHeaderLine, used by renderPlaylistHeader)
+//   - a body          (via overlayBody, fills effectivePlaylistVisible rows)
+//   - a help line      (via overlayHelpLine, used by renderHelp)
+//
+// The switches below are ordered to match activeScreen so the header, body, and
+// help always describe the same overlay.
+
+// — shared header/body helpers —
+
+// sepHeader renders a labeled separator. The label is embedded before the "─"
+// fill, so separatorLine truncates it to the panel width: it never wraps.
+func sepHeader(label string) string {
+	return dimStyle.Render(labeledSeparator("", label))
+}
+
+// sepHeaderN appends an "n/total" position counter to a separator label.
+func sepHeaderN(label string, pos, total int) string {
+	if total <= 0 {
+		return sepHeader(label)
+	}
+	return sepHeader(fmt.Sprintf("%s  %d/%d", label, pos, total))
+}
+
+// promptHeader renders an editable input with the shared editor cursor at its
+// actual insertion point, then clips it to the panel width.
+func (m Model) promptHeader(field, label, value string) string {
+	return playlistSelectedStyle.Render(truncate("  "+label+": "+m.textWithCursor(field, value), ui.PanelWidth))
+}
+
+// filterPromptHeader renders a `/` filter input as the header line.
+func (m Model) filterPromptHeader(field, query string) string {
+	return playlistSelectedStyle.Render(truncate("  / "+m.textWithCursor(field, query), ui.PanelWidth))
+}
+
+// filterCountHeader renders a `/` filter prompt with a trailing match count,
+// kept to one panel-wide row by clipping the query to leave room for the count.
+func (m Model) filterCountHeader(field, query, count string) string {
+	maxPrompt := max(1, ui.PanelWidth-len(count)-2)
+	return playlistSelectedStyle.Render(truncate("  / "+m.textWithCursor(field, query), maxPrompt)) + dimStyle.Render("  "+count)
+}
+
+// windowList renders items[scroll:] into at most budget rows, applying the
+// cursor highlight via cursorLine.
+func windowList(items []string, cursor, scroll, budget int) string {
+	if budget <= 0 {
+		return ""
+	}
+	lines := make([]string, 0, budget)
+	for i := scroll; i < len(items) && len(lines) < budget; i++ {
+		lines = append(lines, cursorLine(items[i], i == cursor))
+	}
+	return strings.Join(padLines(lines, budget, len(lines)), "\n")
+}
+
+// bodyLines fits pre-built lines into the budget (truncate + pad to budget).
+func bodyLines(lines []string, budget int) string {
+	if budget <= 0 {
+		return ""
+	}
+	return strings.Join(fitLines(lines, budget), "\n")
+}
+
+// bodyMessage renders a single dim message line into the budget.
+func bodyMessage(msg string, budget int) string {
+	return bodyLines([]string{dimStyle.Render("  " + msg)}, budget)
+}
+
+// renderSpotSearchResults renders the search results grouped into labeled
+// sections, so albums are visibly a different kind of result than the tracks
+// below them rather than one long undifferentiated list.
+func (m Model) renderSpotSearchResults(budget int) string {
+	lines := make([]string, 0, budget)
+	for row := range spotSearchRows(m.spotSearch.results, m.spotSearch.scroll) {
+		if len(lines) >= budget {
+			break
+		}
+		if row.Index < 0 {
+			if budget == 1 {
+				continue
+			}
+			lines = append(lines, dimStyle.Render(labeledSeparator("", row.Section)))
+			continue
+		}
+		label := truncate(trackViewName(row.Track), ui.PanelWidth-8)
+		lines = append(lines, cursorLine(label, row.Index == m.spotSearch.cursor))
+	}
+	return strings.Join(padLines(lines, budget, len(lines)), "\n")
+}
+
+// renderTrackRowsBody renders a track list with album-header separators into
+// the playlist-region budget, highlighting the row at cursor. Shared by the
+// nav browser and playlist manager unfiltered track views.
+func (m Model) renderTrackRowsBody(tracks []playlist.Track, cursor, scroll, budget int) string {
+	lines := make([]string, 0, budget)
+	for row := range m.playlistRows(tracks, scroll, m.showAlbumHeaders) {
+		if len(lines) >= budget {
+			break
+		}
+		if row.Index < 0 {
+			lines = append(lines, m.albumSeparator(row.Album, row.Year))
+			continue
+		}
+		i, t := row.Index, row.Track
+		label := formatTrackRow(i+1, trackViewName(t)+trackAlbumSuffix(t, m.showAlbumHeaders), t.DurationSecs)
+		lines = append(lines, cursorLine(label, i == cursor))
+	}
+	return bodyLines(lines, budget)
+}
+
+// — dispatch —
+
+// overlayView bundles the three render pieces of an inline overlay: the header
+// line (shown where the playlist header is), the help line, and the body that
+// fills the playlist region. The pieces are method expressions (func(*Model)),
+// not bound method values, so building an overlayView does not copy the Model
+// onto the heap on the render hot path.
+type overlayView struct {
+	header func(*Model) string
+	help   func(*Model) string
+	body   func(*Model) string
+}
+
+// activeOverlay returns the render pieces for the active inline overlay, or
+// ok=false when no overlay is open (the normal playlist is shown). Describing
+// each overlay once here keeps its header, help, and body in sync, and the
+// cases are ordered to match activeScreen. renderPlaylistHeader, renderHelp,
+// and renderMainBody each call this and invoke the piece they need with &m.
+func (m Model) activeOverlay() (overlayView, bool) {
+	switch {
+	case m.keymap.visible:
+		return overlayView{(*Model).keymapHeaderLine, (*Model).keymapHelpLine, (*Model).renderKeymapList}, true
+	case m.devicePicker.visible:
+		return overlayView{(*Model).deviceHeaderLine, (*Model).devicePickerHelpLine, (*Model).renderDeviceBody}, true
+	case m.plPicker.visible:
+		return overlayView{(*Model).plPickerHeaderLine, (*Model).plPickerHelpLine, (*Model).renderPlaylistPickerBody}, true
+	case m.fileBrowser.visible:
+		return overlayView{(*Model).fbHeaderLine, (*Model).fbHelpLine, (*Model).renderFileBrowserBody}, true
+	case m.spotSearch.visible:
+		return overlayView{(*Model).spotSearchHeaderLine, (*Model).spotSearchHelpLine, (*Model).renderSpotSearchBody}, true
+	case m.navBrowser.visible:
+		return overlayView{(*Model).navHeaderLine, (*Model).navHelpLine, (*Model).renderNavBody}, true
+	case m.themePicker.visible:
+		return overlayView{(*Model).themePickerHeaderLine, (*Model).themePickerHelpLine, (*Model).renderThemeBody}, true
+	case m.visPicker.visible:
+		return overlayView{(*Model).visPickerHeaderLine, (*Model).visPickerHelpLine, (*Model).renderVisPickerList}, true
+	case m.plManager.visible:
+		return overlayView{(*Model).plMgrHeaderLine, (*Model).plMgrHelpLine, (*Model).renderPlMgrBody}, true
+	case m.queue.visible:
+		return overlayView{
+			func(m *Model) string { return sepHeaderN("Queue", m.queue.cursor+1, m.playlist.QueueLen()) },
+			(*Model).queueHelpLine, (*Model).renderQueueBody}, true
+	case m.subs.visible:
+		return overlayView{(*Model).subsHeaderLine, (*Model).subsHelpLine, (*Model).renderSubsBody}, true
+	case m.showInfo:
+		return overlayView{
+			func(*Model) string { return sepHeader("Track Info") },
+			func(m *Model) string { return m.commandHelp(commandModeInfo) },
+			(*Model).renderInfoBody}, true
+	case m.lyrics.visible:
+		return overlayView{
+			func(*Model) string { return sepHeader("Lyrics") },
+			(*Model).lyricsHelpLine, (*Model).renderLyricsBody}, true
+	case m.jumping:
+		return overlayView{
+			func(*Model) string { return sepHeader("Jump to Time") },
+			func(m *Model) string { return m.commandHelp(commandModeJump) },
+			(*Model).renderJumpBody}, true
+	case m.urlInputting:
+		return overlayView{
+			func(m *Model) string { return m.promptHeader("url", "Load URL", m.urlInput) },
+			func(m *Model) string { return m.commandHelp(commandModeURL) },
+			(*Model).renderURLBody}, true
+	case m.search.active:
+		return overlayView{(*Model).searchHeaderLine, (*Model).searchHelpLine, (*Model).renderSearchList}, true
+	case m.netSearch.active:
+		return overlayView{(*Model).netSearchHeaderLine, (*Model).netSearchHelpLine, (*Model).renderNetSearchBody}, true
+	case m.libraryVisible(): // ddsonic: lowest priority, so overlays it opens draw on top
+		return overlayView{(*Model).libHeaderLine, (*Model).libHelpLine, (*Model).renderLibraryBody}, true
+	}
+	return overlayView{}, false
+}
+
+// renderMainBody returns the active overlay's body, or the playlist when no
+// overlay is open.
+func (m Model) renderMainBody() string {
+	if ov, ok := m.activeOverlay(); ok {
+		return ov.body(&m)
+	}
+	return m.renderPlaylist()
+}
+
+// — search —
+
+func (m Model) searchHeaderLine() string {
+	return m.filterCountHeader("playlist-search", m.search.query, m.formatListMatchCount(len(m.search.results), m.playlist.Len()))
+}
+
+// — theme picker —
+
+func (m Model) themeCount() int { return len(m.themes) + 1 }
+
+func (m Model) themePickerHeaderLine() string {
+	if m.themePicker.filtering || m.themePicker.filter != "" {
+		return m.filterCountHeader("theme-picker-filter", m.themePicker.filter, fmt.Sprintf("%d/%d", m.themePickerViewCount(), m.themeCount()))
+	}
+	return sepHeaderN("Themes", m.themePicker.cursor+1, m.themePickerViewCount())
+}
+
+func (m Model) renderThemeBody() string {
+	budget := m.effectivePlaylistVisible()
+	items := make([]string, 0, m.themeCount())
+	items = append(items, theme.DefaultName)
+	for _, t := range m.themes {
+		items = append(items, t.Name)
+	}
+	if m.themePicker.filter != "" {
+		filtered := make([]string, 0, len(m.themePicker.filtered))
+		for _, rawIdx := range m.themePicker.filtered {
+			if rawIdx >= 0 && rawIdx < len(items) {
+				filtered = append(filtered, items[rawIdx])
+			}
+		}
+		items = filtered
+	}
+	if len(items) == 0 {
+		return bodyMessage("No matches.", budget)
+	}
+	return windowList(items, m.themePicker.cursor, m.themePicker.scroll, budget)
+}
+
+// — device picker —
+
+func (m Model) deviceHeaderLine() string {
+	if m.devicePicker.loading {
+		return sepHeader("Audio Devices")
+	}
+	return sepHeaderN("Audio Devices", m.devicePicker.cursor+1, len(m.devicePicker.devices))
+}
+
+func (m Model) renderDeviceBody() string {
+	budget := m.effectivePlaylistVisible()
+	if m.devicePicker.loading {
+		return bodyLines([]string{loadingLine("Loading devices…")}, budget)
+	}
+	if len(m.devicePicker.devices) == 0 {
+		return bodyMessage("No audio output devices found.", budget)
+	}
+	items := make([]string, len(m.devicePicker.devices))
+	for i, d := range m.devicePicker.devices {
+		label := d.Description
+		if label == "" {
+			label = d.Name
+		}
+		if d.Active {
+			label += " " + activeToggle.Render("●")
+		}
+		items[i] = label
+	}
+	return windowList(items, m.devicePicker.cursor, m.devicePicker.scroll, budget)
+}
+
+// — queue —
+
+// renderQueueBody lists the queued tracks the way the playlist pane lists its
+// own: grouped under a show or album header, with played markers and durations.
+// The queue holds the same tracks, so reading it should not feel like reading a
+// different kind of list.
+func (m Model) renderQueueBody() string {
+	budget := m.effectivePlaylistVisible()
+	if budget <= 0 {
+		return ""
+	}
+	total := m.playlist.QueueLen()
+	if total == 0 {
+		return bodyMessage("(empty)", budget)
+	}
+
+	var stateReporters []provider.PlaybackStateReporter
+	if m.hasPlaybackState() {
+		stateReporters = m.playbackStateReporters()
+	}
+	numWidth := len(fmt.Sprintf("%d", total))
+	scroll := clampedScroll(m.queue.scroll, m.queue.cursor, total, budget)
+	// The window only needs the tracks around the cursor, so a long queue is
+	// not cloned on every frame.
+	windowStart := max(0, scroll-1)
+	tracks := m.playlist.QueueWindow(windowStart, 2*budget+2)
+	column := m.libUpNextColumn() // ddsonic: wide rows end at their content (library_rows.go)
+	localScroll, localCursor := scroll-windowStart, m.queue.cursor-windowStart
+	// clampedScroll counts tracks, but album headers take rows too. Advance
+	// past headers until the rows from scroll through the cursor fit.
+	for localScroll < localCursor && m.albumSeparatorRows(tracks, localScroll, localCursor, m.showAlbumHeaders) > budget {
+		localScroll++
+	}
+
+	lines := make([]string, 0, budget)
+	for row := range m.playlistRows(tracks, localScroll, m.showAlbumHeaders) {
+		if len(lines) >= budget {
+			break
+		}
+		if row.Index < 0 {
+			// A header on the last row would hide the track under it, and the
+			// track is what the row is for.
+			if len(lines)+1 < budget {
+				lines = append(lines, m.albumSeparator(row.Album, row.Year))
+			}
+			continue
+		}
+		restoreWidth := ui.WithPanelWidth(m.libTrackRowWidth(row.Track, 3+numWidth+2, column, false)) // ddsonic
+		lines = append(lines, m.queueRow(row.Track, windowStart+row.Index, numWidth, stateReporters))
+		restoreWidth()
+	}
+	return strings.Join(padLines(lines, budget, len(lines)), "\n")
+}
+
+// queueRow renders one queued track: cursor, played marker, position, title,
+// and a right-aligned duration.
+func (m Model) queueRow(t playlist.Track, idx, numWidth int, reporters []provider.PlaybackStateReporter) string {
+	style := playlistItemStyle
+	selected := idx == m.queue.cursor
+	if selected {
+		style = playlistSelectedStyle
+	}
+	if t.Unplayable {
+		style = playlistUnavailableStyle
+		if selected {
+			style = dimStyle
+		}
+	}
+
+	cursorMarker := " "
+	if selected {
+		cursorMarker = ">"
+	}
+	stateMarker, stateStyle := " ", playlistActiveStyle
+	if t.Unplayable {
+		stateMarker, stateStyle = "!", playlistUnavailableStyle
+	} else if state, ok := playbackStateFrom(reporters, t); ok {
+		switch {
+		case state.Played:
+			stateMarker, stateStyle = playedMarker, activeToggle
+		case state.Position > 0:
+			stateMarker, stateStyle = partialMarker, dimStyle
+		}
+	}
+	markers := cursorMarker + stateMarker + " "
+	styled := dimStyle.Render(cursorMarker) + stateStyle.Render(stateMarker) + " "
+
+	duration := formatTrackTime(t.DurationSecs)
+	durationGap := 0
+	if duration != "" {
+		durationGap = lipgloss.Width(duration) + 1
+	}
+	prefixWidth := lipgloss.Width(markers) + numWidth + 2 // 2 for ". "
+	name := truncate(trackViewName(t), ui.PanelWidth-prefixWidth-durationGap)
+
+	line := styled + style.Render(fmt.Sprintf("%*d. ", numWidth, idx+1)) + style.Render(name)
+	if duration != "" {
+		padding := max(1, ui.PanelWidth-lipgloss.Width(line)-lipgloss.Width(duration))
+		line += strings.Repeat(" ", padding) + dimStyle.Render(duration)
+	}
+	return line
+}
+
+// clampedScroll keeps the cursor inside the visible window without mutating
+// the overlay's stored scroll, which the key handler owns.
+func clampedScroll(scroll, cursor, count, budget int) int {
+	if count <= budget {
+		return 0
+	}
+	scroll = min(max(0, scroll), max(0, count-budget))
+	if cursor < scroll {
+		return cursor
+	}
+	if cursor >= scroll+budget {
+		return min(cursor-budget+1, count-budget)
+	}
+	return scroll
+}
+
+// — track info —
+
+func (m Model) renderInfoBody() string {
+	if body, ok := m.libInfoBody(); ok { // ddsonic: with the album's artwork (library_info.go)
+		return body
+	}
+	budget := m.effectivePlaylistVisible()
+	lines := m.infoLines()
+	start := min(m.infoScroll, max(0, len(lines)-budget))
+	end := min(start+budget, len(lines))
+	return bodyLines(lines[start:end], budget)
+}
+
+func (m Model) infoLines() []string {
+	var lines []string
+	for _, field := range m.metadataFields() {
+		lines = append(lines, dimStyle.Render("  "+field.label+": ")+trackStyle.Render(field.value))
+	}
+	if path := metadataText(m.selectedMetadataTrack().Path); path != "" {
+		lines = append(lines, dimStyle.Render("  Path: ")+trackStyle.Render(path))
+	}
+	if len(lines) == 0 {
+		lines = append(lines, dimStyle.Render("  No track metadata available."))
+	}
+	return lines
+}
+
+func (m *Model) infoMaybeAdjustScroll() {
+	m.infoScroll = min(m.infoScroll, max(0, len(m.infoLines())-m.effectivePlaylistVisible()))
+}
+
+// — URL input —
+
+func (m Model) renderURLBody() string {
+	budget := m.effectivePlaylistVisible()
+	lines := []string{dimStyle.Render("  Paste a stream, track, or playlist URL above.")}
+	if m.urlErr != "" {
+		lines = append(lines, errorStyle.Render("  "+m.urlErr))
+	}
+	return bodyLines(lines, budget)
+}
+
+// — jump to time —
+
+func (m Model) renderJumpBody() string {
+	budget := m.effectivePlaylistVisible()
+	pos := m.player.Position()
+	dur := m.player.Duration()
+	inputLine := dimStyle.Render("  " + formatJumpPlaceholder(dur))
+	if m.jumpInput != "" {
+		inputLine = playlistSelectedStyle.Render("  " + m.textWithCursor("jump", m.jumpInput))
+	}
+	lines := []string{
+		dimStyle.Render(fmt.Sprintf("  %s / %s", formatJumpClock(pos), formatJumpClock(dur))),
+		"",
+		inputLine,
+	}
+	if m.jumpErr != "" {
+		lines = append(lines, errorStyle.Render("  "+m.jumpErr))
+	}
+	return bodyLines(lines, budget)
+}
+
+// — lyrics —
+
+func (m Model) lyricsHelpLine() string {
+	return m.commandHelp(commandModeLyrics)
+}
+
+func (m Model) renderLyricsBody() string {
+	visible := m.effectivePlaylistVisible()
+	if visible <= 0 {
+		return ""
+	}
+
+	var lines []string
+	switch {
+	case m.lyrics.loading:
+		lines = append(lines, dimStyle.Render("  Searching for lyrics..."))
+	case m.lyrics.err != nil:
+		if errors.Is(m.lyrics.err, lyrics.ErrNotFound) {
+			lines = append(lines, dimStyle.Render("  No lyrics found for this track."))
+		} else {
+			lines = append(lines, errorStyle.Render("  Lyrics fetch failed: "+m.lyrics.err.Error()))
+		}
+	case len(m.lyrics.lines) == 0:
+		artist, title := m.lyricsArtistTitle()
+		if artist == "" && title == "" {
+			lines = append(lines, dimStyle.Render("  No artist/title metadata available."))
+			if track, idx := m.currentPlaybackTrack(); idx >= 0 && track.Stream {
+				lines = append(lines, dimStyle.Render("  Waiting for stream metadata..."))
+			}
+		} else {
+			lines = append(lines, dimStyle.Render("  No lyrics loaded. Press r to retry."))
+		}
+	case m.lyricsSyncable() && m.lyricsHaveTimestamps():
+		pos := m.lyricsPlaybackPosition()
+		activeIdx := -1
+		for i, line := range m.lyrics.lines {
+			if line.Start <= pos {
+				activeIdx = i
+			} else {
+				break
+			}
+		}
+		half := visible / 2
+		startIdx := max(activeIdx-half, 0)
+		endIdx := startIdx + visible
+		if endIdx > len(m.lyrics.lines) {
+			endIdx = len(m.lyrics.lines)
+			startIdx = max(endIdx-visible, 0)
+		}
+		for i := startIdx; i < endIdx; i++ {
+			text := m.lyrics.lines[i].Text
+			if text == "" {
+				text = "♪"
+			}
+			if i == activeIdx {
+				lines = append(lines, playlistSelectedStyle.Render("  "+text))
+			} else {
+				lines = append(lines, dimStyle.Render("  "+text))
+			}
+		}
+	default:
+		endIdx := min(m.lyrics.scroll+visible, len(m.lyrics.lines))
+		for i := m.lyrics.scroll; i < endIdx; i++ {
+			text := m.lyrics.lines[i].Text
+			if text == "" {
+				text = "♪"
+			}
+			lines = append(lines, dimStyle.Render("  "+text))
+		}
+	}
+	return bodyLines(lines, visible)
+}
+
+// — online (net) search —
+
+func (m Model) netSearchSource() string {
+	if m.netSearch.soundcloud {
+		return "SoundCloud"
+	}
+	return "YouTube"
+}
+
+func (m Model) netSearchHeaderLine() string {
+	if m.netSearch.screen == netSearchResults {
+		return sepHeaderN("Online Results", m.netSearch.cursor+1, len(m.netSearch.results))
+	}
+	return m.promptHeader("net-search", m.netSearchSource()+" search", m.netSearch.query)
+}
+
+func (m Model) netSearchHelpLine() string {
+	if m.netSearch.screen == netSearchResults {
+		return m.netSearchResultsHelpLine()
+	}
+	return m.commandHelp(commandModeNetSearch)
+}
+
+func (m Model) renderNetSearchBody() string {
+	budget := m.effectivePlaylistVisible()
+	if m.netSearch.screen == netSearchInput {
+		var lines []string
+		if m.netSearch.loading {
+			lines = append(lines, dimStyle.Render("  Searching "+m.netSearchSource()+"..."))
+		} else {
+			lines = append(lines, dimStyle.Render("  Type a query and press Enter to search "+m.netSearchSource()+"."))
+		}
+		if m.netSearch.err != "" {
+			lines = append(lines, "", errorStyle.Render("  "+m.netSearch.err))
+		}
+		return bodyLines(lines, budget)
+	}
+
+	if len(m.netSearch.results) == 0 {
+		return bodyMessage("No results", budget)
+	}
+	items := make([]string, len(m.netSearch.results))
+	for i, t := range m.netSearch.results {
+		items[i] = truncate(trackViewName(t), ui.PanelWidth-8)
+	}
+	return windowList(items, m.netSearch.cursor, m.netSearch.scroll, budget)
+}
+
+// — provider (Spotify) search —
+
+func (m Model) spotSearchHeaderLine() string {
+	switch m.spotSearch.screen {
+	case spotSearchResults:
+		// ddsonic: the results name their provider and query (library_search.go).
+		return sepHeaderN(m.spotSearchResultsLabel(), m.spotSearch.cursor+1, len(m.spotSearch.results))
+	case spotSearchPlaylist:
+		return sepHeaderN("Add to Playlist", m.spotSearch.cursor+1, len(m.spotSearch.playlists)+1)
+	case spotSearchNewName:
+		return m.promptHeader("spot-playlist-name", "New Playlist", m.spotSearch.newName)
+	default:
+		return m.promptHeader("spot-search", m.spotSearchPromptLabel(), m.spotSearch.query) // ddsonic: names the provider
+	}
+}
+
+func (m Model) spotSearchHelpLine() string {
+	switch m.spotSearch.screen {
+	case spotSearchResults:
+		return m.spotSearchResultsHelpLine()
+	case spotSearchPlaylist:
+		return m.spotSearchPlaylistHelpLine()
+	case spotSearchNewName:
+		return m.commandHelp(commandModeSpotSearch)
+	default:
+		return m.commandHelp(commandModeSpotSearch)
+	}
+}
+
+func (m Model) renderSpotSearchBody() string {
+	budget := m.effectivePlaylistVisible()
+	// ddsonic: the picker shows no errors, but the sign-in prompt asks for a key.
+	showError := m.spotSearch.err != "" && (m.spotSearch.screen != spotSearchPlaylist || m.spotSearchAsksSignIn())
+	if m.spotSearch.screen == spotSearchNewName && m.spotSearch.err != "" {
+		showError = true
+	}
+	// ddsonic: a sign-in in flight shows as it does in the library, with the
+	// address to open by hand (library_signin.go).
+	errLines := []string{errorStyle.Render("  " + m.spotSearch.err)}
+	if m.spotSearch.err == libSigningIn {
+		errLines = m.libSigningInLines(budget)
+	}
+	if m.spotSearch.notice != "" && len(errLines) < budget {
+		errLines = append([]string{dimStyle.Render("  " + m.spotSearch.notice)}, errLines...)
+	}
+	bodyBudget := budget
+	if showError {
+		bodyBudget = max(0, bodyBudget-len(errLines))
+	}
+	var body string
+	switch m.spotSearch.screen {
+	case spotSearchResults:
+		switch {
+		case m.spotSearch.albumLoading:
+			body = bodyLines([]string{loadingLine("Loading album…")}, bodyBudget)
+		case len(m.spotSearch.results) == 0:
+			body = bodyMessage("No results", bodyBudget)
+		default:
+			body = m.renderSpotSearchResults(bodyBudget)
+		}
+	case spotSearchPlaylist:
+		if m.spotSearch.loading {
+			body = bodyLines([]string{loadingLine("Loading playlists…")}, bodyBudget)
+			break
+		}
+		track := m.spotSearch.selTrack
+		head := dimStyle.Render("  " + truncate(fmt.Sprintf("%s - %s", track.Artist, track.Title), ui.PanelWidth-2))
+		count := len(m.spotSearch.playlists) + 1
+		items := make([]string, count)
+		for i := range count {
+			if i < len(m.spotSearch.playlists) {
+				items[i] = m.spotSearch.playlists[i].Name
+			} else {
+				items[i] = "+ New Playlist..."
+			}
+		}
+		list := windowList(items, m.spotSearch.cursor, m.spotSearch.scroll, max(0, bodyBudget-1))
+		body = strings.Join([]string{head, list}, "\n")
+		if bodyBudget < 2 { // ddsonic: one row, or none, is the track's line alone
+			body = head
+		}
+	case spotSearchNewName:
+		body = bodyMessage("Enter a name for the new playlist above.", bodyBudget)
+	default:
+		var lines []string
+		if m.spotSearch.loading {
+			lines = append(lines, dimStyle.Render("  "+m.spotSearchLoadingLabel())) // ddsonic: names the provider and query
+		} else {
+			lines = append(lines, dimStyle.Render("  Type a query and press Enter to search."))
+		}
+		body = bodyLines(lines, bodyBudget)
+	}
+	if showError {
+		if bodyBudget == 0 {
+			body = "" // ddsonic: the sign-in's rows have every row; nothing else pushes one out
+		}
+		errLine := strings.Join(errLines, "\n")
+		if body == "" {
+			return errLine
+		}
+		return strings.Join([]string{body, errLine}, "\n")
+	}
+	return body
+}

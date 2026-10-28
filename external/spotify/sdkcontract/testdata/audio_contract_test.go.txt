@@ -1,0 +1,181 @@
+package audio
+
+// ddsonic's contract with go-librespot's audio key provider and chunked
+// reader, at the pinned version. See
+// docs/ddsonic/design/spotify-token-coordinator.md, 4.3 and 14.5.
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"sync"
+	"testing"
+	"time"
+
+	librespot "github.com/devgianlu/go-librespot"
+	"github.com/devgianlu/go-librespot/ap"
+)
+
+// stalledConn accepts nothing: its first Write blocks until it is closed.
+type stalledConn struct {
+	entered, closed chan struct{}
+	enter, shut     sync.Once
+}
+
+func newStalledConn() *stalledConn {
+	return &stalledConn{entered: make(chan struct{}), closed: make(chan struct{})}
+}
+func (c *stalledConn) Read([]byte) (int, error) { return 0, io.EOF }
+func (c *stalledConn) Write([]byte) (int, error) {
+	c.enter.Do(func() { close(c.entered) })
+	<-c.closed
+	return 0, io.ErrClosedPipe
+}
+func (c *stalledConn) Close() error                     { c.shut.Do(func() { close(c.closed) }); return nil }
+func (c *stalledConn) LocalAddr() net.Addr              { return nil }
+func (c *stalledConn) RemoteAddr() net.Addr             { return nil }
+func (c *stalledConn) SetDeadline(time.Time) error      { return nil }
+func (c *stalledConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *stalledConn) SetWriteDeadline(time.Time) error { return nil }
+
+// stalledPump is a key provider whose writer is inside a Send that does not
+// return, with one more Request queued behind it on ctx2. second receives
+// that Request's result.
+func stalledPump(t *testing.T, ctx2 context.Context) (a *ap.Accesspoint, second chan error) {
+	t.Helper()
+	conn := newStalledConn()
+	a = ap.DDSonicContractAP(conn)
+	p := NewAudioKeyProvider(&librespot.NullLogger{}, a)
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	first := make(chan error, 1)
+	go func() { _, err := p.Request(ctx1, make([]byte, 16), make([]byte, 20)); first <- err }()
+	select {
+	case <-conn.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the key pump did not reach its Send")
+	}
+	cancel1()
+	<-first
+	second = make(chan error, 1)
+	go func() { _, err := p.Request(ctx2, make([]byte, 16), make([]byte, 20)); second <- err }()
+	t.Cleanup(a.Close)
+	return a, second
+}
+
+// STOP if this fails: with patch 0002, a Request queued behind a stalled
+// write, and not yet committed, ends with its context (the pre-commit
+// cancellation the owners accepted). v0.9.1 held it until the access point
+// closed.
+func TestDDSonicContractKeyRequestFollowsContextBeforeCommit(t *testing.T) {
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	t.Cleanup(cancel2)
+	_, second := stalledPump(t, ctx2)
+	select {
+	case err := <-second:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("the queued Request = %v, want its context's DeadlineExceeded", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the queued Request did not end with its context")
+	}
+}
+
+// STOP if this fails: a Request stalled behind the writer, on a context that
+// does not end, is released when a Close of the access point begins.
+func TestDDSonicContractDoneReleasesKeyRequest(t *testing.T) {
+	a, second := stalledPump(t, context.Background())
+	go a.Close()
+	select {
+	case err := <-second:
+		if !errors.Is(err, ap.ErrAccesspointClosed) {
+			t.Fatalf("the released Request = %v, want ap.ErrAccesspointClosed", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the access point's Close did not release the stalled Request")
+	}
+}
+
+// STOP if this fails: a setup that starts on a retired bundle must fail at
+// once.
+func TestDDSonicContractRequestAfterCloseFails(t *testing.T) {
+	a := ap.DDSonicContractAP(newStalledConn())
+	p := NewAudioKeyProvider(&librespot.NullLogger{}, a)
+	a.Close()
+	done := make(chan error, 1)
+	go func() { _, err := p.Request(context.Background(), make([]byte, 16), make([]byte, 20)); done <- err }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ap.ErrAccesspointClosed) {
+			t.Fatalf("a Request after Close = %v, want ap.ErrAccesspointClosed", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a Request made after Close did not fail at once")
+	}
+}
+
+// lifetimeTransport is ddsonic's stream transport in miniature: every
+// request is put on the stream's own context.
+type lifetimeTransport struct {
+	life    context.Context
+	entered chan struct{}
+	once    *sync.Once
+}
+
+func (t lifetimeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(t.life)
+	t.once.Do(func() { close(t.entered) })
+	<-r.Context().Done()
+	return nil, r.Context().Err()
+}
+
+func firstChunk(t *testing.T) (cancelLife context.CancelFunc, finished chan error) {
+	t.Helper()
+	life, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	entered := make(chan struct{})
+	finished = make(chan error, 1)
+	client := &http.Client{Transport: lifetimeTransport{life, entered, new(sync.Once)}}
+	go func() {
+		_, err := NewHttpChunkedReader(&librespot.NullLogger{}, client, "https://synthetic.invalid/audio")
+		finished <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the chunked reader did not ask for its first chunk")
+	}
+	return cancel, finished
+}
+
+// A reviewed expectation: the chunked reader's first request is made on a
+// context of its own, so nothing a stream setup's context does ends it. It
+// is why every unaccepted track open ends its HTTP lifetime itself.
+func TestDDSonicContractFirstChunkIgnoresSetupContext(t *testing.T) {
+	setup, cancelSetup := context.WithCancel(context.Background())
+	_, finished := firstChunk(t)
+	cancelSetup() // a setup context, as NewStream's caller would end it
+	<-setup.Done()
+	select {
+	case err := <-finished:
+		t.Fatalf("EXPECTATION CHANGED: the first chunk request ended without its client's context: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// STOP if this fails: the open handle would no longer release a stalled
+// open. Ending the context the client puts on its requests ends the first
+// chunk request, and the reader's constructor returns an error.
+func TestDDSonicContractClientContextEndsFirstChunk(t *testing.T) {
+	cancelLife, finished := firstChunk(t)
+	cancelLife()
+	select {
+	case err := <-finished:
+		if err == nil {
+			t.Fatal("the chunked reader succeeded with its first request cancelled")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ending the client's context did not end the first chunk request")
+	}
+}

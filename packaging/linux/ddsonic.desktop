@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ddsonic
+GenericName=Music Player
+Comment=Terminal music player for Spotify, YouTube Music, local music and internet radio
+Exec=ddsonic
+Icon=ddsonic
+Terminal=true
+StartupNotify=false
+Categories=AudioVideo;Audio;Player;ConsoleOnly;
+Keywords=music;player;spotify;youtube;radio;terminal;

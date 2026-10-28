@@ -1,0 +1,146 @@
+# ddsonic configuration
+#
+# ddsonic reads ~/.config/ddsonic/config.toml (DDSONIC_CONFIG_DIR picks another
+# folder). You don't need this file to start: `ddsonic setup` writes the
+# Spotify, YouTube Music and music-folder settings for you, and everything
+# else has a default. Copy the lines you want to change. A comment needs a
+# line of its own: ddsonic does not read one that follows a value.
+#
+# The file must be valid TOML: text goes in quotes ("Tokyo Night"), and a key
+# appears once. ddsonic does not start with a file it cannot parse, and says
+# which line is wrong.
+#
+# ddsonic is a fork of cliamp and reads the same file format. The sections of
+# cliamp's other providers ([navidrome], [plex], [jellyfin], …) and of its
+# plugins may stay in the file; ddsonic ignores them.
+
+# --- Playback ---
+
+# Default volume in dB (up to +6)
+volume = 0
+
+# Repeat mode: "off", "all", or "one"
+repeat = "off"
+
+# Start with shuffle enabled
+shuffle = false
+
+# Start with mono output (L+R downmix)
+# mono = false
+
+# Shift+Left/Right seek jump in the queue, in seconds (6-600)
+seek_large_step_sec = 30
+
+# Lyric timestamp adjustment in milliseconds (-10000 to 10000)
+# lyrics_offset_ms = 0
+
+# EQ preset: "Flat", "Rock", "Pop", "Jazz", "Classical",
+#            "Bass Boost", "Treble Boost", "Vocal", "Electronic", "Acoustic"
+# Leave empty or "Custom" to use the eq values below
+eq_preset = "Flat"
+
+# 10-band EQ gains in dB (range: -12 to 12)
+# Bands: 70Hz, 180Hz, 320Hz, 600Hz, 1kHz, 3kHz, 6kHz, 12kHz, 14kHz, 16kHz
+# Applied when eq_preset is "Custom" or empty
+eq = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+# Advanced audio settings (most people don't need to change these)
+# Output sample rate: 0 detects it, or 22050, 44100, 48000, 96000, 192000
+# sample_rate = 0
+# Speaker buffer in ms (50-5000; try 2000 for unstable radio streams)
+# buffer_ms = 250
+# Resample quality, 1-4, where 4 is best
+# resample_quality = 4
+# 16 or 32 (for FFmpeg-decoded formats)
+# bit_depth = 16
+
+# --- Local music ---
+
+# The folder Local → Albums, Artists and Genres are indexed from, and where
+# Local → Folders opens. Default: $XDG_MUSIC_DIR, else ~/Music.
+# `ddsonic setup` → Local music folder sets it.
+# initial_directory = "~/Music"
+
+# --- Look ---
+
+# UI theme name (`ddsonic theme list` shows them; your own go in ~/.config/ddsonic/themes/)
+# theme = "Tokyo Night"
+
+# Visualizer mode (`ddsonic vis list` shows them all; "None" turns it off).
+# `v` in the queue switches it and saves the choice here.
+# visualizer = "Bars"
+
+# Visualizer height in rows on a terminal of at least 80x24 (default: 5, range 1-40)
+# vis_rows = 5
+
+# Whether the visualizer's bar height follows the volume (default: true)
+# vis_volume_linked = true
+
+# Hide the key bar at the bottom of the screen. Ctrl+G toggles it.
+# hide_help_bar = true
+
+# Reduce CPU usage by lowering UI cadence and disabling visualization
+# low_power = false
+
+# --- Startup ---
+
+# Default provider, as --provider: "cliamp" (the cliamp radio channels, the
+# default), "radio", "spotify" or "ytmusic"
+# provider = "cliamp"
+
+# Log level: "debug", "info", "warn", or "error" (default "info")
+# The log is ~/.config/ddsonic/ddsonic.log
+# log_level = "info"
+
+# --- ddsonic ---
+
+# [ddsonic]
+# How old a source's last sync may get before ddsonic syncs it again at
+# startup. "0s" syncs at every start; `r` in the library syncs on demand.
+# spotify_refresh = "2h"
+# youtube_refresh = "2h"
+#
+# Other people's YouTube Music playlists to sync, as links or IDs
+# youtube_playlists = ["https://music.youtube.com/playlist?list=PL…"]
+#
+# A border around the screen (default: true)
+# border = true
+#
+# Album artwork in the track info view, in Kitty and Ghostty (default: true)
+# artwork = true
+
+# --- Spotify (optional; needs a Premium account) ---
+#
+# The section's presence turns Spotify on. `ddsonic setup` writes it. Your own
+# Spotify Developer app's client_id is recommended; without one, ddsonic uses a
+# shared client that Spotify rate-limits more often. See docs/spotify.md.
+# Until you have signed in, the library says "Spotify sign-in required": open
+# Spotify there and press Enter on "Sign in to Spotify".
+#
+# [spotify]
+# client_id = "your-spotify-app-client-id"
+# bitrate = 320
+
+# --- YouTube Music (optional; needs yt-dlp) ---
+#
+# The section's presence turns YouTube Music on. Sign in with a browser's
+# cookies, with your own Google OAuth client, or both. See docs/ddsonic/youtube.md.
+#
+# [ytmusic]
+# A browser you are signed in to: firefox, chrome, brave+gnomekeyring, …
+# cookies_from = "firefox"
+#
+# client_id = "your-google-oauth-client-id"
+# client_secret = "your-google-oauth-client-secret"
+# Then run: ddsonic youtube signin
+
+# --- Radio ---
+#
+# Radio needs no settings here. Your own stations go in
+# ~/.config/ddsonic/radios.toml (see "Custom Radio Stations" in docs/configuration.md).
+
+# --- Downloads ---
+
+# Where saved tracks go. Empty uses ~/Music/ddsonic.
+[downloads]
+directory = ""

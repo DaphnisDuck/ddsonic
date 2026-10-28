@@ -1,0 +1,411 @@
+DDMUS INDEPENDENT CODE REVIEW — 2026-09-30
+
+Reviewed revision: ea0a4a3 (v0.10 artwork merge)
+Baseline: local upstream/main
+Working tree was clean before and after the review.
+Review only: no repository code was modified. Behavioral probes used temporary
+files and Go overlays under /tmp. Those temporary files are not required to use
+this report; reproduction scenarios are described below.
+
+SUGGESTED PROMPT FOR CLAUDE
+
+Read CLAUDE.md/AGENTS.md, plan.md, and this report. Address the confirmed review
+findings with narrow, idiomatic changes, starting with R1, R2, R3, R4, and R8.
+Verify each finding against the current code before implementing a fix. Add
+regression tests that reproduce the behavior rather than merely mirror the fix.
+Preserve existing user changes and the project's upstream-merge conventions.
+Use new migrations for database changes; do not edit existing migrations.
+Keep the catalog-first product direction and existing playback engine.
+
+Treat architectural/product suggestions as proposals, not already approved
+behavior changes. Do not remove hidden providers simply because their menus are
+hidden: IPC, plugins, playback, and resume still use them. Avoid a broad rewrite.
+Run the repository's required checks after fixes. Update relevant ddmus docs and
+plan.md as fixes land. Report what was fixed, how it was tested, and anything
+deferred or disproved. Distinguish existing-suite passes from new regression
+tests. Do not claim live-provider or terminal validation unless actually done.
+
+OVERALL ASSESSMENT
+
+The architecture is a solid foundation. The significant defects are mostly at
+component boundaries: request ownership, identity, cancellation, refresh policy,
+and asynchronous terminal output. Targeted hardening is preferable to an
+architectural reset before adding features.
+
+The review covered repository structure, fork changes, milestone/review history,
+documentation, ddmus catalog/sync/library/layout/artwork code, and integration
+with inherited provider/playback code. Unchanged upstream code received less
+depth than the fork additions. Whole-repository tooling covered all packages.
+This was not live authentication, physical-terminal, or cross-platform testing.
+
+SIGNIFICANT FINDINGS
+
+R1 — HIGH: A failed YouTube read can remove cached playlists
+Confidence: confirmed code path. Recoverable catalog loss, not deletion from
+the user's YouTube account.
+
+Locations:
+  catalogsync/youtubesrc/source.go:114 — configured playlist metadata failures
+  external/ytmusic/catalog_sync_oauth.go:284 — apiError
+
+Configured extra playlists are skipped when PlaylistRecord returns
+catalog.ErrForbidden. The resulting snapshot is considered complete, so
+reconciliation removes their membership and Sweep can delete cached tracks.
+apiError maps every HTTP 403 to ErrForbidden, including quota exhaustion.
+Thus a temporary quota failure after listing the account's playlists can discard
+configured followed playlists while the collection reports success.
+
+Fix direction:
+  Distinguish quota/transient failures from inaccessible resources. Preserve
+  previously cached configured playlists on inconclusive reads, or fail the
+  collection. Do not reconcile an incomplete view as authoritative.
+
+Regression test:
+  Seed a configured followed playlist and its tracks in SQLite. Make listing
+  succeed and its metadata request fail with quotaExceeded/403. Run the sync
+  engine and assert the cached playlist/tracks remain and status is accurate.
+  Separately test intentional removal from configuration.
+
+R2 — HIGH: Old asynchronous play requests override new playback or Stop
+Confidence: reproduced with temporary model tests.
+
+Locations:
+  ui/model/library_nav.go:326 — libraryPlayMsg generation check
+  ui/model/library_nav.go:494 — asynchronous Entry.Play
+  ui/model/library_nav.go:540 — libraryPlayTracks
+  ui/model/library_search.go:141 — libraryPlayFrom
+  ui/model/playback_state.go:59 — stopPlayback
+
+lib.playGen changes for new asynchronous library requests, but direct track
+playback, queue replacement, and Stop do not retire the pending library request.
+The older result still matches and replaces the queue.
+
+Reproductions:
+  Start resolving A; directly select B; deliver A's result. A replaces B.
+  Start resolving A; Stop; deliver A's result. Playback starts again.
+
+Fix direction:
+  Give playback intents a common cancellation/generation boundary. New
+  selections, Stop, queue replacement, and shutdown must retire pending library
+  resolutions. Include intents originating outside library navigation.
+
+Regression tests:
+  Deliberately hold an old result while exercising direct library selection,
+  queue selection, Stop, and an IPC-driven replacement. Deliver it afterward and
+  assert both queue and playback remain consistent with the latest intent.
+
+R3 — MEDIUM: SQLite ID reuse lets stale navigation open a different album
+Confidence: reproduced using real SQLite and public library APIs.
+
+Locations:
+  catalog/sqlite/migrations/001_initial.sql — INTEGER PRIMARY KEY entities
+  library/local_catalog.go:51 — localAlbumEntry captures numeric ID
+  library/synced_catalog.go — album/artist/playlist closures
+  library/search.go — retained search actions
+
+Entity IDs can be reused after deletion. Navigation closures retain numeric IDs
+without validating the original provider identity.
+
+Reproduction:
+  Load and retain album A's entry. Remove A and Sweep. Insert B. B gets A's old
+  ID. Calling the retained A.Open.Load returns B's tracks under A's title.
+  Observed: retained title="A" id="1"; new title="B" id=1; returned "Song B".
+
+Fix direction:
+  Prevent internal ID reuse and/or validate the captured catalog.Ref when
+  resolving retained actions. Choose a durable identity policy and migrate
+  existing databases safely. Do not silently redirect stale actions.
+
+Regression tests:
+  Retained album, artist, playlist, and search actions across removal, sweeping,
+  and insertion of a different entity. Include a navigation frame kept open
+  while sync events arrive.
+
+R4 — MEDIUM: Complete album-cache writes accumulate old tracks
+Confidence: reproduced against SQLite.
+
+Locations:
+  catalog/sqlite/write.go:591 — snapWriter.albumTracks
+  catalog/sqlite/queries.go:55 — AlbumTracks
+
+CacheAlbumTracks upserts supplied tracks and marks the album cached. AlbumTracks
+defines its complete list as every track referencing the album. Writing [A,B],
+then [A], still returns [A,B] with cached=true. An empty replacement cannot empty
+the cached album. Liked/playlist tracks can contaminate a later complete list.
+
+Fix direction:
+  Separate complete album membership/order from a track's album metadata
+  association, or reconcile associations carefully without losing tracks held
+  by other collections. This is a modeling issue, not simply a missing DELETE.
+
+Regression tests:
+  Replacement, empty replacement, reordered lists, and removed album members
+  that must remain available through liked songs or playlists.
+
+Related consistency concern:
+  AlbumTracks reads the cached flag and track rows in separate database
+  snapshots. Sweep can invalidate the list between reads. Return both from a
+  coherent read snapshot. Avoid blindly using the existing immediate-write
+  transaction mode for a read-only consistency fix.
+
+R5 — MEDIUM: Disabled providers distort search and still yield track actions
+Confidence: reproduced using public library APIs and SQLite.
+
+Locations:
+  library/search.go:120 — database search before enabled-source filtering
+  library/search.go:127 — section truncation before row filtering
+  library/search.go:189 — entry conversion accepts track results unconditionally
+
+Disabled-provider hits consume database and section limits before unconfigured
+sources are filtered. Valid enabled-source results can disappear. Track results
+do not receive the same source check as albums/artists/playlists.
+
+Reproduction:
+  Seed 25 exact Spotify album matches and a lower-ranked matching local album.
+  Configure no Spotify source. Search displays only "More albums...", hiding
+  the local album. A cached disabled Spotify track is still returned as a
+  playable action.
+
+Fix direction:
+  Apply enabled-source restrictions before database ranking/candidate limits.
+  Intersect explicit source filters with that policy and apply it uniformly to
+  all result kinds and More queries. Test disabled-source dominance.
+
+R6 — MEDIUM: Playlists sharing a first video are incompletely classified
+Confidence: confirmed by inspection.
+
+Location:
+  external/ytmusic/catalog_sync_oauth.go:136 — classifyForSync
+
+The sampled map stores videoID -> one playlistID. Two playlists beginning with
+the same video overwrite that mapping. Only the last receives a classification;
+the other new playlist is omitted until a later sync.
+
+Fix direction:
+  Map each video to all associated playlists and deduplicate the video lookup.
+  Test two or more playlists sharing their sampled music video.
+
+R7 — MEDIUM: Authentication and foreground work escape cancellation ownership
+Confidence: confirmed lifecycle gap. Hung live endpoints were not exercised.
+
+Locations:
+  external/ytmusic/session.go:89,122 — silentTokenRefresh uses Background
+  external/ytmusic/catalog_sync_oauth.go:42 — fresh silent session per operation
+  external/spotify/provider.go:98 — ensureSession uses Background
+  ui/model/library_nav.go:500 — independently rooted play context
+  ui/model/library_search.go:147 — independently rooted play context
+  ui/model/library_info.go:118 — independently rooted artwork context
+  main_catalog.go — runtime-owned background workers and shutdown wait
+
+YouTube token refresh drops the supplied context. Spotify silent session
+initialization likewise uses Background. Cancelling the sync cannot reliably
+cancel these operations. YouTube also recreates sessions and refreshes tokens
+for each catalog operation instead of reusing a synchronized session.
+
+Foreground library play/artwork commands have their own timeouts but no shared
+application lifetime cancellation. Runtime shutdown tracks background workers,
+not all foreground commands. Some authentication behavior is inherited, but
+background catalog sync now exercises it routinely.
+
+Fix direction:
+  Propagate bounded contexts through authentication, reuse synchronized token
+  sources/sessions, and own foreground command cancellation explicitly. Avoid
+  substituting unbounded Background contexts merely to prolong token lifetime.
+  Test cancellation against a stalled local token endpoint and shutdown with
+  foreground work in flight.
+
+R8 — MEDIUM: Artwork selection and terminal output can get out of sync
+Confidence: selection mismatch reproduced. Terminal command-ordering defect
+identified from the execution path; not reproduced in a physical terminal.
+
+Locations:
+  ui/model/library_info.go:256 — message-type allowlist for synchronization
+  ui/model/library_info.go:275 — asynchronous output and optimistic sent state
+  ui/model/library_info_test.go — sequential command execution helpers
+
+First issue:
+  An asynchronous queue replacement changes the inspected track without
+  triggering image synchronization. With both covers cached, the view refers
+  to the new track while the shared terminal image ID still holds the old one.
+  Probe output: "view uses audio:new but terminal retains audio:I"; no raw image
+  output was issued. An uncached replacement also needs a load initiated.
+
+Second issue:
+  The model records an image/placement as sent before the tea.Raw command runs.
+  Commands from successive updates execute asynchronously and can arrive out
+  of order. They all target one terminal image ID. A late old transmission or
+  placement can overwrite a newer one without another corrective update.
+  Correctly keying decoded images does not solve terminal-output ordering.
+  Sequence within one update alone does not order commands across updates.
+
+Fix direction:
+  Derive artwork work from selected identity and layout changes, not only a
+  message allowlist. Serialize terminal operations with explicit generations
+  or acknowledgements. Preserve cleanup on normal quit and signal exits.
+
+Regression tests:
+  Delayed transmission, rapid resize, cached/uncached queue replacement while
+  info is open, close/reopen, and quit with output pending. Execute commands in
+  adversarial order; do not only delay the image-loading result.
+
+R9 — ARCHITECTURE/CORRECTNESS: Catalog invalidation is incomplete
+Confidence: established from level interfaces and refresh routing.
+
+Locations:
+  library/synced_catalog.go:122 — child levels intentionally not CatalogLevel
+  library/search.go:100 — searchLevel lacks CatalogLevel
+  ui/model/library_nav.go:247 — catalog-dependent frame invalidation
+
+Child levels are excluded from refresh because they might perform live calls.
+An open cached playlist therefore does not refresh after its sync. An unchanged
+visible search query does not refresh when indexing/enrichment adds matches.
+The design conflates "depends on catalog data" with "may fetch from network".
+
+Fix direction:
+  Model catalog dependencies separately from loading policy. Refresh cached
+  views locally after commits without unexpectedly rerunning live discovery.
+  Test open playlists and search results during sync and enrichment, retaining
+  cursor identity when the selected item survives.
+
+PERFORMANCE AND RESOURCE FINDINGS
+
+P1 — Unbounded session artwork memory
+  ui/model/library_info.go:51 retains every decoded image plus its encoded
+  transmission for the session. A 512x512 RGBA image alone uses about 1 MiB.
+  Local artwork keys use audio paths, so tracks sharing a cover can retain
+  duplicates. The 100 MB disk cache limit does not bound decoded memory.
+  Direction: byte-bounded memory cache, bounded loading concurrency, lifecycle
+  cancellation, and practical deduplication. Keep the displayed image pinned.
+
+P2 — Full-list allocation on every library redraw
+  ui/model/library_view.go:211 rebuilds libraryRows and libTrackNumbers over
+  every entry. Width measurements are cached, but these structures are not.
+  Temporary benchmark, rendering 25 visible rows:
+    100 entries:       about 0.048 ms, 7.6 KB allocated/render
+    10,000 entries:    about 0.196 ms, 332 KB allocated/render
+    100,000 entries:   about 2.16 ms, 3.21 MB allocated/render
+  Direction: cache row descriptors, numbering, and cursor-to-row mapping when
+  entries change; render only the visible window.
+
+P3 — Broad-prefix search misses the plan's sub-50 ms target at 100k tracks
+  Existing BenchmarkSearch/sym averaged 84 ms across 20 iterations, before the
+  60 ms UI debounce. More selective queries were substantially faster.
+  Direction: profile broad-match FTS ranking and cancellation before changing
+  schema or search semantics. Measurements are synthetic, hardware-specific
+  means, not production latency percentiles.
+
+Existing BenchmarkSyncWrites results (three iterations):
+  Initial snapshots: about 636 ms; unchanged snapshots: about 406 ms.
+  These measurements do not justify immediately splitting collection
+  transactions and weakening their straightforward atomicity.
+
+ARCHITECTURE, PRODUCT DIRECTION, AND MAINTAINABILITY
+
+Strong foundations:
+  - Catalog entities are separate from collection membership.
+  - Transactional snapshots, failure preservation, and reconciliation rules
+    are generally sound, aside from the source completeness issue in R1.
+  - WAL readers, a serialized writer, prepared statements, guarded updates,
+    migrations, private database permissions, and FTS escaping are deliberate.
+  - SQL stays out of UI and sync engine; providers own their data mapping.
+  - Level/Entry is a small useful seam. Search reuses browsing actions.
+  - Artwork loading, protocol encoding, and UI layout are cleanly separated.
+  - Responsive layout has meaningful size-matrix and resize tests. No further
+    sizing defect was demonstrated in this review.
+  - The Go code is generally readable and idiomatic. Broad style rewrites and
+    speculative abstractions should not be prioritized.
+
+Product concern, not an unconditionally approved behavior change:
+  library/synced_catalog.go:212 tries live ArtistAlbums before showing cached
+  albums, including through All Music. This intentional behavior exposes
+  provider latency inside the unified library. A catalog-first artist view
+  with an explicit full-discography action would better support the direction
+  of music source becoming an implementation detail.
+
+Inherited surface area:
+  Hidden providers still serve playback, IPC, plugins, and resume; they are
+  not automatically dead code. Trace consumers before removing them. The
+  disabled updater implementation, stale branding/help, and release packaging
+  are clearer cleanup candidates.
+
+Release concern:
+  .github/workflows/release.yml:151 still produces cliamp-* artifacts and its
+  Homebrew publishing job targets the upstream repository. Correct or disable
+  fork-inappropriate release jobs before distributing automated ddmus builds.
+  This can wait if the project continues to be built locally.
+
+Toolchain concern:
+  mise.toml selects go="latest", despite instructions describing a pinned
+  toolchain. Align local and CI tooling, including analyzer versions, so
+  validation is reproducible.
+
+VALIDATION AND LIMITATIONS
+
+Passed:
+  go test ./...
+  go test -race -count=1 ./...
+  go vet ./...
+  staticcheck ./... (installed staticcheck 2026.2.1 / 0.8.1)
+  gofmt -l . (no output; no rewriting)
+  git diff --check
+
+Environment: Go 1.27.1, Linux/amd64, AMD Ryzen 9 5950X.
+The existing suite passed; temporary behavioral probes exposed the defects
+described above. Passing race tests does not rule out logical ordering races.
+
+Vulnerability tooling:
+  The CI-pinned govulncheck v1.1.4 crashed during call-graph analysis with
+  "unexpected expr: *ast.KeyValueExpr". Package-level fallback completed and
+  reported no vulnerable imported packages. It reported three module-level
+  advisories in golang.org/x/crypto v0.55.0: GO-2026-6355, GO-2026-6354, and
+  GO-2026-5932, affecting ssh/openpgp packages outside the reported imported
+  package findings. This is not a completed symbol-level security clearance.
+  No demonstrated SQL injection, command injection, or credential disclosure
+  was found in the reviewed ddmus paths.
+
+Selected statement coverage:
+  catalog                     92.5%
+  catalog/sqlite              78.7%
+  catalogsync                 86.5%
+  catalogsync/localsrc        92.4%
+  catalogsync/radiosrc       100.0%
+  catalogsync/spotifysrc      97.4%
+  catalogsync/youtubesrc      94.9%
+  library                     90.7%
+  artwork                     90.0%
+  ui/kittyimg                 96.2%
+  ui/model                    62.3% (includes substantial upstream UI)
+
+The important coverage gap is cross-operation behavior. Existing tests cover
+failed pages, cancellation, migration rollback/concurrent initialization,
+unchanged writes, layout sizes, and stale load results. Many model helpers run
+commands sequentially, missing interactions among playback intent, catalog
+reconciliation, asynchronous queue changes, and terminal writes.
+
+Not validated: live provider authentication, real terminal graphics, other
+operating systems, or the opt-in real-music-folder benchmark. No claim of an
+exhaustive security audit is made.
+
+RECOMMENDED NEXT WORK
+
+Before adding features:
+  1. R1: preserve cached content on inconclusive YouTube reads.
+  2. R2: unify playback supersession and cancellation.
+  3. R3/R4: make retained identity and album membership semantics reliable.
+  4. R8: fix artwork selection synchronization and output ordering.
+  5. R5/R6/R7/R9: repair search filtering, classification, lifecycle ownership,
+     and catalog invalidation with targeted regression tests.
+
+Then:
+  Bound artwork memory, cache render metadata, and profile broad FTS prefixes.
+  Add deterministic cross-layer tests with delayed/out-of-order completions,
+  real temporary SQLite databases, and stalled local HTTP fixtures. Consolidate
+  ownership boundaries only as needed to fix those behaviors.
+
+Can safely wait:
+  Broad provider removal, cosmetic renaming, replacing global layout state,
+  additional terminal image backends, and transaction redesign. Release
+  packaging becomes a prerequisite when automated distribution is intended.
+
+Final assessment: retain the catalog and navigation architecture. Harden
+request ownership, identity, and refresh policy instead of restarting it.

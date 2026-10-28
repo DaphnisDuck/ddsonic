@@ -1,0 +1,15 @@
+# ddsonic: provenance of the tracked go-librespot replacement (third_party/go-librespot).
+# The base is the upstream module, authenticated by its go.sum hashes; the active
+# tree is the base with the patches below applied in order. active-h1 is the
+# module dirhash (h1) of third_party/go-librespot under the base's module path
+# and version, computed locally (it is not an upstream hash; base-h1 is, and
+# Go authenticates it). The SDK contract gate (make sdk-contract) re-derives all of it.
+# docs/ddsonic/upstream.md describes the procedure.
+module github.com/devgianlu/go-librespot
+base-version v0.9.1
+base-h1 h1:cgHB0Qo3GgqBe+8iZ1qw+kPJVp1s0obTlTXMdPsgb0U=
+base-gomod-h1 h1:tcLnLzCmW9xbPe2Uo0wMiu08d1wzNI2b2zuWlFYEx00=
+active-h1 h1:hjYPlzj/Nt5SVvyCSYpY801tR7gjpGmpxJGR5AYxmRQ=
+patch patches/go-librespot/0001-player-guard-cdn-quarantine-map.patch sha256:a3888e30d63ccc8845b62966b28870de64ec60e82d4d917bcb635c0387e8152e
+patch patches/go-librespot/0002-audio-key-requests-across-connection-changes.patch sha256:49daf3eb236efc5f50abc94ed5925a84c9c0a74aff04ddd95a77c0e1dedf5672
+patch patches/go-librespot/0003-audio-prefetch-single-flight.patch sha256:513a82e43f75d88c98b11d1aec8079df0db63de23b0cacf273fe196d89ec447e

@@ -1,0 +1,19 @@
+package spotify
+
+// ddsonic composed stage only (M3b2 plan v7 §2.6): the shipped
+// productionLibrespotSession (session_auth_ddsonic.go) without its go-test
+// refusal, and nothing else. The SDK contract runner binds this file's bytes
+// and checks, with go/parser and go/printer, that the shipped function is
+// exactly this body behind that refusal (step 13). It is overlaid as
+// external/spotify/composed_bypass_ddsonic_test.go, so it never compiles into
+// a non-test build, and go test ./... never compiles it at all.
+
+import (
+	"context"
+
+	"github.com/devgianlu/go-librespot/session"
+)
+
+func composedLibrespotSession(ctx context.Context, opts *session.Options) (*session.Session, error) {
+	return session.NewSessionFromOptions(ctx, opts)
+}

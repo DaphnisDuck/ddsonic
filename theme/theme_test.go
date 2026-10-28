@@ -1,0 +1,179 @@
+package theme
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestDefault(t *testing.T) {
+	d := Default()
+	if d.Name != DefaultName {
+		t.Errorf("Name = %q, want %q", d.Name, DefaultName)
+	}
+	if !d.IsDefault() {
+		t.Error("IsDefault() should be true for default theme")
+	}
+}
+
+func TestIsDefault(t *testing.T) {
+	tests := []struct {
+		name  string
+		theme Theme
+		want  bool
+	}{
+		{"empty hex values", Theme{Name: "Default"}, true},
+		{"has accent", Theme{Name: "Custom", Accent: "#ff0000"}, false},
+		{"has background", Theme{Name: "Custom", BG: "#000000"}, false},
+		{"has green", Theme{Name: "Custom", Green: "#00ff00"}, false},
+		{"has bright fg", Theme{Name: "Custom", BrightFG: "#ffffff"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.theme.IsDefault(); got != tt.want {
+				t.Errorf("IsDefault() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParse(t *testing.T) {
+	input := `# Solarized Dark theme
+bg = "#002b36"
+accent = "#268bd2"
+bright_fg = "#93a1a1"
+fg = "#839496"
+green = "#859900"
+yellow = "#b58900"
+red = "#dc322f"
+`
+	th, err := Parse("solarized-dark", strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+
+	if th.Name != "solarized-dark" {
+		t.Errorf("Name = %q, want solarized-dark", th.Name)
+	}
+	if th.BG != "#002b36" {
+		t.Errorf("BG = %q, want #002b36", th.BG)
+	}
+	if th.Accent != "#268bd2" {
+		t.Errorf("Accent = %q, want #268bd2", th.Accent)
+	}
+	if th.BrightFG != "#93a1a1" {
+		t.Errorf("BrightFG = %q, want #93a1a1", th.BrightFG)
+	}
+	if th.FG != "#839496" {
+		t.Errorf("FG = %q, want #839496", th.FG)
+	}
+	if th.Green != "#859900" {
+		t.Errorf("Green = %q, want #859900", th.Green)
+	}
+	if th.Yellow != "#b58900" {
+		t.Errorf("Yellow = %q, want #b58900", th.Yellow)
+	}
+	if th.Red != "#dc322f" {
+		t.Errorf("Red = %q, want #dc322f", th.Red)
+	}
+}
+
+func TestParseSkipsComments(t *testing.T) {
+	input := `# comment
+accent = "#ff0000"
+# another comment
+`
+	th, err := Parse("test", strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if th.Accent != "#ff0000" {
+		t.Errorf("Accent = %q, want #ff0000", th.Accent)
+	}
+}
+
+func TestParseEmpty(t *testing.T) {
+	th, err := Parse("empty", strings.NewReader(""))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if !th.IsDefault() {
+		t.Error("empty parse should produce default-like theme")
+	}
+}
+
+func TestParseStripsQuotes(t *testing.T) {
+	// Both single and double quotes should be stripped
+	input := `accent = '#ff0000'
+fg = "#00ff00"
+`
+	th, err := Parse("test", strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if th.Accent != "#ff0000" {
+		t.Errorf("Accent = %q, want #ff0000", th.Accent)
+	}
+	if th.FG != "#00ff00" {
+		t.Errorf("FG = %q, want #00ff00", th.FG)
+	}
+}
+
+func TestParsedThemeNotDefault(t *testing.T) {
+	input := `accent = "#ff0000"`
+	th, err := Parse("custom", strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if th.IsDefault() {
+		t.Error("theme with accent should not be IsDefault()")
+	}
+}
+
+func TestThemeValidate(t *testing.T) {
+	valid := Theme{
+		Name:     "valid",
+		Accent:   "#112233",
+		BrightFG: "#223344",
+		FG:       "#334455",
+		Green:    "#445566",
+		Yellow:   "#556677",
+		Red:      "#667788",
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if err := (Theme{Name: "partial", Accent: "#112233"}).Validate(); err == nil {
+		t.Fatal("Validate() accepted incomplete custom theme")
+	}
+	valid.Red = "red"
+	if err := valid.Validate(); err == nil {
+		t.Fatal("Validate() accepted invalid color")
+	}
+	valid.Red = "#667788"
+	valid.BG = "black"
+	if err := valid.Validate(); err == nil {
+		t.Fatal("Validate() accepted invalid background color")
+	}
+}
+
+func TestFind(t *testing.T) {
+	all := LoadAll()
+	if len(all) == 0 {
+		t.Fatal("no built-in themes")
+	}
+	want := all[0]
+	for _, name := range []string{want.Name, strings.ToUpper(want.Name), strings.ToLower(want.Name)} {
+		got, ok := Find(name)
+		if !ok || got.Name != want.Name {
+			t.Errorf("Find(%q) = %q, %t; want %q", name, got.Name, ok, want.Name)
+		}
+	}
+	for _, name := range []string{"", "default", "DEFAULT", DefaultName} {
+		if got, ok := Find(name); !ok || !got.IsDefault() {
+			t.Errorf("Find(%q) = %+v, %t; want the default theme", name, got, ok)
+		}
+	}
+	if _, ok := Find("no such theme"); ok {
+		t.Error("Find of an unknown theme reported ok")
+	}
+}

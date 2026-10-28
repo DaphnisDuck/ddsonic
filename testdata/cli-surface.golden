@@ -1,0 +1,90 @@
+command ddsonic
+ddsonic flag vol float64 default=0
+ddsonic flag shuffle,no-shuffle bool+no default=false
+ddsonic flag repeat string default=
+ddsonic flag auto-play,no-auto-play bool+no default=false
+ddsonic flag help-bar,no-help-bar bool+no default=true
+ddsonic flag provider string default=
+ddsonic flag start-theme string default=
+ddsonic flag visualizer string default=
+ddsonic flag visualizer-60fps bool default=false
+ddsonic flag eq-preset string default=
+ddsonic flag sample-rate int default=0
+ddsonic flag buffer-ms int default=0
+ddsonic flag resample-quality int default=0
+ddsonic flag bit-depth int default=0
+ddsonic flag audio-device string default=
+ddsonic flag playlist string default=
+ddsonic flag log-level string default=
+ddsonic flag expand-playlist,no-expand-playlist bool+no default=false
+ddsonic flag low-power,no-low-power bool+no default=false
+command ddsonic playlist
+command ddsonic playlist list
+command ddsonic playlist create
+ddsonic playlist create flag ssh string default=
+ddsonic playlist create flag dir []string default=
+command ddsonic playlist rename
+command ddsonic playlist add
+ddsonic playlist add flag dir []string default=
+command ddsonic playlist dirs
+command ddsonic playlist show
+ddsonic playlist show flag json bool default=false
+command ddsonic playlist remove
+ddsonic playlist remove flag index int default=0
+command ddsonic playlist delete
+command ddsonic playlist dedupe
+command ddsonic playlist sort
+ddsonic playlist sort flag by string default="title"
+command ddsonic playlist doctor
+ddsonic playlist doctor flag fix bool default=false
+command ddsonic playlist export
+ddsonic playlist export flag format string default="m3u"
+ddsonic playlist export flag output,o string default=
+command ddsonic playlist import
+ddsonic playlist import flag name string default=
+command ddsonic playlist bookmark
+ddsonic playlist bookmark flag index int default=0
+command ddsonic playlist bookmarks
+command ddsonic playlist enrich
+ddsonic playlist enrich flag source string default="path"
+command ddsonic history
+ddsonic history flag limit int default=50 local
+ddsonic history flag json bool default=false local
+command ddsonic history clear
+command ddsonic setup
+command ddsonic youtube
+command ddsonic youtube signin
+ddsonic youtube signin flag force bool default=false
+command ddsonic spotify
+command ddsonic spotify reset
+command ddsonic play
+command ddsonic pause
+command ddsonic toggle
+command ddsonic next
+command ddsonic prev
+command ddsonic stop
+command ddsonic status
+ddsonic status flag json bool default=false
+command ddsonic volume
+command ddsonic seek
+command ddsonic load
+command ddsonic queue
+command ddsonic theme
+command ddsonic vis
+command ddsonic visstream
+ddsonic visstream flag fps int default=30
+command ddsonic shuffle
+command ddsonic repeat
+command ddsonic speed
+command ddsonic eq
+ddsonic eq flag band int default=-1
+command ddsonic device
+command ddsonic remote
+command ddsonic remote state
+command ddsonic remote capabilities
+command ddsonic remote call
+ddsonic remote call flag params string default="{}"
+ddsonic remote call flag wait bool default=false
+command ddsonic remote job
+command ddsonic remote cancel
+command ddsonic remote events

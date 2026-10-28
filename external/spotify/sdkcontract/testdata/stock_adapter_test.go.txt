@@ -1,0 +1,132 @@
+package spotify
+
+// ddsonic composed stage, STOCK adapter (M3B2-S3, plan v9 §4.3; D9 of §2.7):
+// the stock-stage implementations of the shared core's stage hooks, and D9.
+// rc.4 has no recovery decision or detach hooks, no recoveryTimeout and no
+// serviceAccessPoint seam (§4.3, "absent"), so nothing is installed or
+// observed there; stock probes do not use those points. Overlaid only in the
+// stock stage, as external/spotify/zz_ddsonic_composed_stock_adapter_test.go
+// (the composed file prefix, so Q's creator rule covers this file; it starts
+// no goroutine).
+
+import (
+	"context"
+	"sync"
+
+	librespot "github.com/devgianlu/go-librespot"
+	"github.com/devgianlu/go-librespot/session"
+)
+
+// installStageRecoveryHooks installs nothing at rc.4.
+func (h *composedHarness) installStageRecoveryHooks() {}
+
+// installStageService installs nothing at rc.4.
+func (h *composedHarness) installStageService() {}
+
+// stockD9Format is the stock key provider's own warning for an answer that
+// finds no live request (v0.9.1 audio/provider.go:77). Only this exact
+// format is counted: the mercury client logs "received mercury response with
+// invalid sequence: %d" through the same opts.Log, and it is not counted.
+const stockD9Format = "received aes key with invalid sequence: %d"
+
+// stockD9 is D9 (plan v9 §2.7: "a counting logger in opts.Log ...
+// observation ... the stock adapter only ... invalid-sequence warnings (M3a3
+// S7's method)"). It records, in the order the provider's pump logged them,
+// the sequence of every stock key-provider warning, and how many SDK
+// constructors it wrapped. It never changes what a logger does: every call
+// is passed on unchanged.
+type stockD9 struct {
+	mu      sync.Mutex
+	wrapped int
+	seqs    []uint32
+}
+
+// Wrapped is how many constructor calls had their opts.Log wrapped.
+func (d *stockD9) Wrapped() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.wrapped
+}
+
+// Seqs is the warned sequences, in the order the pump logged them.
+func (d *stockD9) Seqs() []uint32 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]uint32(nil), d.seqs...)
+}
+
+// CountSeq is how many warnings named seq.
+func (d *stockD9) CountSeq(seq uint32) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n := 0
+	for _, s := range d.seqs {
+		if s == seq {
+			n++
+		}
+	}
+	return n
+}
+
+// stockD9Log passes every call to the logger it wraps, and records the
+// stock provider's invalid-sequence warning (stockD9Format, one uint32
+// argument) before passing it on. Loggers derived from it record too.
+type stockD9Log struct {
+	librespot.Logger
+	d *stockD9
+}
+
+func (l *stockD9Log) Warnf(format string, args ...interface{}) {
+	if format == stockD9Format && len(args) == 1 {
+		if seq, ok := args[0].(uint32); ok {
+			l.d.mu.Lock()
+			l.d.seqs = append(l.d.seqs, seq)
+			l.d.mu.Unlock()
+		}
+	}
+	l.Logger.Warnf(format, args...)
+}
+
+func (l *stockD9Log) WithField(key string, value interface{}) librespot.Logger {
+	return &stockD9Log{Logger: l.Logger.WithField(key, value), d: l.d}
+}
+
+func (l *stockD9Log) WithError(err error) librespot.Logger {
+	return &stockD9Log{Logger: l.Logger.WithError(err), d: l.d}
+}
+
+// installStockD9 wraps the installed D1 (H's counted bypass call) so that
+// every SDK constructor gets its opts.Log wrapped by D9 (v0.9.1 hands
+// opts.Log to NewAudioKeyProvider, session/session.go:209). It is a write of
+// a shared seam, so it is made under W1's condition: it must be the stock
+// probe's first action, before any constructor (D1 = 0) and before the test
+// starts any goroutine that could read the seam. It is restored through
+// restoreSeams: the closure is appended after installSeams' own, so at T10
+// (W2, the success path only) it runs first and puts H's D1 back, and H's
+// closure then restores the product's. Branch F restores nothing, as for
+// every seam.
+func (h *composedHarness) installStockD9() *stockD9 {
+	t := h.t
+	t.Helper()
+	if d1, _, _, _, _, _ := h.Counts(); d1 != 0 {
+		t.Fatalf("I11-PRECONDITION-FAIL: D9 must be installed before any constructor (D1 = %d)", d1)
+	}
+	d := &stockD9{}
+	inner := newLibrespotSession
+	newLibrespotSession = func(ctx context.Context, opts *session.Options) (*session.Session, error) {
+		if opts != nil {
+			base := opts.Log
+			if base == nil {
+				base = &librespot.NullLogger{}
+			}
+			opts.Log = &stockD9Log{Logger: base, d: d}
+			d.mu.Lock()
+			d.wrapped++
+			d.mu.Unlock()
+		}
+		return inner(ctx, opts)
+	}
+	h.restoreSeams = append(h.restoreSeams, func() { newLibrespotSession = inner })
+	h.Event("d9-installed")
+	return d
+}

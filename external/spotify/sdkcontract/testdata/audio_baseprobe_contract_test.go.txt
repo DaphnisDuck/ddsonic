@@ -1,0 +1,414 @@
+package audio
+
+// ddsonic's base-compatible mechanism probes (design S18, for S2, S5, S7 and
+// S13). Each runs the real access point and key provider against the
+// synthetic access point, in both stages. They name nothing patch 0002
+// adds, so they compile against the unpatched v0.9.1 base too, where each
+// must fail on its behavioural assertion, marked Sn-BASE-RED. Against the
+// active tree they must pass. A failure without a marker is a failed
+// precondition or a defect, never base red evidence.
+//
+// What they observe: what the peer receives (writes), whether and when a
+// caller returns, goroutine stacks, the access point's subscriptions
+// (ap.DDSonicSubscribers), and, for S7 only, whether an answer found no
+// live request (bpUnknownAnswers, a per-stage adapter: see
+// audio_probe_adapter_*.go.txt for what each stage can observe and how).
+
+import (
+	"context"
+	"encoding/binary"
+	"errors"
+	"runtime"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	librespot "github.com/devgianlu/go-librespot"
+	"github.com/devgianlu/go-librespot/ap"
+)
+
+const bpLimit = 10 * time.Second
+
+var bpKey = []byte("0123456789abcdef")
+
+// bpLogger counts the stock provider's "invalid sequence" warnings; it
+// discards everything else.
+type bpLogger struct {
+	librespot.NullLogger
+	invalidSeq atomic.Uint64
+}
+
+func (l *bpLogger) Warnf(format string, _ ...interface{}) {
+	if strings.Contains(format, "invalid sequence") {
+		l.invalidSeq.Add(1)
+	}
+}
+func (l *bpLogger) WithField(string, interface{}) librespot.Logger { return l }
+func (l *bpLogger) WithError(error) librespot.Logger               { return l }
+
+func bpAP(t *testing.T) (*ap.DDSonicFakeAP, *ap.Accesspoint, *ap.DDSonicFakeConn) {
+	t.Helper()
+	f, err := ap.DDSonicContractFakeAP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(f.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), bpLimit)
+	defer cancel()
+	a, err := f.Connect(ctx)
+	if err != nil {
+		t.Fatalf("PRECONDITION: connecting to the synthetic access point: %v", err)
+	}
+	// R70-1: the probe owns a from here, on every path. Its cleanup runs
+	// after the probe's own later ones (its gates' releases) and before the
+	// fake's: a's Close is joined while the fake is still up, then nothing
+	// of the SDK's loops may be left for the next test.
+	t.Cleanup(func() {
+		if closeJoined(t, "cleanup", a) {
+			bpQuiet(t, "after the probe's access point was closed")
+		}
+	})
+	c := f.Next(bpLimit)
+	if c == nil {
+		t.Fatal("PRECONDITION: the synthetic access point saw no login")
+	}
+	return f, a, c
+}
+
+// contractStacks is every goroutine's stack, its buffer grown until nothing
+// is cut off. It is the failure-only diagnostic of the process-wide checks
+// (R70-1): what each failure prints, never what decides it.
+func contractStacks() string {
+	for n := 1 << 20; ; n *= 2 {
+		buf := make([]byte, n)
+		if m := runtime.Stack(buf, true); m < n {
+			return string(buf[:m])
+		}
+	}
+}
+
+// closeJoined closes a, an access point the test owns, and waits within
+// bpLimit for Close to return (R70-1). A Close begun during a reconnect waits
+// for that reconnect, so it is called while the synthetic access point is
+// still up, where the reconnect can end. Close is idempotent: a Close the
+// test began itself is joined here too. A timeout fails the test, with every
+// goroutine's stack.
+func closeJoined(t *testing.T, what string, a *ap.Accesspoint) bool {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { a.Close(); close(done) }()
+	select {
+	case <-done:
+		return true
+	case <-time.After(bpLimit):
+		t.Errorf("%s: the access point's Close did not return within %v\ngoroutines at the failure:\n%s", what, bpLimit, contractStacks())
+		return false
+	}
+}
+
+// bpLoops counts the goroutines inside an access point's receive loop or
+// pong ticker, or inside a key provider method: names the base and the
+// active tree share.
+func bpLoops() int {
+	n := 0
+	for _, g := range strings.Split(contractStacks(), "\n\n") {
+		if strings.Contains(g, "ap.(*Accesspoint).recvLoop(") || strings.Contains(g, "ap.(*Accesspoint).pongAckTicker(") || strings.Contains(g, "audio.(*KeyProvider).") {
+			n++
+		}
+	}
+	return n
+}
+
+// bpQuiet waits within bpLimit for bpLoops to be 0: a probe's access point,
+// closed, has left nothing running (R70-1). A timeout fails the test, with
+// every goroutine's stack; it is an Errorf so the fake's cleanup still runs.
+func bpQuiet(t *testing.T, what string) {
+	t.Helper()
+	deadline := time.Now().Add(bpLimit)
+	for {
+		n := bpLoops()
+		if n == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("%s: %d access point loop or key provider goroutines are running, want 0\ngoroutines at the failure:\n%s", what, n, contractStacks())
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+type bpResult struct {
+	key []byte
+	err error
+}
+
+func bpRequest(ctx context.Context, p *KeyProvider) <-chan bpResult {
+	out := make(chan bpResult, 1)
+	go func() {
+		key, err := p.Request(ctx, make([]byte, 16), make([]byte, 20))
+		out <- bpResult{key, err}
+	}()
+	return out
+}
+
+// bpAwait waits up to d for a result.
+func bpAwait(out <-chan bpResult, d time.Duration) (bpResult, bool) {
+	select {
+	case r := <-out:
+		return r, true
+	case <-time.After(d):
+		return bpResult{}, false
+	}
+}
+
+func bpUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(bpLimit)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: not within %v", what, bpLimit)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// bpWithin reports whether cond holds within d.
+func bpWithin(d time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(d)
+	for !cond() {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return true
+}
+
+// bpStacks counts the goroutines whose stacks hold every one of parts.
+func bpStacks(parts ...string) int {
+	buf := make([]byte, 8<<20)
+	n := 0
+	for _, g := range strings.Split(string(buf[:runtime.Stack(buf, true)]), "\n\n") {
+		all := true
+		for _, part := range parts {
+			all = all && strings.Contains(g, part)
+		}
+		if all {
+			n++
+		}
+	}
+	return n
+}
+
+func bpAnswer(c *ap.DDSonicFakeConn, seq uint32) error {
+	return c.Send(ap.PacketTypeAesKey, append(binary.BigEndian.AppendUint32(nil, seq), bpKey...))
+}
+
+// S2: a request written on a connection that is then replaced, with the
+// reconnect completed and its caller's context live, ends at once with an
+// error of its own (not its context's, not the window's, not the access
+// point's closing), and is not sent again. Stock v0.9.1 leaves it pending
+// until its 15-second window.
+func TestDDSonicContractProbeS2InFlightAcrossReconnect(t *testing.T) {
+	f, a, c1 := bpAP(t)
+	a.Receive() // serviced, so the peer's close is seen
+	p := NewAudioKeyProvider(&bpLogger{}, a)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out := bpRequest(ctx, p)
+	if _, ok := c1.Wait(ap.PacketTypeRequestKey, bpLimit); !ok {
+		t.Fatal("PRECONDITION: the request was not written on the first connection")
+	}
+	before := &a.StoredCredentials()[0]
+	if err := c1.PeerClose(); err != nil {
+		t.Fatal(err)
+	}
+	c2 := f.Next(bpLimit)
+	if c2 == nil {
+		t.Fatal("PRECONDITION: the access point did not reconnect")
+	}
+	bpUntil(t, "PRECONDITION: the reconnect completed on the client", func() bool { return &a.StoredCredentials()[0] != before })
+	r, ended := bpAwait(out, 5*time.Second)
+	if !ended {
+		t.Errorf("S2-BASE-RED: the in-flight request was still pending 5s after its connection was replaced and the reconnect completed")
+	} else if r.err == nil || errors.Is(r.err, context.Canceled) || errors.Is(r.err, context.DeadlineExceeded) || errors.Is(r.err, ap.ErrAccesspointClosed) {
+		t.Errorf("S2-BASE-RED: the in-flight request ended with %v, not with its connection's replacement", r.err)
+	}
+	if _, ok := c2.Wait(ap.PacketTypeRequestKey, 500*time.Millisecond); ok {
+		t.Errorf("S2-BASE-RED: the in-flight request was sent again on the new connection")
+	}
+	if !ended {
+		cancel()
+		bpAwait(out, 20*time.Second)
+	}
+}
+
+// S5: a request whose context ended before the call writes nothing and
+// launches nothing: neither with the key service idle (stock v0.9.1 hands
+// it over, registers the service with the access point and writes it), nor
+// with the service busy in a held write (stock v0.9.1 waits for the
+// service, whatever the context, and then writes it).
+func TestDDSonicContractProbeS5RefusedEntryWritesNothing(t *testing.T) {
+	t.Run("idle", func(t *testing.T) {
+		_, a, c := bpAP(t)
+		p := NewAudioKeyProvider(&bpLogger{}, a)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		r, ok := bpAwait(bpRequest(ctx, p), bpLimit)
+		if !ok {
+			t.Fatal("the request with an ended context did not return")
+		}
+		if !errors.Is(r.err, context.Canceled) {
+			t.Errorf("the request with an ended context = %v, want context.Canceled", r.err)
+		}
+		if _, ok := c.Wait(ap.PacketTypeRequestKey, time.Second); ok {
+			t.Errorf("S5-BASE-RED: a request whose context had ended before the call was written")
+		}
+		if n := ap.DDSonicSubscribers(a, ap.PacketTypeAesKey); n != 0 {
+			t.Errorf("S5-BASE-RED: a request whose context had ended before the call launched the key service (%d subscriptions)", n)
+		}
+	})
+	t.Run("busy", func(t *testing.T) {
+		_, a, c := bpAP(t)
+		gate := ap.DDSonicContractGateWrites(a)
+		t.Cleanup(gate.Release)
+		p := NewAudioKeyProvider(&bpLogger{}, a)
+		entered := gate.Arm()
+		ctx1, cancel1 := context.WithCancel(context.Background())
+		defer cancel1()
+		first := bpRequest(ctx1, p)
+		select {
+		case <-entered:
+		case <-time.After(bpLimit):
+			t.Fatal("PRECONDITION: the first request's write was not held")
+		}
+		ctx2, cancel2 := context.WithCancel(context.Background())
+		cancel2()
+		second := bpRequest(ctx2, p)
+		r, returned := bpAwait(second, 2*time.Second)
+		if !returned {
+			t.Errorf("S5-BASE-RED: a request whose context had already ended did not return while the key service was busy")
+		} else if !errors.Is(r.err, context.Canceled) {
+			t.Errorf("the request with an ended context = %v, want context.Canceled", r.err)
+		}
+		gate.Release()
+		if _, ok := c.Wait(ap.PacketTypeRequestKey, bpLimit); !ok {
+			t.Fatal("PRECONDITION: the first request was not written once released")
+		}
+		if _, ok := c.Wait(ap.PacketTypeRequestKey, time.Second); ok {
+			t.Errorf("S5-BASE-RED: the request whose context had ended was written once the service was free")
+		}
+		cancel1()
+		bpAwait(first, 20*time.Second)
+		if !returned {
+			bpAwait(second, 20*time.Second)
+		}
+	})
+}
+
+// S7: a request cancelled while its write is held (the write holds the
+// connection's send lock) returns promptly, and its logical record is gone
+// while the physical write is still held: an answer for it then finds no
+// live request, and so does a second answer after the write completes.
+// Stock v0.9.1 returns promptly too, but keeps the record (its pump cannot
+// even take the answer until the write returns, and then hands it to the
+// cancelled request).
+func TestDDSonicContractProbeS7CancelDuringHeldWrite(t *testing.T) {
+	_, a, c := bpAP(t)
+	gate := ap.DDSonicContractGateWrites(a)
+	t.Cleanup(gate.Release)
+	log := &bpLogger{}
+	p := NewAudioKeyProvider(log, a)
+	entered := gate.Arm()
+	ctx, cancel := context.WithCancel(context.Background())
+	out := bpRequest(ctx, p)
+	select {
+	case <-entered:
+	case <-time.After(bpLimit):
+		t.Fatal("PRECONDITION: the request's write was not held")
+	}
+	cancel()
+	if r, ok := bpAwait(out, 2*time.Second); !ok || !errors.Is(r.err, context.Canceled) {
+		t.Fatalf("the cancelled request did not return promptly with its cancellation (returned %t, %v)", ok, r.err)
+	}
+	if err := bpAnswer(c, 0); err != nil {
+		t.Fatal(err)
+	}
+	if !bpWithin(2*time.Second, func() bool { return bpUnknownAnswers(p, log) == 1 }) {
+		t.Errorf("S7-BASE-RED: while the cancelled request's write was held, an answer for it did not find its record gone")
+	}
+	gate.Release()
+	if _, ok := c.Wait(ap.PacketTypeRequestKey, bpLimit); !ok {
+		t.Fatal("PRECONDITION: the held write did not complete once released")
+	}
+	if err := bpAnswer(c, 0); err != nil {
+		t.Fatal(err)
+	}
+	if !bpWithin(2*time.Second, func() bool { return bpUnknownAnswers(p, log) == 2 }) {
+		t.Errorf("S7-BASE-RED: after the held write completed, the two answers did not both find no record (%d did): the cancelled request's record outlived its cancellation", bpUnknownAnswers(p, log))
+	}
+}
+
+// S13: with a reconnect holding the connection lock before the key
+// service's first subscription, callers of an already constructed provider
+// that cancel return at once, while that subscription is still held. Stock
+// v0.9.1's callers cannot hand their requests to the service, whatever
+// their contexts, until the subscription completes.
+func TestDDSonicContractProbeS13FirstRegistrationHeld(t *testing.T) {
+	f, a, c1 := bpAP(t)
+	a.Receive() // serviced, so the peer's close starts a reconnect
+	p := NewAudioKeyProvider(&bpLogger{}, a)
+	hold := f.Hold()
+	t.Cleanup(hold)
+	if err := c1.PeerClose(); err != nil {
+		t.Fatal(err)
+	}
+	bpUntil(t, "PRECONDITION: a reconnect holding the connection lock", func() bool {
+		return bpStacks("ap.(*Accesspoint).reconnect(") > 0
+	})
+	const n = 4
+	var cancels []context.CancelFunc
+	var outs []<-chan bpResult
+	for i := 0; i < n; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancels = append(cancels, cancel)
+		outs = append(outs, bpRequest(ctx, p))
+	}
+	held := func() bool {
+		return bpStacks("audio.(*KeyProvider).", "ap.(*Accesspoint).Receive(", "sync.(*RWMutex).RLock(") > 0
+	}
+	bpUntil(t, "PRECONDITION: the key service's first subscription waiting for the connection lock", held)
+	bpUntil(t, "PRECONDITION: every caller inside Request", func() bool {
+		return bpStacks("audio.(*KeyProvider).Request(") >= n
+	})
+	if s := ap.DDSonicSubscribers(a, ap.PacketTypeAesKey); s != 0 {
+		t.Fatalf("PRECONDITION: the key service registered (%d subscriptions) though its subscription should be held", s)
+	}
+	for _, cancel := range cancels {
+		cancel()
+	}
+	var pending []<-chan bpResult
+	for i, out := range outs {
+		if r, ok := bpAwait(out, 3*time.Second); !ok {
+			t.Errorf("S13-BASE-RED: caller %d did not return after its cancellation while the first subscription was held", i)
+			pending = append(pending, out)
+		} else if !errors.Is(r.err, context.Canceled) {
+			t.Errorf("caller %d = %v, want context.Canceled", i, r.err)
+		}
+	}
+	if !held() {
+		t.Error("the first subscription was no longer held when the callers were checked")
+	}
+	hold()
+	// The held reconnect completes and the key service registers before
+	// the probe returns, so no reconnect of this access point is left
+	// running, against a closed fake, after it.
+	bpUntil(t, "the reconnect completed and the key service registered", func() bool {
+		return ap.DDSonicSubscribers(a, ap.PacketTypeAesKey) > 0
+	})
+	for _, out := range pending {
+		bpAwait(out, 20*time.Second)
+	}
+}

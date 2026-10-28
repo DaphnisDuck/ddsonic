@@ -1,0 +1,387 @@
+package ap
+
+// ddsonic composed-stage observer (D10; M3b2 plan v7 §2.3, §2.7). Like the
+// other contract helpers, this file exists only in the overlay the composed
+// stage builds over a staged copy of go-librespot; ap_fake_helper.go.txt is
+// not edited.
+//
+// It adds, for the composed tests in external/spotify:
+//   - a drain of the fake's conns channel from the moment the fake starts,
+//     so that no handshake goroutine can block on that 16-slot channel;
+//   - for each authenticated connection, a forwarder that is the only
+//     consumer of the original Packets channel (the field is never
+//     reassigned) and records when the server's read ended, and whether the
+//     fake had begun closing by then: if not, the client closed its socket;
+//   - the fake's stop and restore halves, separated: Stop is Close's first
+//     half and consumes its once, so Close can no longer restore anything;
+//     Restore is Close's second half, under a once of its own;
+//   - the connMu accessor for the happens-before set H, and the client
+//     connection's local address, for correlating a connection with the
+//     access point that dialled it.
+
+import (
+	"sync"
+	"time"
+)
+
+// DDSonicComposedFake is the fake access point with the composed stage's
+// observation.
+type DDSonicComposedFake struct {
+	F *DDSonicFakeAP
+
+	mu      sync.Mutex
+	conns   []*DDSonicComposedConn
+	changed chan struct{} // closed and replaced when a connection is added
+	// maxOccupancy is the largest len(conns) the drain observed just before
+	// a receive: an observation of the channel's occupancy, which producers
+	// change concurrently, not an exact historical peak.
+	maxOccupancy int
+	autoKey      func(req Packet) []byte
+
+	workers     sync.WaitGroup // the drain and the forwarders
+	restoreOnce sync.Once
+}
+
+// DDSonicComposedConn is one authenticated connection as the fake saw it.
+type DDSonicComposedConn struct {
+	C     *DDSonicFakeConn
+	Index int
+	// Remote is the server side's view of the client's address: equal to the
+	// client connection's local address.
+	Remote string
+
+	mu       sync.Mutex
+	packets  []Packet
+	cursor   int
+	notify   chan struct{} // closed and replaced when a packet arrives or the read ends
+	ended    bool
+	endedAt  time.Time
+	byClient bool
+}
+
+// DDSonicComposedStart starts the fake and its observer.
+func DDSonicComposedStart() (*DDSonicComposedFake, error) {
+	f, err := DDSonicContractFakeAP()
+	if err != nil {
+		return nil, err
+	}
+	o := &DDSonicComposedFake{F: f, changed: make(chan struct{})}
+	o.workers.Add(1)
+	go o.drain()
+	return o, nil
+}
+
+func (o *DDSonicComposedFake) drain() {
+	defer o.workers.Done()
+	for {
+		o.observeOccupancy()
+		select {
+		case c := <-o.F.conns:
+			o.add(c) // MUTATION-POINT R29-4
+		case <-o.F.closing:
+			for {
+				select {
+				case c := <-o.F.conns:
+					o.add(c)
+				default:
+					return
+				}
+			}
+		}
+	}
+}
+
+func (o *DDSonicComposedFake) observeOccupancy() {
+	n := len(o.F.conns)
+	o.mu.Lock()
+	if n > o.maxOccupancy {
+		o.maxOccupancy = n
+	}
+	o.mu.Unlock()
+}
+
+func (o *DDSonicComposedFake) add(c *DDSonicFakeConn) {
+	cc := &DDSonicComposedConn{C: c, notify: make(chan struct{})}
+	if ra := c.conn.RemoteAddr(); ra != nil {
+		cc.Remote = ra.String()
+	}
+	o.mu.Lock()
+	cc.Index = len(o.conns)
+	o.conns = append(o.conns, cc)
+	close(o.changed)
+	o.changed = make(chan struct{})
+	o.mu.Unlock()
+	o.workers.Add(1)
+	go o.forward(cc)
+}
+
+// forward is the one consumer of the connection's original Packets channel.
+func (o *DDSonicComposedFake) forward(cc *DDSonicComposedConn) {
+	defer o.workers.Done()
+	for pkt := range cc.C.Packets {
+		cc.mu.Lock()
+		cc.packets = append(cc.packets, pkt)
+		close(cc.notify)
+		cc.notify = make(chan struct{})
+		cc.mu.Unlock()
+		o.mu.Lock()
+		auto := o.autoKey
+		o.mu.Unlock()
+		if auto != nil && pkt.Type == PacketTypeRequestKey {
+			if key := auto(pkt); key != nil {
+				_ = cc.C.AnswerKey(pkt, key)
+			}
+		}
+	}
+	closing := false
+	select {
+	case <-o.F.closing:
+		closing = true
+	default:
+	}
+	cc.mu.Lock()
+	cc.ended, cc.endedAt, cc.byClient = true, time.Now(), !closing
+	close(cc.notify)
+	cc.notify = make(chan struct{})
+	cc.mu.Unlock()
+}
+
+// SetAutoKey makes the observer answer every key request with key(req), or
+// stop answering when key is nil or returns nil.
+func (o *DDSonicComposedFake) SetAutoKey(key func(req Packet) []byte) {
+	o.mu.Lock()
+	o.autoKey = key
+	o.mu.Unlock()
+}
+
+// Addr is the fake's listening address.
+func (o *DDSonicComposedFake) Addr() string { return o.F.ln.Addr().String() }
+
+// Accepted is how many connections the fake has accepted, including those
+// whose handshake failed or was refused.
+func (o *DDSonicComposedFake) Accepted() int {
+	o.F.mu.Lock()
+	defer o.F.mu.Unlock()
+	return len(o.F.all)
+}
+
+// Logins is how many connections completed their login.
+func (o *DDSonicComposedFake) Logins() int { return o.F.Logins() }
+
+// Occupancy is the largest occupancy of the fake's conns channel the drain
+// observed before a receive, and the channel's capacity (16). It is an
+// observation: it neither excludes a larger momentary occupancy nor shows
+// that no producer ever waited.
+func (o *DDSonicComposedFake) Occupancy() (maxObserved, capacity int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.maxOccupancy, cap(o.F.conns)
+}
+
+// Drained is how many authenticated connections the drain has taken from
+// the fake's conns channel and registered.
+func (o *DDSonicComposedFake) Drained() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return len(o.conns)
+}
+
+// Conns is a snapshot of the authenticated connections so far.
+func (o *DDSonicComposedFake) Conns() []*DDSonicComposedConn {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]*DDSonicComposedConn(nil), o.conns...)
+}
+
+// Conn waits up to d for the i-th authenticated connection.
+func (o *DDSonicComposedFake) Conn(i int, d time.Duration) *DDSonicComposedConn {
+	deadline := time.After(d)
+	for {
+		o.mu.Lock()
+		if i < len(o.conns) {
+			c := o.conns[i]
+			o.mu.Unlock()
+			return c
+		}
+		changed := o.changed
+		o.mu.Unlock()
+		select {
+		case <-changed:
+		case <-deadline:
+			return nil
+		}
+	}
+}
+
+// Wait is the next packet of the given type the client sent on this
+// connection, skipping others, or false after d or when the read ended.
+func (cc *DDSonicComposedConn) Wait(typ PacketType, d time.Duration) (Packet, bool) {
+	deadline := time.After(d)
+	for {
+		cc.mu.Lock()
+		for cc.cursor < len(cc.packets) {
+			pkt := cc.packets[cc.cursor]
+			cc.cursor++
+			if pkt.Type == typ {
+				cc.mu.Unlock()
+				return pkt, true
+			}
+		}
+		if cc.ended {
+			cc.mu.Unlock()
+			return Packet{}, false
+		}
+		notify := cc.notify
+		cc.mu.Unlock()
+		select {
+		case <-notify:
+		case <-deadline:
+			return Packet{}, false
+		}
+	}
+}
+
+// Count is how many packets of the given type the client has sent on this
+// connection.
+func (cc *DDSonicComposedConn) Count(typ PacketType) int {
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	n := 0
+	for _, p := range cc.packets {
+		if p.Type == typ {
+			n++
+		}
+	}
+	return n
+}
+
+// Ended reports whether the server's read of this connection has ended,
+// when, and whether the fake had not begun closing by then (the client
+// closed its socket).
+func (cc *DDSonicComposedConn) Ended() (ended, byClient bool, at time.Time) {
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	return cc.ended, cc.byClient, cc.endedAt
+}
+
+// WaitEnded waits up to d for the server's read to end.
+func (cc *DDSonicComposedConn) WaitEnded(d time.Duration) bool {
+	deadline := time.After(d)
+	for {
+		cc.mu.Lock()
+		ended, notify := cc.ended, cc.notify
+		cc.mu.Unlock()
+		if ended {
+			return true
+		}
+		select {
+		case <-notify:
+		case <-deadline:
+			return false
+		}
+	}
+}
+
+// Stop is the fake's Close without its restore half: it closes closing, the
+// listener and every server connection, and touches neither serverSigPubKey
+// nor ddsonicFakeOpen. It consumes the fake's once, so a later Close does
+// nothing.
+func (o *DDSonicComposedFake) Stop() {
+	f := o.F
+	f.once.Do(func() {
+		close(f.closing)
+		_ = f.ln.Close()
+		f.mu.Lock()
+		for _, c := range f.all {
+			_ = c.Close()
+		}
+		f.mu.Unlock()
+	})
+}
+
+// Stopped reports whether Stop (or Close) has run.
+func (o *DDSonicComposedFake) Stopped() bool {
+	select {
+	case <-o.F.closing:
+		return true
+	default:
+		return false
+	}
+}
+
+// Restore is the fake's Close's restore half: the package's key back, and
+// the fake's hold on ddsonicFakeOpen released. It runs once. The harness
+// calls it only at T10 on the success path, after Stop (plan v7 §2.3).
+func (o *DDSonicComposedFake) Restore() {
+	o.restoreOnce.Do(func() {
+		serverSigPubKey = o.F.sdkKey
+		ddsonicFakeOpen.Unlock()
+	})
+}
+
+// JoinWorkers waits up to d for the drain and every forwarder to end.
+func (o *DDSonicComposedFake) JoinWorkers(d time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		o.workers.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
+// SigIsFixtures reports whether the package's signature key is this fake's.
+func (o *DDSonicComposedFake) SigIsFixtures() bool {
+	return serverSigPubKey == &o.F.key.PublicKey
+}
+
+// SigIsSDKs reports whether the package's signature key is the SDK's own.
+func (o *DDSonicComposedFake) SigIsSDKs() bool { return serverSigPubKey == o.F.sdkKey }
+
+// DDSonicComposedFakeOpenTryLock tries ddsonicFakeOpen. If it was free the
+// lock is released again at once and true is returned: the caller records
+// the observation, and the state is left as it was found.
+func DDSonicComposedFakeOpenTryLock() bool {
+	if ddsonicFakeOpen.TryLock() {
+		ddsonicFakeOpen.Unlock()
+		return true
+	}
+	return false
+}
+
+// DDSonicComposedConnMuSync takes and releases a's connMu. Taken after a's
+// receive loop has ended, it orders every earlier section under connMu (each
+// reconnect's handshake) before what follows it (the set H).
+func DDSonicComposedConnMuSync(a *Accesspoint) {
+	a.connMu.Lock()
+	_ = a.conn
+	a.connMu.Unlock()
+}
+
+// DDSonicComposedLocalAddr is a's current connection's local address, or ""
+// when it has none.
+func DDSonicComposedLocalAddr(a *Accesspoint) string {
+	a.connMu.RLock()
+	defer a.connMu.RUnlock()
+	if a.conn == nil {
+		return ""
+	}
+	if la := a.conn.LocalAddr(); la != nil {
+		return la.String()
+	}
+	return ""
+}
+
+// DDSonicComposedAPDone reports whether a's Done is closed.
+func DDSonicComposedAPDone(a *Accesspoint) bool {
+	select {
+	case <-a.Done():
+		return true
+	default:
+		return false
+	}
+}

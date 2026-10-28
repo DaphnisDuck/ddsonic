@@ -1,0 +1,396 @@
+// Package plex implements a playlist.Provider for Plex Media Server.
+package plex
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/bjarneo/cliamp/internal/appmeta"
+	"github.com/bjarneo/cliamp/internal/netdiag"
+)
+
+// maxResponseBody limits API responses to 10 MB to prevent unbounded memory growth.
+const maxResponseBody = 10 << 20
+
+// apiClient is used for all Plex API calls with a finite timeout.
+// It is distinct from httpclient.Streaming (which has no timeout) used for audio streams.
+var apiClient = &http.Client{Timeout: 30 * time.Second}
+
+// Client speaks to a Plex Media Server over its HTTP API.
+type Client struct {
+	baseURL   string   // e.g. "http://192.168.1.10:32400"
+	token     string   // X-Plex-Token
+	libraries []string // if non-empty, MusicSections filters to these titles (case-insensitive)
+}
+
+// NewClient returns a Client for the given server URL and authentication token.
+// libraries is an optional list of music library names to restrict MusicSections to.
+// When not provided, all music libraries will be loaded
+func NewClient(baseURL, token string, libraries ...string) *Client {
+	return &Client{baseURL: baseURL, token: token, libraries: libraries}
+}
+
+// Section represents a Plex library section (e.g. a music library).
+type Section struct {
+	Key   string // numeric section ID, e.g. "3"
+	Title string // display name
+	Type  string // "artist" for music libraries
+}
+
+// Album represents a Plex album with its artist and track count.
+type Album struct {
+	RatingKey  string // unique album ID (Plex ratingKey)
+	Title      string
+	ArtistName string // parentTitle in the Plex API
+	Year       int
+	TrackCount int // leafCount
+}
+
+// Track represents a Plex track with metadata and its first streamable Part.
+type Track struct {
+	RatingKey   string
+	Title       string
+	ArtistName  string // grandparentTitle
+	AlbumName   string // parentTitle
+	Year        int
+	TrackNumber int    // index field in Plex API
+	Duration    int    // milliseconds
+	PartKey     string // relative path, e.g. "/library/parts/67890/1234567890/file.flac"
+}
+
+// Playlist represents a Plex playlist (smart or user-created) of audio tracks.
+type Playlist struct {
+	RatingKey    string
+	Title        string
+	TrackCount   int // leafCount
+	DurationSecs int // duration, converted from milliseconds
+	Smart        bool
+}
+
+// get issues an authenticated GET request and decodes the JSON response into result.
+func (c *Client) get(path string, params url.Values, result any) error {
+	if params == nil {
+		params = url.Values{}
+	}
+	params.Set("X-Plex-Token", c.token)
+
+	req, err := http.NewRequest(http.MethodGet, c.baseURL+path+"?"+params.Encode(), nil)
+	if err != nil {
+		return fmt.Errorf("plex: %s: %w", path, err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-Plex-Product", appmeta.ClientName()) // ddsonic: distinct client from cliamp
+	req.Header.Set("X-Plex-Client-Identifier", appmeta.ClientName())
+
+	resp, err := apiClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("plex: %s: server unreachable: %w", path, netdiag.Explain(err))
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		// ok
+	case http.StatusUnauthorized:
+		return fmt.Errorf("plex: token invalid or expired")
+	default:
+		return fmt.Errorf("plex: %s: HTTP %s", path, resp.Status)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+	if err != nil {
+		return fmt.Errorf("plex: %s: %w", path, err)
+	}
+	return json.Unmarshal(body, result)
+}
+
+// Ping checks that the server is reachable and the token is valid.
+// Returns a descriptive error on failure.
+func (c *Client) Ping() error {
+	var result struct {
+		MediaContainer struct {
+			FriendlyName string `json:"friendlyName"`
+		} `json:"MediaContainer"`
+	}
+	return c.get("/", nil, &result)
+}
+
+// MusicSections returns library sections of type "artist" (music libraries).
+// When the client was constructed with a library filter, only sections whose
+// title matches one of the allowed names (case-insensitive) are returned.
+func (c *Client) MusicSections() ([]Section, error) {
+	var result struct {
+		MediaContainer struct {
+			Directory []struct {
+				Key   string `json:"key"`
+				Type  string `json:"type"`
+				Title string `json:"title"`
+			} `json:"Directory"`
+		} `json:"MediaContainer"`
+	}
+	if err := c.get("/library/sections", nil, &result); err != nil {
+		return nil, err
+	}
+
+	var sections []Section
+	for _, d := range result.MediaContainer.Directory {
+		if d.Type == "artist" && c.includeLibrary(d.Title) {
+			sections = append(sections, Section{
+				Key:   d.Key,
+				Title: d.Title,
+				Type:  d.Type,
+			})
+		}
+	}
+	return sections, nil
+}
+
+// includeLibrary reports whether the library with the given title should be
+// included. When no filter is configured (libraries is empty) all libraries pass.
+func (c *Client) includeLibrary(title string) bool {
+	if len(c.libraries) == 0 {
+		return true
+	}
+	for _, lib := range c.libraries {
+		if strings.EqualFold(lib, title) {
+			return true
+		}
+	}
+	return false
+}
+
+// pageSize is the number of albums requested per API call.
+// Plex paginates /library/sections/{id}/all; without an explicit size the
+// server may return as few as one item.
+const pageSize = 300
+
+// Albums returns all albums in the given music section (identified by its key).
+// It requests type=9 (album) directly rather than walking artists, and paginates
+// through the full result set using X-Plex-Container-Start / Size.
+func (c *Client) Albums(sectionKey string) ([]Album, error) {
+	type albumPage struct {
+		MediaContainer struct {
+			// TotalSize is a pointer so a server that omits it is
+			// distinguishable from one that reports zero.
+			TotalSize *int `json:"totalSize"`
+			Metadata  []struct {
+				RatingKey   string `json:"ratingKey"`
+				Title       string `json:"title"`
+				ParentTitle string `json:"parentTitle"` // artist name
+				Year        int    `json:"year"`
+				LeafCount   int    `json:"leafCount"` // track count
+			} `json:"Metadata"`
+		} `json:"MediaContainer"`
+	}
+
+	var albums []Album
+	for offset := 0; ; {
+		params := url.Values{
+			"type":                   {"9"}, // 9 = album
+			"X-Plex-Container-Start": {fmt.Sprintf("%d", offset)},
+			"X-Plex-Container-Size":  {fmt.Sprintf("%d", pageSize)},
+		}
+		var page albumPage
+		if err := c.get("/library/sections/"+sectionKey+"/all", params, &page); err != nil {
+			return nil, err
+		}
+		for _, m := range page.MediaContainer.Metadata {
+			albums = append(albums, Album{
+				RatingKey:  m.RatingKey,
+				Title:      m.Title,
+				ArtistName: m.ParentTitle,
+				Year:       m.Year,
+				TrackCount: m.LeafCount,
+			})
+		}
+		// Advance by what the server actually returned, not by what was
+		// asked for: Plex may answer with fewer items than pageSize.
+		count := len(page.MediaContainer.Metadata)
+		if count == 0 {
+			break
+		}
+		offset += count
+		if page.MediaContainer.TotalSize != nil && offset >= *page.MediaContainer.TotalSize {
+			break
+		}
+	}
+	return albums, nil
+}
+
+// Playlists returns all audio playlists on the server. Smart playlists and
+// user-created playlists are both included; non-audio playlists (video, photo)
+// are filtered out. The Plex JSON API returns playlist entries under
+// MediaContainer.Metadata, each carrying a "type" of "playlist".
+func (c *Client) Playlists() ([]Playlist, error) {
+	var result struct {
+		MediaContainer struct {
+			Metadata []struct {
+				RatingKey    string `json:"ratingKey"`
+				Title        string `json:"title"`
+				Smart        bool   `json:"smart"`
+				PlaylistType string `json:"playlistType"`
+				LeafCount    int    `json:"leafCount"`
+				Duration     int    `json:"duration"`
+			} `json:"Metadata"`
+		} `json:"MediaContainer"`
+	}
+	if err := c.get("/playlists", nil, &result); err != nil {
+		return nil, fmt.Errorf("plex: list playlists: %w", err)
+	}
+
+	var playlists []Playlist
+	for _, m := range result.MediaContainer.Metadata {
+		if m.PlaylistType != "audio" {
+			continue
+		}
+		playlists = append(playlists, Playlist{
+			RatingKey:    m.RatingKey,
+			Title:        m.Title,
+			TrackCount:   m.LeafCount,
+			DurationSecs: m.Duration / 1000,
+			Smart:        m.Smart,
+		})
+	}
+	return playlists, nil
+}
+
+// playlistPageSize is the number of playlist items requested per API call.
+// Playlists can contain tens of thousands of tracks, so a larger page keeps
+// the request count low while staying well under the 10 MB response cap.
+const playlistPageSize = 1000
+
+// PlaylistTracks returns all tracks in the given playlist (identified by its
+// ratingKey). Playlist items share the track JSON shape, so trackFromJSON is
+// reused. Results are paginated with X-Plex-Container-Start / Size.
+func (c *Client) PlaylistTracks(playlistRatingKey string) ([]Track, error) {
+	type trackPage struct {
+		MediaContainer struct {
+			TotalSize *int        `json:"totalSize"`
+			Metadata  []trackJSON `json:"Metadata"`
+		} `json:"MediaContainer"`
+	}
+
+	var tracks []Track
+	for offset := 0; ; {
+		params := url.Values{
+			"X-Plex-Container-Start": {fmt.Sprintf("%d", offset)},
+			"X-Plex-Container-Size":  {fmt.Sprintf("%d", playlistPageSize)},
+		}
+		var page trackPage
+		if err := c.get("/playlists/"+playlistRatingKey+"/items", params, &page); err != nil {
+			return nil, fmt.Errorf("plex: playlist %s items: %w", playlistRatingKey, err)
+		}
+		for _, m := range page.MediaContainer.Metadata {
+			tracks = append(tracks, trackFromJSON(m))
+		}
+		count := len(page.MediaContainer.Metadata)
+		if count == 0 {
+			break
+		}
+		offset += count
+		if page.MediaContainer.TotalSize != nil && offset >= *page.MediaContainer.TotalSize {
+			break
+		}
+	}
+	return tracks, nil
+}
+
+// Tracks returns all tracks in the given album (identified by its ratingKey).
+func (c *Client) Tracks(albumRatingKey string) ([]Track, error) {
+	var result struct {
+		MediaContainer struct {
+			Metadata []trackJSON `json:"Metadata"`
+		} `json:"MediaContainer"`
+	}
+	if err := c.get("/library/metadata/"+albumRatingKey+"/children", nil, &result); err != nil {
+		return nil, err
+	}
+
+	tracks := make([]Track, 0, len(result.MediaContainer.Metadata))
+	for _, m := range result.MediaContainer.Metadata {
+		tracks = append(tracks, trackFromJSON(m))
+	}
+	return tracks, nil
+}
+
+// Search searches the music library for tracks matching query.
+// Returns nil without making an HTTP call when query is empty.
+func (c *Client) Search(query string) ([]Track, error) {
+	if query == "" {
+		return nil, nil
+	}
+	var result struct {
+		MediaContainer struct {
+			Metadata []trackJSON `json:"Metadata"`
+		} `json:"MediaContainer"`
+	}
+	params := url.Values{
+		"query": {query},
+		"type":  {"10"}, // 10 = track
+	}
+	if err := c.get("/library/search", params, &result); err != nil {
+		return nil, err
+	}
+
+	tracks := make([]Track, 0, len(result.MediaContainer.Metadata))
+	for _, m := range result.MediaContainer.Metadata {
+		tracks = append(tracks, trackFromJSON(m))
+	}
+	return tracks, nil
+}
+
+// StreamURL returns the authenticated HTTP URL for streaming a track part.
+// partKey is the relative path from the Part element, e.g. "/library/parts/…/file.flac".
+// The token is appended as a query parameter; Plex accepts it in either header or query form.
+func (c *Client) StreamURL(partKey string) string {
+	return c.baseURL + partKey + "?X-Plex-Token=" + url.QueryEscape(c.token)
+}
+
+// IsStreamURL reports whether the given URL looks like a Plex library part
+// endpoint. Used by the player to route these URLs through the buffered
+// navBuffer + ffmpeg pipeline instead of native HTTP streaming.
+func IsStreamURL(urlStr string) bool {
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(u.Path), "/library/parts/")
+}
+
+// trackJSON is the shared JSON structure for track responses (children and search).
+type trackJSON struct {
+	RatingKey        string `json:"ratingKey"`
+	Title            string `json:"title"`
+	GrandparentTitle string `json:"grandparentTitle"` // artist
+	ParentTitle      string `json:"parentTitle"`      // album
+	Year             int    `json:"year"`
+	Index            int    `json:"index"`    // track number within album
+	Duration         int    `json:"duration"` // milliseconds
+	Media            []struct {
+		Part []struct {
+			Key string `json:"key"`
+		} `json:"Part"`
+	} `json:"Media"`
+}
+
+func trackFromJSON(m trackJSON) Track {
+	var partKey string
+	if len(m.Media) > 0 && len(m.Media[0].Part) > 0 {
+		partKey = m.Media[0].Part[0].Key
+	}
+	return Track{
+		RatingKey:   m.RatingKey,
+		Title:       m.Title,
+		ArtistName:  m.GrandparentTitle,
+		AlbumName:   m.ParentTitle,
+		Year:        m.Year,
+		TrackNumber: m.Index,
+		Duration:    m.Duration,
+		PartKey:     partKey,
+	}
+}

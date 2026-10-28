@@ -1,0 +1,39 @@
+# Maintainer: DaphnisDuck <daphnisduck@wompernet.us>
+#
+# ddsonic-bin installs the official release build. Stable releases only: a
+# release candidate is tested from this recipe locally and never pushed to the
+# AUR. For a new release, set pkgver and run `updpkgsums`, then
+# `makepkg --printsrcinfo > .SRCINFO`. To test a candidate, set
+# pkgver=1.0.0rc1 and _relver=1.0.0-rc.1.
+pkgname=ddsonic-bin
+pkgver=1.0.0
+_relver=${pkgver}
+pkgrel=1
+pkgdesc="DaphnisDuck's Music Player: a library-oriented terminal music player (fork of cliamp)"
+arch=('x86_64')
+url='https://github.com/DaphnisDuck/ddsonic'
+license=('GPL-3.0-only')
+depends=('alsa-lib' 'glibc')
+optdepends=('pipewire-alsa: audio output on PipeWire'
+            'pulseaudio-alsa: audio output on PulseAudio'
+            'ffmpeg: AAC, ALAC, Opus and WMA files'
+            'yt-dlp: YouTube Music')
+provides=('ddsonic')
+options=('!strip' '!debug') # the release binary is already stripped
+conflicts=('ddsonic')
+source=("https://github.com/DaphnisDuck/ddsonic/releases/download/v${_relver}/ddsonic-${_relver}-linux-amd64.tar.gz")
+sha256sums=('SKIP') # set by updpkgsums from the release's SHA256SUMS
+
+package() {
+    cd "ddsonic-${_relver}-linux-amd64"
+    install -Dm755 ddsonic "${pkgdir}/usr/bin/ddsonic"
+    install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+    install -Dm644 LICENSE-GPL-3.0 "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE-GPL-3.0"
+    install -Dm644 THIRD_PARTY_NOTICES "${pkgdir}/usr/share/licenses/${pkgname}/THIRD_PARTY_NOTICES"
+    install -Dm644 README.md "${pkgdir}/usr/share/doc/ddsonic/README.md"
+    install -Dm644 CHANGELOG.md "${pkgdir}/usr/share/doc/ddsonic/CHANGELOG.md"
+    # the README's images, beside it at the paths it names them by
+    cp -r --no-preserve=ownership assets docs "${pkgdir}/usr/share/doc/ddsonic/"
+    install -Dm644 share/applications/ddsonic.desktop "${pkgdir}/usr/share/applications/ddsonic.desktop"
+    cp -r --no-preserve=ownership share/icons "${pkgdir}/usr/share/icons"
+}

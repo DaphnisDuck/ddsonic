@@ -1,0 +1,469 @@
+package ap
+
+// ddsonic contract helper: a synthetic access point. Like ap_helper.go.txt,
+// this file exists only in the overlay the contract runner builds over a
+// staged copy of go-librespot. It listens on loopback TCP and answers the
+// SDK's real handshake (key exchange, challenge, login), so that the real
+// Accesspoint, its receive loop and its reconnect run against a real socket
+// that a test can close from the peer's side.
+//
+// The SDK verifies the server's key-exchange signature against a key of its
+// own package. The fake signs with a key it generates, and puts that key in
+// the package's variable for as long as it is open; Close puts the SDK's key
+// back. One fake is open at a time, and no test using one runs in parallel.
+
+import (
+	"context"
+	"crypto"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha1"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"sync"
+	"time"
+
+	librespot "github.com/devgianlu/go-librespot"
+	"github.com/devgianlu/go-librespot/dh"
+	pb "github.com/devgianlu/go-librespot/proto/spotify"
+	"google.golang.org/protobuf/proto"
+)
+
+// DDSonicFakeAP is the synthetic access point.
+type DDSonicFakeAP struct {
+	ln      net.Listener
+	key     *rsa.PrivateKey
+	sdkKey  *rsa.PublicKey
+	conns   chan *DDSonicFakeConn
+	closing chan struct{}
+	once    sync.Once
+
+	mu     sync.Mutex
+	hold   chan struct{} // while set, a new connection's handshake waits
+	refuse bool          // while set, a login is answered with a failure
+	logins int
+	all    []net.Conn
+}
+
+var ddsonicFakeOpen sync.Mutex
+
+// DDSonicContractFakeAP starts a synthetic access point on loopback.
+func DDSonicContractFakeAP() (*DDSonicFakeAP, error) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, err
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	ddsonicFakeOpen.Lock() // until Close: the package's key is this fake's
+	f := &DDSonicFakeAP{ln: ln, key: key, sdkKey: serverSigPubKey, conns: make(chan *DDSonicFakeConn, 16), closing: make(chan struct{})}
+	serverSigPubKey = &key.PublicKey
+	go f.accept()
+	return f, nil
+}
+
+// Close stops the fake, closes its connections and restores the SDK's key.
+func (f *DDSonicFakeAP) Close() {
+	f.once.Do(func() {
+		close(f.closing)
+		_ = f.ln.Close()
+		f.mu.Lock()
+		for _, c := range f.all {
+			_ = c.Close()
+		}
+		f.mu.Unlock()
+		serverSigPubKey = f.sdkKey
+		ddsonicFakeOpen.Unlock()
+	})
+}
+
+// Connect is a real access point, authenticated against the fake. Its
+// receive loop has not been started: that is the caller's to do, or not.
+func (f *DDSonicFakeAP) Connect(ctx context.Context) (*Accesspoint, error) {
+	addr := f.ln.Addr().String()
+	a := NewAccesspoint(&librespot.NullLogger{}, func(context.Context) string { return addr }, "ddsonic-contract")
+	if err := a.ConnectStored(ctx, "contract-user", []byte("contract-stored-credential")); err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
+// Hold makes the handshake of every connection accepted from now on wait
+// until release is called: a reconnect that has begun and cannot finish.
+func (f *DDSonicFakeAP) Hold() (release func()) {
+	gate := make(chan struct{})
+	f.mu.Lock()
+	f.hold = gate
+	f.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			f.mu.Lock()
+			f.hold = nil
+			f.mu.Unlock()
+			close(gate)
+		})
+	}
+}
+
+// Refuse makes every login from now on fail, as a server that rejects the
+// credential does, until undo is called.
+func (f *DDSonicFakeAP) Refuse() (undo func()) {
+	f.mu.Lock()
+	f.refuse = true
+	f.mu.Unlock()
+	return func() {
+		f.mu.Lock()
+		f.refuse = false
+		f.mu.Unlock()
+	}
+}
+
+// Logins is how many connections have completed their login.
+func (f *DDSonicFakeAP) Logins() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.logins
+}
+
+// Next is the next connection to complete its login, or nil after d.
+func (f *DDSonicFakeAP) Next(d time.Duration) *DDSonicFakeConn {
+	select {
+	case c := <-f.conns:
+		return c
+	case <-time.After(d):
+		return nil
+	}
+}
+
+func (f *DDSonicFakeAP) accept() {
+	for {
+		conn, err := f.ln.Accept()
+		if err != nil {
+			return
+		}
+		f.mu.Lock()
+		f.all = append(f.all, conn)
+		hold := f.hold
+		f.mu.Unlock()
+		go func() {
+			if hold != nil {
+				select {
+				case <-hold:
+				case <-f.closing:
+					return
+				}
+			}
+			c, err := f.handshake(conn)
+			if err != nil {
+				_ = conn.Close()
+				return
+			}
+			f.mu.Lock()
+			f.logins++
+			f.mu.Unlock()
+			go c.read()
+			f.conns <- c
+		}()
+	}
+}
+
+// handshake is the server's side of Accesspoint.connect.
+func (f *DDSonicFakeAP) handshake(conn net.Conn) (*DDSonicFakeConn, error) {
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	defer func() { _ = conn.SetDeadline(time.Time{}) }()
+
+	// ClientHello: two hello bytes, a length that counts them and itself,
+	// and the message. Every byte both ways is part of the challenge.
+	var exchanged []byte
+	head := make([]byte, 6)
+	if _, err := io.ReadFull(conn, head); err != nil {
+		return nil, err
+	}
+	size := binary.BigEndian.Uint32(head[2:])
+	if size < 6 || size > 4096 {
+		return nil, fmt.Errorf("fake access point: a hello of %d bytes", size)
+	}
+	body := make([]byte, size-6)
+	if _, err := io.ReadFull(conn, body); err != nil {
+		return nil, err
+	}
+	exchanged = append(append(exchanged, head...), body...)
+	var hello pb.ClientHello
+	if err := proto.Unmarshal(body, &hello); err != nil {
+		return nil, err
+	}
+
+	keys, err := dh.NewDiffieHellman()
+	if err != nil {
+		return nil, err
+	}
+	gs := keys.PublicKeyBytes()
+	digest := sha1.Sum(gs)
+	sig, err := rsa.SignPKCS1v15(rand.Reader, f.key, crypto.SHA1, digest[:])
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, 16)
+	_, _ = rand.Read(nonce)
+	resp, err := proto.Marshal(&pb.APResponseMessage{Challenge: &pb.APChallenge{
+		LoginCryptoChallenge: &pb.LoginCryptoChallengeUnion{DiffieHellman: &pb.LoginCryptoDiffieHellmanChallenge{
+			Gs: gs, ServerSignatureKey: proto.Int32(0), GsSignature: sig,
+		}},
+		FingerprintChallenge: &pb.FingerprintChallengeUnion{},
+		PowChallenge:         &pb.PoWChallengeUnion{},
+		CryptoChallenge:      &pb.CryptoChallengeUnion{},
+		ServerNonce:          nonce,
+	}})
+	if err != nil {
+		return nil, err
+	}
+	framed := binary.BigEndian.AppendUint32(nil, uint32(4+len(resp)))
+	framed = append(framed, resp...)
+	if _, err := conn.Write(framed); err != nil {
+		return nil, err
+	}
+	exchanged = append(exchanged, framed...)
+
+	shared := keys.Exchange(hello.GetLoginCryptoHello().GetDiffieHellman().GetGc())
+	macData := make([]byte, 0, sha1.Size*5)
+	mac := hmac.New(sha1.New, shared)
+	for i := byte(1); i < 6; i++ {
+		mac.Reset()
+		mac.Write(exchanged)
+		mac.Write([]byte{i})
+		macData = mac.Sum(macData)
+	}
+	mac = hmac.New(sha1.New, macData[:20])
+	mac.Write(exchanged)
+
+	// ClientResponsePlaintext: the client's proof that it has the secret.
+	var plain pb.ClientResponsePlaintext
+	if err := readMessage(conn, 4096, &plain); err != nil {
+		return nil, err
+	}
+	if !hmac.Equal(plain.GetLoginCryptoResponse().GetDiffieHellman().GetHmac(), mac.Sum(nil)) {
+		return nil, errors.New("fake access point: the client's challenge response is wrong")
+	}
+
+	// The client sends with macData[20:52] and receives with [52:84].
+	enc := newShannonConn(conn, macData[52:84], macData[20:52])
+	typ, _, err := enc.receivePacket(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	if typ != PacketTypeLogin {
+		return nil, fmt.Errorf("fake access point: %v where a login was expected", typ)
+	}
+	f.mu.Lock()
+	refuse := f.refuse
+	f.mu.Unlock()
+	if refuse {
+		failed, _ := proto.Marshal(&pb.APLoginFailed{ErrorCode: pb.ErrorCode_BadCredentials.Enum()})
+		_ = enc.sendPacket(context.Background(), PacketTypeAuthFailure, failed)
+		return nil, errors.New("fake access point: login refused")
+	}
+	reusable := make([]byte, 24)
+	_, _ = rand.Read(reusable)
+	welcome, err := proto.Marshal(&pb.APWelcome{
+		CanonicalUsername:           proto.String("contract-user"),
+		AccountTypeLoggedIn:         pb.AccountType_Spotify.Enum(),
+		CredentialsTypeLoggedIn:     pb.AccountType_Spotify.Enum(),
+		ReusableAuthCredentialsType: pb.AuthenticationType_AUTHENTICATION_STORED_SPOTIFY_CREDENTIALS.Enum(),
+		ReusableAuthCredentials:     reusable,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := enc.sendPacket(context.Background(), PacketTypeAPWelcome, welcome); err != nil {
+		return nil, err
+	}
+	return &DDSonicFakeConn{conn: conn, enc: enc, Packets: make(chan Packet, 64)}, nil
+}
+
+// DDSonicFakeConn is the fake's end of one authenticated connection.
+type DDSonicFakeConn struct {
+	conn net.Conn
+	enc  *shannonConn
+	// Packets is what the client sent, in order. It is closed when the
+	// connection can no longer be read.
+	Packets chan Packet
+}
+
+func (c *DDSonicFakeConn) read() {
+	defer close(c.Packets)
+	for {
+		typ, payload, err := c.enc.receivePacket(context.Background())
+		if err != nil {
+			return
+		}
+		c.Packets <- Packet{Type: typ, Payload: payload}
+	}
+}
+
+// Send sends the client one packet.
+func (c *DDSonicFakeConn) Send(typ PacketType, payload []byte) error {
+	return c.enc.sendPacket(context.Background(), typ, payload)
+}
+
+// PeerClose closes the connection from the access point's side as the
+// client first sees it: the server's FIN arrives and the client's socket is
+// in CLOSE_WAIT. The server's end still reads, as a remote peer's reset has
+// not yet come back, so what the client writes afterwards is seen in
+// Packets, and is never answered.
+func (c *DDSonicFakeConn) PeerClose() error {
+	tcp, ok := c.conn.(*net.TCPConn)
+	if !ok {
+		return errors.New("fake access point: not a TCP connection")
+	}
+	return tcp.CloseWrite()
+}
+
+// Wait is the next packet of the given type the client sent, skipping
+// others, or false after d or when the connection ended.
+func (c *DDSonicFakeConn) Wait(typ PacketType, d time.Duration) (Packet, bool) {
+	deadline := time.After(d)
+	for {
+		select {
+		case pkt, ok := <-c.Packets:
+			if !ok {
+				return Packet{}, false
+			}
+			if pkt.Type == typ {
+				return pkt, true
+			}
+		case <-deadline:
+			return Packet{}, false
+		}
+	}
+}
+
+// AnswerKey answers a key request with key: the request's sequence number
+// (its last six bytes are the sequence and a zero word) and the key.
+func (c *DDSonicFakeConn) AnswerKey(req Packet, key []byte) error {
+	if req.Type != PacketTypeRequestKey || len(req.Payload) < 6 {
+		return errors.New("fake access point: not a key request")
+	}
+	seq := req.Payload[len(req.Payload)-6 : len(req.Payload)-2]
+	return c.Send(PacketTypeAesKey, append(append([]byte{}, seq...), key...))
+}
+
+// ddsonicGatedConn is a client connection whose reads wait for a test, and
+// whose writes are reported to it.
+type ddsonicGatedConn struct {
+	net.Conn
+	open   chan struct{}
+	writes chan error
+}
+
+func (c *ddsonicGatedConn) Read(b []byte) (int, error) {
+	<-c.open
+	return c.Conn.Read(b)
+}
+
+func (c *ddsonicGatedConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	select {
+	case c.writes <- err:
+	default:
+	}
+	return n, err
+}
+
+// DDSonicContractGateReads holds every read of a's current connection until
+// release is called, and reports the result of each write on writes. It is
+// the barrier that orders a write before the receive loop's first read. It
+// is for an access point whose receive loop has not started.
+func DDSonicContractGateReads(a *Accesspoint) (release func(), writes <-chan error) {
+	a.connMu.Lock()
+	defer a.connMu.Unlock()
+	g := &ddsonicGatedConn{Conn: a.conn, open: make(chan struct{}), writes: make(chan error, 16)}
+	a.conn = g
+	a.encConn.conn = g
+	var once sync.Once
+	return func() { once.Do(func() { close(g.open) }) }, g.writes
+}
+
+// DDSonicContractForgetWelcome makes a's next reconnect fail for good, as
+// one that has used up its retries does: the receive loop then closes the
+// access point itself.
+func DDSonicContractForgetWelcome(a *Accesspoint) {
+	a.connMu.Lock()
+	defer a.connMu.Unlock()
+	a.welcome = nil
+}
+
+// DDSonicWriteGate passes a connection's writes through until it is armed
+// (then every write waits, holding the connection's send lock, until
+// Release) or told to fail (then every write fails, writing nothing, until
+// Release).
+type DDSonicWriteGate struct {
+	net.Conn
+	mu      sync.Mutex
+	held    chan struct{}
+	entered chan struct{}
+	fail    error
+}
+
+func (g *DDSonicWriteGate) Write(b []byte) (int, error) {
+	g.mu.Lock()
+	if g.fail != nil {
+		err := g.fail
+		g.mu.Unlock()
+		return 0, err
+	}
+	held, entered := g.held, g.entered
+	if entered != nil {
+		g.entered = nil
+		close(entered)
+	}
+	g.mu.Unlock()
+	if held != nil {
+		<-held
+	}
+	return g.Conn.Write(b)
+}
+
+// Arm holds every write from now on; entered is closed when the first one
+// is held.
+func (g *DDSonicWriteGate) Arm() (entered <-chan struct{}) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	e := make(chan struct{})
+	g.held, g.entered = make(chan struct{}), e
+	return e
+}
+
+// Fail makes every write from now on fail with err, writing nothing.
+func (g *DDSonicWriteGate) Fail(err error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.fail = err
+}
+
+// Release lets the held writes, and every later one, through.
+func (g *DDSonicWriteGate) Release() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.held != nil {
+		close(g.held)
+	}
+	g.held, g.entered, g.fail = nil, nil, nil
+}
+
+// DDSonicContractGateWrites puts a write gate, open, on a's current
+// connection. It is for an access point whose receive loop has not started.
+func DDSonicContractGateWrites(a *Accesspoint) *DDSonicWriteGate {
+	a.connMu.Lock()
+	defer a.connMu.Unlock()
+	g := &DDSonicWriteGate{Conn: a.conn}
+	a.conn = g
+	a.encConn.conn = g
+	return g
+}

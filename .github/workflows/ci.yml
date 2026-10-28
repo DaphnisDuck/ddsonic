@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.3" # ddsonic: the pinned release toolchain (mise.toml, packaging/Dockerfile); go.mod keeps upstream's minimum
+          cache: true
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libflac-dev libvorbis-dev libogg-dev libmpg123-dev shellcheck
+      - run: go install honnef.co/go/tools/cmd/staticcheck@v0.7.0-0.dev.0.20261009221906-f1838cc308e5 # ddsonic: upstream commit f1838cc308e5cfbb38d91cfc973355611845997e (its move to x/tools v0.51.0), pinned exactly; v0.8.1, the newest release, cannot read Go 1.27.2 export data. Return to a release once one can
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0 # ddsonic: v1.1.4 crashes on this code (ast.KeyValueExpr)
+      # ddsonic: make ci includes the go-librespot contract gate (make
+      # sdk-contract). It runs here because this job has the pinned toolchain,
+      # which the gate requires and checks; the macOS job below has the same pin
+      # but does not run it. The gate's native release
+      # checks are therefore unverified on macOS until macOS acceptance.
+      - run: make ci
+
+  # ddsonic: no Windows job. ddsonic 1.0 does not support Windows, and its tests
+  # assume Unix paths and file modes.
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-26
+            goos: darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.3" # ddsonic: the pinned release toolchain, as in the Linux job; go.mod keeps upstream's minimum
+      - name: Install codec libs (macOS)
+        if: matrix.goos == 'darwin'
+        run: |
+          brew install flac libvorbis libogg mpg123 pkg-config
+          # Make sure pkg-config resolves the version just poured rather than
+          # a leftover symlink into an older Cellar directory.
+          brew link --overwrite flac libvorbis libogg mpg123
+          pkg-config --libs libmpg123 flac vorbis ogg
+      - name: Discard cached cgo objects (macOS)
+        if: matrix.goos == 'darwin'
+        # cgo records the -L paths pkg-config returned when a package was
+        # compiled, and Homebrew's paths carry the exact codec version. The
+        # restored build cache is keyed on go.sum alone, so once the runner
+        # image moves mpg123 to a new version those cached objects keep
+        # linking against a Cellar directory that no longer exists. Dropping
+        # the build cache costs a cold cgo build; the module cache is
+        # untouched.
+        run: go clean -cache
+      - name: Test and build (non-Windows)
+        if: matrix.goos != 'windows'
+        run: |
+          go test -count=1 ./...
+          go build -trimpath ./...

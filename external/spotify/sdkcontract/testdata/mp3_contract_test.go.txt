@@ -1,0 +1,74 @@
+package mp3
+
+// ddsonic's contract with go-librespot's MP3 decoder, at the pinned version:
+// a decoder is released by Close and by nothing else. See
+// docs/ddsonic/design/spotify-token-coordinator.md, 4.3 and 14.5.
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+
+	librespot "github.com/devgianlu/go-librespot"
+)
+
+func decoder(t *testing.T) *Decoder {
+	t.Helper()
+	dir := os.Getenv("DDSONIC_CONTRACT_FIXTURES")
+	if dir == "" {
+		t.Fatal("DDSONIC_CONTRACT_FIXTURES is not set: run these tests through ddsonic's contract runner")
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "tone.mp3.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := New(&librespot.NullLogger{}, bytes.NewReader(data), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+// A reviewed expectation: a decoder whose references are dropped is still
+// rooted, by the cgo handle it holds to itself. It is why a stream nobody
+// accepted has its decoder closed. If a later go-librespot releases it some
+// other way, this fails, and the expectation is updated in a reviewed change.
+func TestDDSonicContractMP3HandleSurvivesDropAndGC(t *testing.T) {
+	d := decoder(t)
+	h := d.handle
+	d = nil
+	runtime.GC()
+	runtime.GC()
+	kept, ok := h.Value().(*Decoder)
+	if !ok || kept == nil {
+		t.Fatal("EXPECTATION CHANGED: the handle no longer roots the decoder")
+	}
+	kept.Close()
+}
+
+// STOP if this fails: closing a never-read decoder is how ddsonic releases
+// it. Close deletes the handle and frees the native state, and may be called
+// again.
+func TestDDSonicContractMP3CloseReleasesHandle(t *testing.T) {
+	d := decoder(t)
+	h := d.handle
+	if err := d.Close(); err != nil {
+		t.Fatalf("Close() = %v", err)
+	}
+	if d.mh != nil || d.handlePtr != nil || d.handle != 0 {
+		t.Fatalf("after Close: decoder %v, handle pointer %v, handle %v; want all released", d.mh, d.handlePtr, d.handle)
+	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("the handle still resolves after Close")
+			}
+		}()
+		h.Value()
+	}()
+	if err := d.Close(); err != nil {
+		t.Errorf("a second Close() = %v", err)
+	}
+}
