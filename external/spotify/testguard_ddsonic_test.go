@@ -449,8 +449,14 @@ func TestCredentialGuardPermitsAPlainPathInside(t *testing.T) {
 		}
 		t.Setenv("TMPDIR", alias)
 		t.Setenv("CLIAMP_CONFIG_DIR", filepath.Join(alias, "config"))
+		// The resolved spelling of inside: t.TempDir may itself be reached
+		// through a link (macOS's /var is /private/var).
+		resolved, err := filepath.EvalSymlinks(inside)
+		if err != nil {
+			t.Fatal(err)
+		}
 		path, err := credsFile()
-		if want := filepath.Join(inside, "config", "spotify_credentials.json"); err != nil || path != want {
+		if want := filepath.Join(resolved, "config", "spotify_credentials.json"); err != nil || path != want {
 			t.Errorf("credsFile() = %q, %v, want the resolved spelling %q", path, err, want)
 		}
 		roundTrip(t, filepath.Join(inside, "config"))

@@ -5,7 +5,6 @@ package ytdlptest
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -49,30 +48,65 @@ func (c *Copier) unhold() error {
 }
 
 // join waits, until deadline, until no child holds the alive pipe: a read
-// of a pipe nobody holds ends (io.EOF). Anything else is reported: the
+// of a pipe nobody holds ends (end of file). Anything else is reported: the
 // deadline reached (something still holds it), data on it (nothing writes
 // there), or a read that fails. None of those is ever taken for "none
 // left". A process closes its descriptors early in its exit, so this does
 // not show that any process has exited; awaitRegistered does.
+//
+// The pipe is read without blocking, again every few milliseconds until the
+// deadline. Go cannot put a read deadline on a FIFO on macOS (it does not
+// poll FIFOs there, Go issue 24164), so the wait is bounded here, the same
+// way on every system.
 func (c *Copier) join(deadline time.Time) error {
 	defer func() { _ = c.alive.Close() }()
 	bound := time.Until(deadline)
-	if err := c.alive.SetReadDeadline(deadline); err != nil {
+	raw, err := c.alive.SyscallConn()
+	if err != nil {
 		return fmt.Errorf("the alive pipe: %w", err)
+	}
+	// own opened it without blocking; made sure of here, as a blocking read
+	// would wait past the deadline.
+	var nbErr error
+	if err := raw.Control(func(fd uintptr) { nbErr = syscall.SetNonblock(int(fd), true) }); err != nil {
+		return fmt.Errorf("the alive pipe: %w", err)
+	}
+	if nbErr != nil {
+		return fmt.Errorf("the alive pipe: %w", nbErr)
 	}
 	var b [64]byte
-	n, err := c.alive.Read(b[:])
-	switch {
-	case n > 0:
-		return fmt.Errorf("the alive pipe holds data (%q); nothing of the fixture writes there", b[:n])
-	case errors.Is(err, io.EOF):
-		return nil
-	case errors.Is(err, os.ErrDeadlineExceeded):
-		return fmt.Errorf("a child of a run of the fake yt-dlp still holds the alive pipe %v after it was released", bound)
-	default:
-		return fmt.Errorf("the alive pipe: %w", err)
+	for {
+		var n int
+		var readErr error
+		if err := raw.Read(func(fd uintptr) bool {
+			n, readErr = readAlive(int(fd), b[:])
+			return true // one attempt; the loop does the waiting
+		}); err != nil {
+			return fmt.Errorf("the alive pipe: %w", err)
+		}
+		switch {
+		case readErr == nil && n > 0:
+			return fmt.Errorf("the alive pipe holds data (%q); nothing of the fixture writes there", b[:n])
+		case readErr == nil:
+			return nil // end of file: nobody holds it
+		case !errors.Is(readErr, syscall.EAGAIN) && !errors.Is(readErr, syscall.EINTR):
+			return fmt.Errorf("the alive pipe: %w", readErr)
+		}
+		// EAGAIN: something still holds it, and nothing was written; EINTR:
+		// the read was interrupted. Either way, read again until the deadline.
+		if !time.Now().Before(deadline) {
+			if errors.Is(readErr, syscall.EINTR) {
+				return fmt.Errorf("the alive pipe could not be read before the deadline, %v after it was released: %w", bound, readErr)
+			}
+			return fmt.Errorf("a child of a run of the fake yt-dlp still holds the alive pipe %v after it was released", bound)
+		}
+		time.Sleep(min(2*time.Millisecond, time.Until(deadline)))
 	}
 }
+
+// readAlive reads the alive pipe once; a variable, so that a test can
+// interrupt the reading.
+var readAlive = syscall.Read
 
 // registered is one line of the registry: a run ("run") or the child a run
 // blocks on ("child"), by its pid and its start time ("-" where it could

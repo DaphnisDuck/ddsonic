@@ -165,6 +165,25 @@ func TestCopierTeardownReportsWhatItCannotEstablish(t *testing.T) {
 			t.Errorf("the teardown reported %q, want nothing for a process that has exited", r)
 		}
 	})
+	t.Run("reads interrupted until the deadline", func(t *testing.T) {
+		defer func(b time.Duration) { teardownBound = b }(teardownBound)
+		teardownBound = 300 * time.Millisecond
+		c := InstallCopier(t, Hang, "")
+		defer func(f func(int, []byte) (int, error)) { readAlive = f }(readAlive)
+		readAlive = func(int, []byte) (int, error) { return -1, syscall.EINTR }
+		var r recorder
+		done := make(chan struct{})
+		start := time.Now()
+		go func() { c.release(r.report); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(teardownBound + runBound):
+			t.Fatalf("the teardown was still waiting %v after its bound %v", time.Since(start), teardownBound)
+		}
+		if !strings.Contains(strings.Join(r, " "), "before the deadline") {
+			t.Errorf("the teardown reported %q, want that the alive pipe could not be read before the deadline", r)
+		}
+	})
 	t.Run("an acceptance after the deadline", func(t *testing.T) {
 		defer func(b time.Duration) { teardownBound = b }(teardownBound)
 		teardownBound = time.Nanosecond

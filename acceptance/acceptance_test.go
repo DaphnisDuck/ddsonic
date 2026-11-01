@@ -678,7 +678,11 @@ func TestSummaryKeepsTheJudgementsApart(t *testing.T) {
 		{CaseID: "AA-003", Severity: SeverityHigh, Disposition: DispositionInvestigate},
 	}
 	v := Evaluate(c, nil, results, triage, testTarget)
-	dev := Summary(Identity{Mode: ModeDevelopment, ReportedVersion: "dev"}, c, nil, v, Sealed{}, NewRedactor())
+	// The judgements are under test here, not this machine's redaction
+	// (TestSummaryIsRedacted): a redactor with none of this machine's
+	// literals, so that a user name that is also a word of the summary
+	// (GitHub's runners run as "runner") cannot rewrite what is expected.
+	dev := Summary(Identity{Mode: ModeDevelopment, ReportedVersion: "dev"}, c, nil, v, Sealed{}, &Redactor{})
 	for _, want := range []string{
 		"not release evidence",
 		"**5 cases:** 1 pass, 1 fail, 1 blocked, 1 not run, 1 not applicable.",
