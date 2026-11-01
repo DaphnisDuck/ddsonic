@@ -7,9 +7,12 @@ package model
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/bjarneo/cliamp/library"
 	"github.com/bjarneo/cliamp/playlist"
@@ -161,6 +164,67 @@ func (m *Model) openProviderSearchQuery(prov playlist.Provider, query string) te
 	m.spotSearch.query = query
 	m.spotSearch.loading = true
 	return fetchSpotSearchCmd(m.newSpotRequestContext(30*time.Second), s, prov.Name(), query, nextRequest(&m.requests.spotSearch))
+}
+
+// The provider's own search says whose results it shows and for what, so it
+// cannot be taken for the library search it was opened from: the same
+// recording is often in both, and its rows carry no source.
+
+// spotSearchProviderName is the searched provider's name, e.g. "Spotify".
+func (m Model) spotSearchProviderName() string {
+	if m.spotSearch.prov == nil {
+		return ""
+	}
+	return m.spotSearch.prov.Name()
+}
+
+// spotSearchPromptLabel labels the query input: "Search Spotify".
+func (m Model) spotSearchPromptLabel() string {
+	return strings.TrimSpace("Search " + m.spotSearchProviderName())
+}
+
+// spotSearchLoadingLabel is shown while a search runs:
+// "Searching Spotify for “daphnis”…".
+func (m Model) spotSearchLoadingLabel() string {
+	lead := strings.TrimSpace("Searching " + m.spotSearchProviderName())
+	return m.spotSearchWithQuery(lead, ui.PanelWidth-lipgloss.Width("  …")) + "…"
+}
+
+// spotSearchResultsLabel heads the results, before their position:
+// "Spotify results for “daphnis”".
+func (m Model) spotSearchResultsLabel() string {
+	lead := strings.TrimSpace(m.spotSearchProviderName() + " results")
+	position := ""
+	if n := len(m.spotSearch.results); n > 0 {
+		position = fmt.Sprintf("  %d/%d", m.spotSearch.cursor+1, n) // as sepHeaderN adds it
+	}
+	return m.spotSearchWithQuery(lead, ui.PanelWidth-lipgloss.Width("── "+position+" "))
+}
+
+// spotSearchWithQuery is lead followed by the query in quotes, within
+// width columns. The query is what gives way: it is cut short, and on a
+// panel with no room for a few characters of it, left out, so the
+// provider's name always shows.
+func (m Model) spotSearchWithQuery(lead string, width int) string {
+	const open, shut = " for “", "”"
+	room := width - lipgloss.Width(lead+open+shut)
+	if room < 4 {
+		return lead
+	}
+	return lead + open + truncate(m.spotSearch.query, room) + shut
+}
+
+// spotSearchQueryEdited ends the search in flight when the query was edited
+// (before is the query as it was): its reply is for another query and would
+// be dropped, leaving the screen loading with Enter inert. The request is
+// cancelled and retired, so the edited query can be searched at once.
+func (m *Model) spotSearchQueryEdited(before string) {
+	if m.spotSearch.query == before || !m.spotSearch.loading {
+		return
+	}
+	m.cancelSpotRequest()
+	nextRequest(&m.requests.spotSearch)
+	m.spotSearch.loading = false
 }
 
 // libSearchPrompt is the search frame's input line: highlighted while it

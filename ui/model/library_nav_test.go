@@ -44,7 +44,7 @@ func libRun(t testing.TB, m Model, cmd tea.Cmd) Model {
 		return m
 	}
 	switch msg := cmd().(type) {
-	case libraryLoadedMsg, libraryPlayMsg, libraryAuthDoneMsg, librarySearchTickMsg:
+	case libraryLoadedMsg, libraryPlayMsg, libraryAuthDoneMsg, librarySearchTickMsg, libFavoriteSavedMsg:
 		updated, next := m.Update(msg)
 		return libRun(t, updated.(Model), next)
 	}
@@ -214,6 +214,7 @@ func TestLibrarySignInRetriesLoad(t *testing.T) {
 	prov := &libAuthProv{}
 	liked := library.TrackLevel("Liked", prov, func(context.Context) ([]playlist.Track, error) { return prov.Tracks("") })
 	m := newLibraryModel(library.Menu("Music", library.Entry{Title: "Liked", Open: liked}))
+	m.SetLibrarySignIn("auth", prov) // only a registered provider signs in (library_signin.go)
 
 	m = libPress(t, m, "enter")
 	if m.libTop().err == nil {

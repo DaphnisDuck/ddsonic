@@ -1,0 +1,630 @@
+# ddsonic acceptance case catalog.
+#
+# One entry per case: what is checked, against which promise (semantics), and
+# where its procedure lives. No steps are written here. A scripted case names
+# a Go test (runner: "<package dir>:<TestName>"); a manual case names a
+# heading in a runbook beside this file (procedure: "<doc>#<anchor>").
+#
+# `make acceptance-validate` checks this file; ../acceptance.md explains the
+# fields, the lanes and the gate. Changing a case, its runner or a semantics
+# row changes the basis of the evidence: it is reviewed like any other change.
+
+semantics:
+  - id: general/artifact
+    kind: general
+    statement: Acceptance tests the binary extracted from the release archive, identified by checksum and by the version it reports.
+  - id: general/startup
+    kind: general
+    statement: ddsonic starts without setup, shows the library, and quits cleanly, leaving no socket behind.
+  - id: general/configuration
+    kind: general
+    statement: >-
+      A start that cannot be honoured is refused with a message that names what is wrong, before anything starts.
+      A config.toml that is not valid TOML is such a start: it never falls back to the defaults, and the file is left as it is.
+      No config file, and a valid one, start normally.
+  - id: general/playback
+    kind: general
+    statement: A track plays, the queue grows and playback stops as asked, and the remote state says so.
+  - id: general/sync
+    kind: general
+    statement: >-
+      A synced list changes only on a sync. The cached library is shown after a restart before the source is read again.
+      A failed sync keeps that collection's cache and shows the failure; the next successful sync needs no restart.
+      A cancelled sync commits nothing incomplete or stale.
+  - id: general/presentation
+    kind: general
+    statement: Text stays inside the screen. A level's note wraps to the panel and gives way to the list on a short terminal.
+  - id: local/library
+    provider: Local
+    list: Albums, Artists, Genres
+    kind: authoritative
+    statement: Authoritative for the tagged files under the music folder. A file added or removed shows after a refresh.
+  - id: spotify/liked-songs
+    provider: Spotify
+    list: Liked Songs
+    kind: authoritative
+    statement: The account's saved tracks.
+  - id: spotify/albums
+    provider: Spotify
+    list: Albums
+    kind: authoritative
+    statement: The account's saved albums.
+  - id: spotify/artists
+    provider: Spotify
+    list: Artists
+    kind: authoritative
+    statement: The artists the account follows.
+  - id: spotify/playlists
+    provider: Spotify
+    list: Playlists
+    kind: authoritative
+    statement: The playlists the account owns or follows.
+  - id: search/unified
+    list: Search
+    kind: local
+    statement: Ordinary search reads the cached catalog of every source. It is not the provider's live search.
+  - id: search/provider-live
+    list: Search <provider> for …
+    kind: live
+    statement: An explicit provider search asks that provider's service, and the screen names the provider and the query while loading and after.
+  - id: ytmusic/liked-music
+    provider: YouTube Music
+    list: Liked Music
+    kind: authoritative
+    statement: The account's liked tracks, as synced.
+  - id: ytmusic/playlists
+    provider: YouTube Music
+    list: Playlists
+    kind: authoritative
+    statement: The playlists in the account's current feed, plus those named in the config. Not claimed to be every playlist the account follows.
+  - id: ytmusic/albums-from-tracks
+    provider: YouTube Music
+    list: Albums from tracks
+    kind: derived
+    statement: >-
+      Derived from synced tracks, and incomplete. Saving an album that no synced track represents does not, by that alone, make it appear.
+      An album a synced track represents may appear whether it is saved or not.
+  - id: ytmusic/artists-from-tracks
+    provider: YouTube Music
+    list: Artists from tracks
+    kind: derived
+    statement: >-
+      Derived from synced tracks, and incomplete. Following an artist that no synced track credits does not, by that alone, make it appear.
+      An artist a synced track credits may appear whether it is followed or not.
+  - id: radio/favorites
+    provider: Radio
+    list: Favorites
+    kind: authoritative
+    statement: The stations starred on this machine.
+  - id: radio/browse
+    provider: Radio
+    list: Browse Stations
+    kind: live
+    statement: The live station directory. It needs the network and is not synced.
+
+cases:
+  # --- Scripted, on the binary under test (lane: binary) ---
+  - id: ART-001
+    area: Release artifact
+    title: The executable the cases drive is the identified artifact and reports the expected version
+    semantics: general/artifact
+    tier: deterministic
+    driver: scripted
+    lane: binary
+    runner: acceptance/binarycases:TestBinaryUnderTestIsTheIdentifiedArtifact
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.4
+  - id: START-001
+    area: Startup
+    title: A first start with no providers shows the library, quits cleanly and starts again
+    semantics: general/startup
+    tier: deterministic
+    driver: scripted
+    lane: binary
+    runner: acceptance/binarycases:TestFreshStartWithNoProviders
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.4
+  - id: CFG-001
+    area: Configuration
+    title: An invalid startup option is refused by name and nothing starts
+    semantics: general/configuration
+    tier: deterministic
+    driver: scripted
+    lane: binary
+    runner: acceptance/binarycases:TestInvalidStartupOptionIsRefused
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.4
+  - id: CFG-002
+    area: Configuration
+    title: A config.toml that is not valid TOML stops the start, naming the file and the parser's error; a valid one starts
+    semantics: general/configuration
+    tier: deterministic
+    driver: scripted
+    lane: binary
+    runner: acceptance/binarycases:TestMalformedConfigStopsTheStart
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.4
+  - id: LOCAL-001
+    area: Local
+    title: A local file added appears after a refresh, survives a restart, and is gone after its removal and a refresh
+    semantics: local/library
+    tier: deterministic
+    driver: scripted
+    lane: binary
+    runner: acceptance/binarycases:TestLocalAddRefreshRestartRemove
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.4
+  - id: LOCAL-002
+    area: Local
+    title: A local file plays through the null audio device, a second is queued, and playback stops
+    semantics: general/playback
+    tier: deterministic
+    driver: scripted
+    lane: binary
+    runner: acceptance/binarycases:TestLocalPlayQueueStop
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.4
+  - id: SYNC-001
+    area: Sync
+    title: After a restart the cached library is shown before the source is read again
+    semantics: general/sync
+    tier: deterministic
+    driver: scripted
+    lane: binary
+    runner: acceptance/binarycases:TestCachedLibraryShownBeforeAnyRefetch
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.4
+  - id: SYNC-002
+    area: Sync
+    title: A failed sync keeps the cached list and shows the failure; the next sync recovers without a restart
+    semantics: general/sync
+    tier: deterministic
+    driver: scripted
+    lane: binary
+    runner: acceptance/binarycases:TestFailedSyncKeepsTheCacheAndRecovers
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.4
+  - id: YTM-DER-001
+    area: YouTube Music
+    title: Albums from tracks lists the albums synced tracks represent, saved or not, and not an album that is only saved
+    semantics: ytmusic/albums-from-tracks
+    tier: deterministic
+    driver: scripted
+    lane: binary
+    runner: acceptance/binarycases:TestYouTubeAlbumsFromTracksAreDerived
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.4
+    regression_of: the rc.3 report that albums saved in YouTube Music never appeared
+  - id: YTM-DER-002
+    area: YouTube Music
+    title: Artists from tracks lists the artists synced tracks credit, followed or not, and not an artist that is only followed
+    semantics: ytmusic/artists-from-tracks
+    tier: deterministic
+    driver: scripted
+    lane: binary
+    runner: acceptance/binarycases:TestYouTubeArtistsFromTracksAreDerived
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.4
+    regression_of: the rc.3 report that albums saved in YouTube Music never appeared
+  - id: UI-001
+    area: Presentation
+    title: A level's note and the key bar wrap inside an 80-column screen, and the note gives way on a short terminal
+    semantics: general/presentation
+    tier: deterministic
+    driver: scripted
+    lane: binary
+    runner: acceptance/binarycases:TestNotesAndKeyBarWrap
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.4
+
+  # --- Scripted, in-process on the checkout's source (lane: go) ---
+  - id: SPOT-001
+    area: Spotify
+    title: A saved album appears after a refresh and not before, survives a restart unread, and is gone after unsaving
+    semantics: spotify/albums
+    tier: deterministic
+    driver: scripted
+    lane: go
+    runner: .:TestAcceptanceSpotifySavedAlbumTransition
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.4
+  - id: SPOT-002
+    area: Spotify
+    title: A failed saved-albums read keeps the cached albums and reports the failure; the next refresh recovers without a restart
+    semantics: general/sync
+    tier: deterministic
+    driver: scripted
+    lane: go
+    runner: .:TestAcceptanceSpotifyFailedSyncKeepsCacheAndRecovers
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.4
+  - id: SPOT-003
+    area: Spotify
+    title: A sync cancelled mid-read commits nothing of the collection it was reading
+    semantics: general/sync
+    tier: deterministic
+    driver: scripted
+    lane: go
+    runner: .:TestAcceptanceSpotifyCancelledSyncCommitsNothing
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.4
+  - id: SPOT-004
+    area: Spotify
+    title: A home never signed in to Spotify offers the sign-in in the library, syncs at once when it succeeds, and asks for nothing after a restart
+    semantics: spotify/albums
+    tier: deterministic
+    driver: scripted
+    lane: go
+    runner: .:TestAcceptanceSpotifyFirstRunSignIn
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.4
+    regression_of: LIVE-SPOT-001 failing on v1.0.0-rc.4 (no reachable sign-in with an empty synced catalog; since 9df1c0c)
+  - id: YTM-DER-003
+    area: YouTube Music
+    title: Rows of the derived lists say "from tracks" in All Music and in search
+    semantics: ytmusic/albums-from-tracks
+    tier: deterministic
+    driver: scripted
+    lane: go
+    runner: library:TestPartialSourceRowsSayFromTracks
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.4
+    regression_of: the rc.3 report that albums saved in YouTube Music never appeared
+  - id: YTM-DER-004
+    area: YouTube Music
+    title: An empty derived list says no albums were found in your tracks, not that you have none saved
+    semantics: ytmusic/albums-from-tracks
+    tier: deterministic
+    driver: scripted
+    lane: go
+    runner: library:TestPartialSourceEmptyState
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.4
+  - id: SEARCH-001
+    area: Search
+    title: A provider's own search names the provider and the query while loading and in its results
+    semantics: search/provider-live
+    tier: deterministic
+    driver: scripted
+    lane: go
+    runner: ui/model:TestLiveSearchNamesItsProviderAndQuery
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.4
+    regression_of: a9baaa9 (a provider's own search read "Search" and "Results")
+  - id: SEARCH-002
+    area: Search
+    title: A provider search with no results still names its provider
+    semantics: search/provider-live
+    tier: deterministic
+    driver: scripted
+    lane: go
+    runner: ui/model:TestLiveSearchNamesItsProviderWithNoResults
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.4
+    regression_of: a9baaa9
+  - id: SEARCH-003
+    area: Search
+    title: On a narrow panel the provider's name stays and the query gives way
+    semantics: search/provider-live
+    tier: deterministic
+    driver: scripted
+    lane: go
+    runner: ui/model:TestLiveSearchLabelsFitNarrowPanels
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.4
+    regression_of: a9baaa9
+  - id: SEARCH-004
+    area: Search
+    title: Editing a provider search while it is loading cancels it; a stale reply is ignored
+    semantics: search/provider-live
+    tier: deterministic
+    driver: scripted
+    lane: go
+    runner: ui/model:TestLiveSearchEditWhileLoading
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.4
+    regression_of: a9baaa9 (an edit left the search loading with Enter inert)
+  - id: SEARCH-005
+    area: Search
+    title: Moving the cursor in a provider search keeps the search
+    semantics: search/provider-live
+    tier: deterministic
+    driver: scripted
+    lane: go
+    runner: ui/model:TestLiveSearchCursorMoveKeepsTheSearch
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.4
+    regression_of: a9baaa9
+  - id: UI-002
+    area: Presentation
+    title: A level's note wraps to the panel's width
+    semantics: general/presentation
+    tier: deterministic
+    driver: scripted
+    lane: go
+    runner: ui/model:TestLibraryNoteWrapsToThePanel
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.4
+  - id: UI-003
+    area: Presentation
+    title: The key help keeps its essential hints at the minimum width
+    semantics: general/presentation
+    tier: deterministic
+    driver: scripted
+    lane: go
+    runner: ui/model:TestCommandHelpKeepsEssentialHintsAtMinimumWidth
+    reviewer: assertions
+    applicability: always
+    gate: required
+    implemented: true
+    since: v1.0.0-rc.4
+
+  # --- Manual, deterministic: an agent in an isolated home ---
+  - id: RADIO-001
+    area: Radio
+    title: A starred station is in Favorites after a restart, and unstarring removes it
+    semantics: radio/favorites
+    tier: deterministic
+    driver: manual
+    lane: manual
+    procedure: human.md#radio-favorites
+    reviewer: agent
+    applicability: always
+    gate: required
+    since: v1.0.0-rc.4
+  - id: SEARCH-006
+    area: Search
+    title: Ordinary search reads the cached catalog of every source and labels each row's source
+    semantics: search/unified
+    tier: deterministic
+    driver: manual
+    lane: manual
+    procedure: human.md#unified-search
+    reviewer: agent
+    applicability: always
+    gate: required
+    since: v1.0.0-rc.4
+
+  # --- Manual, live providers: real accounts, by the runbook ---
+  - id: LIVE-SPOT-001
+    area: Spotify
+    title: Sign-in works and a full sync completes
+    semantics: spotify/albums
+    tier: live
+    driver: manual
+    lane: manual
+    procedure: live.md#spotify-sign-in-and-sync
+    reviewer: agent
+    applicability: always
+    gate: required
+    since: v1.0.0-rc.4
+  - id: LIVE-SPOT-002
+    area: Spotify
+    title: Liked Songs, Albums, Artists and Playlists hold what the account holds
+    semantics: spotify/liked-songs
+    tier: live
+    driver: manual
+    lane: manual
+    procedure: live.md#spotify-collections
+    reviewer: agent
+    applicability: always
+    gate: required
+    since: v1.0.0-rc.4
+  - id: LIVE-SPOT-003
+    area: Spotify
+    title: A Spotify track plays audibly
+    semantics: general/playback
+    tier: live
+    driver: manual
+    lane: manual
+    procedure: live.md#spotify-playback
+    reviewer: human
+    applicability: always
+    gate: required
+    since: v1.0.0-rc.4
+  - id: LIVE-SPOT-004
+    area: Spotify
+    title: The explicit Spotify search returns the service's results under Spotify's name
+    semantics: search/provider-live
+    tier: live
+    driver: manual
+    lane: manual
+    procedure: live.md#spotify-live-search
+    reviewer: agent
+    applicability: always
+    gate: required
+    since: v1.0.0-rc.4
+  - id: LIVE-SPOT-005
+    area: Spotify
+    title: A change made in the account shows after a refresh and is reversed (needs a mutation policy; none is configured)
+    semantics: spotify/albums
+    tier: live
+    driver: manual
+    lane: manual
+    procedure: live.md#account-changes
+    reviewer: human
+    applicability: always
+    gate: required
+    since: v1.0.0-rc.4
+  - id: LIVE-YTM-001
+    area: YouTube Music
+    title: Sign-in works and a sync completes
+    semantics: ytmusic/liked-music
+    tier: live
+    driver: manual
+    lane: manual
+    procedure: live.md#youtube-music-sign-in-and-sync
+    reviewer: agent
+    applicability: always
+    gate: required
+    since: v1.0.0-rc.4
+  - id: LIVE-YTM-002
+    area: YouTube Music
+    title: Liked Music holds the account's liked tracks, and Playlists the playlists of its current feed
+    semantics: ytmusic/playlists
+    tier: live
+    driver: manual
+    lane: manual
+    procedure: live.md#youtube-music-collections
+    reviewer: agent
+    applicability: always
+    gate: required
+    since: v1.0.0-rc.4
+  - id: LIVE-YTM-003
+    area: YouTube Music
+    title: With the real account, the derived lists hold what synced tracks give and read as derived
+    semantics: ytmusic/albums-from-tracks
+    tier: live
+    driver: manual
+    lane: manual
+    procedure: live.md#youtube-music-derived-lists
+    reviewer: agent
+    applicability: always
+    gate: required
+    since: v1.0.0-rc.4
+    regression_of: the rc.3 report that albums saved in YouTube Music never appeared
+  - id: LIVE-YTM-004
+    area: YouTube Music
+    title: A YouTube Music track plays audibly
+    semantics: general/playback
+    tier: live
+    driver: manual
+    lane: manual
+    procedure: live.md#youtube-music-playback
+    reviewer: human
+    applicability: always
+    gate: required
+    since: v1.0.0-rc.4
+  - id: LIVE-RADIO-001
+    area: Radio
+    title: Browse Stations lists the live directory and a station plays
+    semantics: radio/browse
+    tier: live
+    driver: manual
+    lane: manual
+    procedure: live.md#radio
+    reviewer: human
+    applicability: always
+    gate: required
+    since: v1.0.0-rc.4
+
+  # --- Manual, human exploratory: after the agent pass is green ---
+  - id: HUMAN-001
+    area: Exploratory
+    title: The core smoke set, by hand, on the candidate
+    semantics: general/startup
+    tier: live
+    driver: manual
+    lane: manual
+    procedure: human.md#core-smoke-set
+    reviewer: human
+    applicability: always
+    gate: required
+    since: v1.0.0-rc.4
+  - id: HUMAN-002
+    area: Exploratory
+    title: YouTube Music's derived lists read as derived, without the docs
+    semantics: ytmusic/albums-from-tracks
+    tier: live
+    driver: manual
+    lane: manual
+    procedure: human.md#youtube-music-derived-lists
+    reviewer: human
+    applicability: always
+    gate: required
+    since: v1.0.0-rc.4
+    regression_of: the rc.3 report that albums saved in YouTube Music never appeared
+  - id: HUMAN-003
+    area: Exploratory
+    title: A provider's own search is unmistakably that provider's, and Esc returns to the library search as it was
+    semantics: search/provider-live
+    tier: live
+    driver: manual
+    lane: manual
+    procedure: human.md#provider-search
+    reviewer: human
+    applicability: always
+    gate: required
+    since: v1.0.0-rc.4
+    regression_of: a9baaa9
+  - id: HUMAN-004
+    area: Exploratory
+    title: The exploratory questions, with anything that felt wrong written down
+    semantics: general/presentation
+    tier: live
+    driver: manual
+    lane: manual
+    procedure: human.md#exploratory-questions
+    reviewer: human
+    applicability: always
+    gate: required
+    since: v1.0.0-rc.4

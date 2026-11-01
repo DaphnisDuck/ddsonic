@@ -273,11 +273,14 @@ func (m *Model) handleIPCLibrary(request ipc.LibraryRequestMsg) tea.Cmd {
 			request.Reply <- ipc.Response{OK: false, Error: "provider does not support playlist creation"}
 			return nil
 		}
+		// ddsonic: the request is an action from here, before its command
+		// is run (provider.ActionContext).
+		action := provider.ActionContext(requestContext(request.Context), creator)
 		return func() tea.Msg {
 			if request.Context != nil && request.Context.Err() != nil {
 				return nil
 			}
-			_, err := creator.CreatePlaylist(requestContext(request.Context), request.Playlist)
+			_, err := creator.CreatePlaylist(action, request.Playlist)
 			request.Reply <- ipcResponseError(err)
 			return nil
 		}
@@ -309,8 +312,9 @@ func (m *Model) handleIPCLibrary(request ipc.LibraryRequestMsg) tea.Cmd {
 			return nil
 		}
 		track := ipcTrackFromInfo(*request.Track)
+		action := provider.ActionContext(requestContext(request.Context), writer) // ddsonic: an action from here
 		return ipcMutationCmd(request.Context, request.Reply, func() error {
-			return writer.AddTrackToPlaylist(requestContext(request.Context), request.Playlist, track)
+			return writer.AddTrackToPlaylist(action, request.Playlist, track)
 		})
 	case "playlist.add_many":
 		if len(request.Tracks) == 0 {
@@ -340,13 +344,10 @@ func (m *Model) handleIPCLibrary(request ipc.LibraryRequestMsg) tea.Cmd {
 			request.Reply <- ipc.Response{OK: false, Error: "provider does not support adding tracks"}
 			return nil
 		}
+		// ddsonic: one action for the provider, from here (provider.AddTracks).
+		action := provider.ActionContext(requestContext(request.Context), writer)
 		return ipcMutationCmd(request.Context, request.Reply, func() error {
-			for _, track := range tracks {
-				if err := writer.AddTrackToPlaylist(requestContext(request.Context), request.Playlist, track); err != nil {
-					return err
-				}
-			}
-			return nil
+			return provider.AddTracks(action, writer, request.Playlist, tracks)
 		})
 	case "playlist.replace":
 		saver, ok := entry.Provider.(provider.PlaylistSaver)

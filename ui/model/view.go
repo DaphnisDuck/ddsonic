@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/bjarneo/cliamp/favorites"
+	"github.com/bjarneo/cliamp/library"
 	"github.com/bjarneo/cliamp/playlist"
 	"github.com/bjarneo/cliamp/provider"
 	"github.com/bjarneo/cliamp/ui"
@@ -149,7 +150,7 @@ func (m Model) isProviderRowActive(p playlist.PlaylistInfo) bool {
 // hide the duration: their track counts are cheap estimates, so a runtime
 // total would be misleading.
 func playlistLabel(prefix string, p playlist.PlaylistInfo) string {
-	out := prefix + p.Name
+	out := prefix + library.CleanText(p.Name) // ddsonic: playlist names are untrusted text
 	var parts []string
 	if p.TrackCount > 0 || p.Name == favorites.PlaylistName {
 		parts = append(parts, fmt.Sprintf("%d tracks", p.TrackCount))
@@ -364,9 +365,11 @@ func (m Model) renderSimplifiedTrackInfo() string {
 	return trackStyle.Render(name) + strings.Repeat(" ", gap) + dimStyle.Render(duration)
 }
 
+// ddsonic: the ICY stream title and the track's tags are chosen by whoever
+// serves them, so control characters are dropped before they are drawn.
 func trackInfoName(track playlist.Track, streamTitle string) string {
 	if streamTitle != "" && track.Stream {
-		return streamTitle
+		return library.CleanText(streamTitle)
 	}
 
 	name := trackViewName(track)
@@ -382,7 +385,7 @@ func trackInfoName(track playlist.Track, streamTitle string) string {
 	if track.Album != "" {
 		name += " · " + track.Album
 	}
-	return name
+	return library.CleanText(name)
 }
 
 // scrollTrackName returns the width-cell window of name at the given tick.
@@ -438,13 +441,13 @@ func (m Model) renderTierHelp() string {
 
 func (m Model) renderTransient() string {
 	if m.err != nil {
-		return ui.FitRect(errorStyle.Render(fmt.Sprintf("ERR: %s", m.err)), m.layout.panelWidth, 1)
+		return ui.FitRect(errorStyle.Render(library.CleanText(fmt.Sprintf("ERR: %s", m.err))), m.layout.panelWidth, 1) // ddsonic: errors quote untrusted text
 	}
 	if text := m.save.activityText(); text != "" {
 		return ui.FitRect(feedbackActivityStyle.Render(text), m.layout.panelWidth, 1)
 	}
 	if m.status.text != "" {
-		text := m.status.text
+		text := library.CleanText(m.status.text) // ddsonic: messages quote track titles
 		style := feedbackSuccessStyle
 		switch m.status.kind {
 		case feedbackActivity:
@@ -459,7 +462,7 @@ func (m Model) renderTransient() string {
 		return ui.FitRect(style.Render(text), m.layout.panelWidth, 1)
 	}
 	if n := len(m.logLines); n > 0 {
-		return ui.FitRect(dimStyle.Render(m.logLines[n-1].text), m.layout.panelWidth, 1)
+		return ui.FitRect(dimStyle.Render(library.CleanText(m.logLines[n-1].text)), m.layout.panelWidth, 1) // ddsonic: log lines quote untrusted text
 	}
 	return ""
 }
@@ -1182,7 +1185,7 @@ func (m Model) renderPlaylist() string {
 			if remaining >= len(" (unavailable)") {
 				albumSuffix = truncate(" (unavailable)", remaining)
 			}
-		} else if album := t.Album; album != "" && !m.showAlbumHeaders && ui.PanelWidth >= 56 {
+		} else if album := library.CleanText(t.Album); album != "" && !m.showAlbumHeaders && ui.PanelWidth >= 56 { // ddsonic: album tags are untrusted text
 			remaining := ui.PanelWidth - linePrefixWidth - nameLen - queueLen - durationGap - 3 // 3 = " · "
 			if remaining >= 4 {
 				albumSuffix = " · " + truncate(album, remaining)

@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/bjarneo/cliamp/history"
+	"github.com/bjarneo/cliamp/library"
 	"github.com/bjarneo/cliamp/playlist"
 	"github.com/bjarneo/cliamp/provider"
 	"github.com/bjarneo/cliamp/ui"
@@ -81,13 +82,13 @@ func (m Model) renderPlaylistPickerBody() string {
 	if m.plPicker.screen == plPickerNewName {
 		msg := "Create an empty playlist."
 		if n := len(m.plPicker.tracks); n == 1 {
-			msg = "Create and add: " + truncate(m.plPicker.tracks[0].DisplayName(), max(1, ui.PanelWidth-18))
+			msg = "Create and add: " + truncate(library.CleanText(m.plPicker.tracks[0].DisplayName()), max(1, ui.PanelWidth-18)) // ddsonic: titles are untrusted text
 		} else if n > 1 {
 			msg = fmt.Sprintf("Create and add %d tracks.", n)
 		}
 		lines := []string{dimStyle.Render("  " + msg)}
 		if m.plPicker.inputErr != "" {
-			lines = append(lines, errorStyle.Render("  "+m.plPicker.inputErr))
+			lines = append(lines, errorStyle.Render("  "+library.CleanText(m.plPicker.inputErr))) // ddsonic: errors can quote playlist names
 		}
 		return bodyLines(lines, budget)
 	}
@@ -109,7 +110,7 @@ func (m Model) renderPlaylistPickerBody() string {
 	default:
 		head = fmt.Sprintf("%d tracks selected", n)
 	}
-	head = dimStyle.Render("  " + truncate(head, max(1, ui.PanelWidth-2)))
+	head = dimStyle.Render("  " + truncate(library.CleanText(head), max(1, ui.PanelWidth-2))) // ddsonic: heads quote track titles
 	list := windowList(items, m.plPicker.cursor, m.plPicker.scroll, max(0, budget-1))
 	return strings.Join([]string{head, list}, "\n")
 }

@@ -1,0 +1,62 @@
+package player
+
+// ddsonic contract (Slice B, active tree only: it names the patch's cdnMu, so
+// it is never staged against the base). One goroutine and nothing else uses
+// this Player, so no other owner can hold or contend cdnMu: inside every
+// transport round trip, which is the network work of the CDN loop, a failed
+// TryLock could only mean the loop holds the lock across that work.
+
+import (
+	"errors"
+	"io"
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+
+	librespot "github.com/devgianlu/go-librespot"
+	downloadpb "github.com/devgianlu/go-librespot/proto/spotify/download"
+)
+
+type ddsonicProbeRT func(*http.Request) (*http.Response, error)
+
+func (f ddsonicProbeRT) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestDDSonicContractCDNLockNotHeldAcrossNetwork(t *testing.T) {
+	p := &Player{cdnQuarantine: make(map[string]time.Time)}
+	var probes, held int
+	client := &http.Client{Transport: ddsonicProbeRT(func(req *http.Request) (*http.Response, error) {
+		probes++
+		if p.cdnMu.TryLock() {
+			p.cdnMu.Unlock()
+		} else {
+			held++
+		}
+		if req.URL.Host == "a.ddsonic.invalid" {
+			return nil, errors.New("ddsonic contract: cdn host unavailable")
+		}
+		return &http.Response{
+			StatusCode: http.StatusPartialContent,
+			Header:     http.Header{"Content-Range": []string{"bytes 0-0/1"}},
+			Body:       io.NopCloser(strings.NewReader("x")),
+			Request:    req,
+		}, nil
+	})}
+	r, err := p.httpChunkedReaderFromStorageResolve(&librespot.NullLogger{}, client, &downloadpb.StorageResolveResponse{
+		Result: downloadpb.StorageResolveResponse_CDN,
+		Cdnurl: []string{"https://a.ddsonic.invalid/f", "https://b.ddsonic.invalid/f"},
+	})
+	if err != nil || r == nil {
+		t.Fatalf("the serving host was not reached: %v", err)
+	}
+	r.Close()
+	if probes < 2 {
+		t.Fatalf("only %d round trips were probed", probes)
+	}
+	if held != 0 {
+		t.Fatalf("cdnMu was held during %d of %d round trips", held, probes)
+	}
+	if _, found := p.cdnQuarantine["a.ddsonic.invalid"]; !found || len(p.cdnQuarantine) != 1 {
+		t.Fatalf("the quarantine is not exactly the failing host: %v", p.cdnQuarantine)
+	}
+}

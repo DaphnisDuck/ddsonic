@@ -5,16 +5,14 @@
 // upstream") would prompt a pointless sign-in; silentSessionError keeps
 // ErrNeedsAuth for failures that signing in again fixes. Upstream also keeps
 // a session whose Web API token refresh failed for a passing reason, which
-// then fails every Web API call until restart; ensureWebAPI restores the
-// token for the catalog sync.
+// then fails every Web API call until restart; here the session's token
+// coordinator refreshes it again when it is next asked for a token.
 
 package spotify
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"sync"
 
 	"github.com/devgianlu/go-librespot/ap"
 	"github.com/devgianlu/go-librespot/login5"
@@ -62,62 +60,4 @@ func needsSignIn(err error) bool {
 		}
 	}
 	return false
-}
-
-// restoreMu serializes token restores: Spotify rotates refresh tokens, so
-// two concurrent refreshes with the same token could invalidate each other.
-var restoreMu sync.Mutex
-
-// ensureWebAPI is ensureSession for Web API callers that run unattended
-// (the catalog sync and album fill): when the session has no Web API token
-// because its refresh failed for a passing reason, it refreshes it again
-// from the stored refresh token instead of failing until restart.
-func (p *SpotifyProvider) ensureWebAPI() error {
-	if err := p.ensureSession(); err != nil {
-		return err
-	}
-	p.mu.Lock()
-	sess := p.session
-	p.mu.Unlock()
-	if sess == nil {
-		return playlist.ErrNeedsAuth
-	}
-	return sess.restoreWebAPIToken()
-}
-
-func (s *Session) restoreWebAPIToken() error {
-	restoreMu.Lock()
-	defer restoreMu.Unlock()
-	s.mu.RLock()
-	ok := s.tokenSource != nil
-	s.mu.RUnlock()
-	if ok {
-		return nil
-	}
-	creds, err := loadCreds()
-	if err != nil || creds.RefreshToken == "" {
-		return playlist.ErrNeedsAuth
-	}
-	// A refresh during the session's life: no setup deadline applies, and
-	// the bounded client ends a stalled request.
-	token, err := silentTokenRefresh(context.Background(), s.clientID, creds.RefreshToken)
-	if isInvalidGrant(err) {
-		return playlist.ErrNeedsAuth
-	}
-	if err != nil {
-		return fmt.Errorf("spotify: web api token unavailable: %w", err)
-	}
-	stored := *creds
-	if token.RefreshToken != "" {
-		stored.RefreshToken = token.RefreshToken
-		if err := saveCreds(&stored); err != nil {
-			return fmt.Errorf("spotify: save rotated refresh token: %w", err)
-		}
-	}
-	s.mu.Lock()
-	if s.tokenSource == nil {
-		s.tokenSource = webAPITokenSource(s.clientID, token, stored)
-	}
-	s.mu.Unlock()
-	return nil
 }

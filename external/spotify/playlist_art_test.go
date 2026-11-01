@@ -10,8 +10,6 @@ import (
 	"regexp"
 	"strings"
 	"testing"
-
-	"golang.org/x/oauth2"
 )
 
 // Playlist items are fetched with a fields filter, and Spotify drops anything
@@ -55,7 +53,7 @@ func TestPlaylistTracksRequestAlbumArt(t *testing.T) {
 	})
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
 
-	sess := &Session{tokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "token"})}
+	sess := staticSession()
 	p := New(sess, "client", 320)
 
 	tracks, _, err := p.fetchTracksPage(context.Background(), "playlist-id", 0)

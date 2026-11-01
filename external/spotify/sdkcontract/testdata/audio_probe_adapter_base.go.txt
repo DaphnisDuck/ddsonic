@@ -1,0 +1,23 @@
+package audio
+
+// ddsonic base-probe adapter: compiled into the unpatched v0.9.1 base only
+// (the active tree has audio_probe_adapter_active.go.txt in its place, with
+// the same function). It changes nothing in the base: it reads what the
+// probe's logger saw.
+//
+// Observation and its exact limit. The stock provider keeps its requests
+// in a map local to its pump goroutine (audio/provider.go, recvLoop:
+// `reqs := map[uint32]keyRequest{}`); no code outside that goroutine, in
+// the package or not, can read it without changing the SDK, which the base
+// stage must not do. The one external effect of a request being absent from
+// that map when an answer arrives is the stock warning "received aes key
+// with invalid sequence: %d", logged once per such answer, and only then.
+// So this counts an answer that found no live request when, and only when,
+// the pump has taken that answer; an answer the pump has not yet taken
+// (while it is blocked in a write) is not counted either way.
+
+// bpUnknownAnswers is how many answers the provider took that found no live
+// request.
+func bpUnknownAnswers(_ *KeyProvider, log *bpLogger) uint64 {
+	return log.invalidSeq.Load()
+}

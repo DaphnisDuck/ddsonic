@@ -2,6 +2,7 @@ package player
 
 import (
 	"bufio"
+	"context"
 	"io"
 	"math"
 	"os"
@@ -502,11 +503,11 @@ func blockedYTDLPlayback(t *testing.T) (*trackPipeline, <-chan struct{}, <-chan 
 	writeExecutable(t, filepath.Join(dir, "ffmpeg"), "#!/bin/sh\nexec cat\n")
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	decoder, format, err := decodeYTDLPipe("https://www.youtube.com/watch?v=stall", 100, 16, 0)
+	decoder, format, err := decodeYTDLPipe(context.Background(), "https://www.youtube.com/watch?v=stall", 100, 16, 0)
 	if err != nil {
 		t.Fatalf("decodeYTDLPipe() error = %v", err)
 	}
-	if err := prefillYTDLPipe(decoder); err != nil {
+	if err := prefillYTDLPipe(context.Background(), decoder); err != nil {
 		t.Fatalf("prefillYTDLPipe() error = %v", err)
 	}
 	tp := &trackPipeline{decoder: decoder, stream: decoder, format: format, ytdlSeek: true}

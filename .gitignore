@@ -22,3 +22,7 @@ coverage.out
 # Local project brief, kept out of the repo
 /prompt.txt
 /dist/
+
+# ddsonic: the tracked go-librespot replacement has its own mp3 package
+# (third_party/go-librespot, docs/ddsonic/upstream.md); it is source, not output.
+!third_party/go-librespot/mp3/

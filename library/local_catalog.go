@@ -15,7 +15,7 @@ import (
 func LocalCatalog(cat catalog.Catalog, prov playlist.Provider, dir string) Level {
 	b := localBrowser(cat, prov, dir)
 	return local(prov,
-		Entry{Title: "Albums", Open: b.albumsList(b.localAlbums)},
+		Entry{Title: "Albums", Open: b.albumsList("Albums", nil, b.localAlbums)},
 		Entry{Title: "Artists", Open: b.list("Artists", b.localArtists)},
 		Entry{Title: "Genres", Open: b.list("Genres", b.localGenres)},
 	)

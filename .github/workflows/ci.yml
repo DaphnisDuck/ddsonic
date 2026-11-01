@@ -21,11 +21,16 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.1" # ddsonic: the pinned release toolchain (mise.toml, packaging/Dockerfile); go.mod keeps upstream's minimum
+          go-version: "1.27.3" # ddsonic: the pinned release toolchain (mise.toml, packaging/Dockerfile); go.mod keeps upstream's minimum
           cache: true
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libflac-dev libvorbis-dev libogg-dev libmpg123-dev shellcheck
-      - run: go install honnef.co/go/tools/cmd/staticcheck@v0.8.1 # ddsonic: v0.6.1 cannot read Go 1.27 export data
+      - run: go install honnef.co/go/tools/cmd/staticcheck@v0.7.0-0.dev.0.20261009221906-f1838cc308e5 # ddsonic: upstream commit f1838cc308e5cfbb38d91cfc973355611845997e (its move to x/tools v0.51.0), pinned exactly; v0.8.1, the newest release, cannot read Go 1.27.2 export data. Return to a release once one can
       - run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0 # ddsonic: v1.1.4 crashes on this code (ast.KeyValueExpr)
+      # ddsonic: make ci includes the go-librespot contract gate (make
+      # sdk-contract). It runs here because this job has the pinned toolchain,
+      # which the gate requires and checks; the macOS job below has the same pin
+      # but does not run it. The gate's native release
+      # checks are therefore unverified on macOS until macOS acceptance.
       - run: make ci
 
   # ddsonic: no Windows job. ddsonic 1.0 does not support Windows, and its tests
@@ -45,7 +50,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: "1.27.3" # ddsonic: the pinned release toolchain, as in the Linux job; go.mod keeps upstream's minimum
       - name: Install codec libs (macOS)
         if: matrix.goos == 'darwin'
         run: |

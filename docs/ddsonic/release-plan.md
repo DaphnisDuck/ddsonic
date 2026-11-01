@@ -97,7 +97,7 @@ I propose three ways to install 1.0, all on Linux x86-64, because that is the on
 
 **What a Linux install involves**
 
-- **Build:** Go 1.27.1 with cgo, `pkg-config`, and the headers for ALSA, FLAC, mpg123, Vorbis and Ogg. The build runs in one pinned environment (a container image), not on whatever machine is at hand.
+- **Build:** Go 1.27.3 with cgo, `pkg-config`, and the headers for ALSA, FLAC, mpg123, Vorbis and Ogg. The build runs in one pinned environment (a container image), not on whatever machine is at hand.
 - **Runtime:** the shared libraries for ALSA, FLAC, mpg123, Vorbis and Ogg, unless the release links some statically (a decision for the packaging work), plus `pipewire-alsa` or `pulseaudio-alsa`. Optional: `ffmpeg` (AAC, ALAC, Opus, WMA) and `yt-dlp` (YouTube Music). The release states the distributions and glibc baseline it was tested on.
 - **Paths:**
   - binary: `/usr/bin/ddsonic` (AUR) or `~/.local/bin` (manual)
@@ -188,7 +188,7 @@ A to D and G run after the README and docs are written and before the RC. E, F a
 
 ## RC audit and release gate
 
-Each gate is a checklist; the next phase starts only when every box is ticked or explicitly waived by you. Only the RC audit gets a high-effort comprehensive Codex review; ordinary fixes stay low or medium.
+Each gate is a checklist; the next phase starts only when every box is ticked or explicitly waived by you, with one exception: the box for [the adversarial security audit before `v1.0.0`](#before-v100-the-adversarial-security-audit) may not be waived. Only the RC audit gets a high-effort comprehensive Codex review; ordinary fixes stay low or medium.
 
 **Gate A: clean baseline** (end of `review-fixes`)
 
@@ -234,7 +234,72 @@ Each gate is a checklist; the next phase starts only when every box is ticked or
 - [ ] Terminal resizing, and artwork in Kitty and Ghostty
 - [ ] Docs and website re-walked against the RC
 
+**Before v1.0.0-rc.4: the human acceptance checklist** (required, decided 2026-10-09). The rc.3 report that albums saved in YouTube Music never appeared was found by using ddsonic, not by a test or an audit. A reusable human release-candidate acceptance checklist is therefore created and executed before the next candidate, and at every candidate after it: a repeatable gate in place of ad-hoc exploratory testing. It complements the automated tests and does not duplicate them.
+
+That checklist has become **Release Acceptance** ([acceptance.md](acceptance.md)): a case catalog, scripted cases that run on the candidate's own binary, live-provider and human runbooks, and one gate over all of them. The order is automated code validation, then agent and workflow acceptance, then the human exploratory pass, which starts only when the agent pass is green. For `v1.0.0-rc.4`, live acceptance of both Spotify and YouTube Music is required. The first slice of the tooling exists (2026-10-09); no release run and no live or human pass has been made yet.
+
+- [ ] The known rc.3 bugs are triaged or resolved
+- [ ] The checklist is drafted and independently reviewed
+- [ ] Steve executes it against the release candidate
+- [ ] Vorbis decoder retention is measured with the MP3 measurement and brought to the owner ([acceptance.md](acceptance.md)); a material cost stops release progression
+- [ ] The owner handles the upstream report on go-librespot's `vorbis.Decoder.Close` (outside this repository)
+- [ ] Anything it uncovers is triaged before rc.4 is published
+
+It emphasizes real workflows and state transitions. The pattern, for each synced source: add content upstream; verify it is absent; refresh; verify it appears; restart; verify it persisted; remove it upstream; refresh; verify it is gone.
+
+It is to cover, at minimum: install, first run and setup; the Local library; Spotify; YouTube Music; Internet Radio; search; playback; queue and transport controls; metadata; artwork and info views; synchronization; persistence; manual refresh; configuration; hotkeys; degraded and error states; authentication failure and recovery; upgrades; restart and recovery; shutdown. The fresh-user scenarios A–H (Workstream 5) are a starting point, not the checklist.
+
+### Before v1.0.0: the adversarial security audit
+
+Required, decided by the owner on 2026-10-10. It has not been run: nothing here records a finding, an approval or an execution.
+
+**When.** Only after the current candidate has completed its intended deterministic, live-provider, platform and human acceptance and is otherwise believed ready to be `v1.0.0`. It is an audit of the actual candidate that is intended to ship, not of an earlier one and not of the source in general.
+
+**What it is not.** It is separate from ordinary code review, staticcheck, govulncheck, the race tests, Release Acceptance, the SBOM, artifact verification and dependency scans. **It is not skipped because those are green.**
+
+**This gate may not be waived.**
+
+**Stance.** Adversarial. Assume hostile inputs and look actively for ways to leak data, run unintended commands, expose credentials, deliver malicious content, or reach the network or the file system unexpectedly.
+
+**Scope.** All of:
+
+- Spotify and YouTube Music credentials and tokens
+- config contents and file-system permissions
+- SQLite, the cache and the database
+- secrets in logs, diagnostics and crash output; redaction
+- network and TLS
+- radio and arbitrary URLs
+- remote, untrusted metadata
+- terminal escape and control-sequence injection
+- subprocess and shell execution; command injection
+- path traversal and hostile file names
+- temporary files
+- archive extraction
+- input handling and malformed data
+- the trust boundaries between providers, local files and the UI
+- the install, build and release scripts
+- CI/CD permissions and release credentials
+- dependencies and the supply chain
+- unexpected telemetry, outbound connections or data collection
+- persistence mechanisms, and backdoor or spyware-like behavior
+- generated and third-party code whose network, file-system, process or credential operations are broader than they need to be
+
+**The release chain.** Source-to-artifact identity, dependency pins, the SBOM's accuracy, the build image and the trust placed in the toolchain, artifact integrity, what installing the package does, and whether the build and release tooling downloads or executes anything unexpected.
+
+**Who.** Recommended: an independent Codex GPT-6.1-Sol review at high effort, or the strongest appropriate independent reviewer available at the time.
+
+**If a finding needs a code change,** `v1.0.0` is not authorized. Then: Claude implements the fix by the normal workflow; Codex reviews it independently; focused security regression tests are added and run; the affected acceptance is rerun; validation is broadened if the change materially alters release behavior; and the final, corrected snapshot is reviewed again before release authorization.
+
+**Complete only when** all of these hold:
+
+- [ ] Every release-blocking finding is resolved
+- [ ] Residual risks are documented explicitly
+- [ ] No HIGH security concern is unresolved
+- [ ] The code and the artifact that were finally audited are exactly the ones intended to be `v1.0.0`
+
 **Gate D: v1.0.0.** Every RC-audit finding fixed or waived by you, by criteria you set in advance; no open BLOCKER or HIGH; and a 7-day soak of your own use with no new release-blocking regression. Any fix to code that runs (not docs-only) means a new candidate and restarts the soak. Otherwise cut rc.2, and review its fixes at effort proportional to their risk: a migration or concurrency fix can warrant high effort even then. The stable tag is built as a draft too: its own artifacts pass the CI, archive, SBOM, attestation and install checks, and its release record is written, before it is published.
+
+- [ ] Required before `v1.0.0`: [the adversarial security audit](#before-v100-the-adversarial-security-audit) of the candidate intended to ship is complete. It is separate from Gate C's Codex audit and from every automated check, is not skipped because they are green, and may not be waived
 
 ## Post-1.0 backlog
 
@@ -244,12 +309,12 @@ Historical freeze-time inventory: these items were transferred to [plan.md](../.
 | --- | --- |
 | Auto EQ from normalized genre metadata | Builds on the catalog's genre data |
 | Ambient or generated sounds | New feature area |
-| More providers | Only one you use and can test; the 16 hidden ones are candidates |
+| More providers | Only one you use and can test; the 16 hidden ones are candidates. Since 2026-10-09, only after the [Provider Admission Contract](POST-1.0-IDEAS.md#provider-admission-contract) |
 | Sixel, iTerm2 and other artwork protocols | WezTerm, Konsole, foot |
-| InnerTube playlist discovery | Saved YouTube Music playlists the API doesn't list |
+| InnerTube playlist discovery | Saved YouTube Music playlists the API doesn't list. Since 2026-10-09 part of [YouTube Music Provider v2](POST-1.0-IDEAS.md#youtube-music-provider-v2) |
 | Cross-source playlists | ddsonic-owned playlists mixing sources |
 | Clear the whole queue with X | Ctrl+Z undoes it, like x; X is reused: cliamp's provider-switching hotkeys (X was Mixcloud) have no place in ddsonic's library workflow. Today, playing from the library replaces the queue |
-| YouTube cookie playlist count check | Guard against a short playlist feed |
+| YouTube cookie playlist count check | Guard against a short playlist feed. Since 2026-10-09 part of [YouTube Music Provider v2](POST-1.0-IDEAS.md#youtube-music-provider-v2) |
 | Separate Local scan folder from file-browser folder | Open question in `plan.md` |
 | Daemon or headless persistent playback | Likely a larger 2.0 architectural project; affects how the inherited `--daemon` is treated now |
 | Broad-prefix search speed (P3) | Codex's ranking-preserving idea (about 22% faster), only if search speed becomes a complaint |

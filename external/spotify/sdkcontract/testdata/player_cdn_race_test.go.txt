@@ -1,0 +1,117 @@
+package player
+
+// ddsonic contract (Slice B): go-librespot's CDN quarantine map is shared by
+// concurrent stream setups on one Player. These tests drive the real
+// httpChunkedReaderFromStorageResolve and its real map from two goroutines,
+// with a barrier in each goroutine's own transport so that their map
+// accesses come after one shared release and are ordered by nothing else.
+// Under the race detector they fail against the unpatched base and pass
+// against the replacement, which guards each access. This file names nothing
+// the patch adds, so it compiles against both.
+
+import (
+	"errors"
+	"io"
+	"net/http"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	librespot "github.com/devgianlu/go-librespot"
+	downloadpb "github.com/devgianlu/go-librespot/proto/spotify/download"
+)
+
+type ddsonicBarrierRT struct {
+	once    sync.Once
+	arrive  *sync.WaitGroup
+	release <-chan struct{}
+	respond func(*http.Request) (*http.Response, error)
+}
+
+func (b *ddsonicBarrierRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	b.once.Do(func() {
+		b.arrive.Done()
+		<-b.release
+	})
+	return b.respond(req)
+}
+
+func ddsonicCDNFail(*http.Request) (*http.Response, error) {
+	return nil, errors.New("ddsonic contract: cdn host unavailable")
+}
+
+func ddsonicCDNServe(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusPartialContent,
+		Header:     http.Header{"Content-Range": []string{"bytes 0-0/1"}},
+		Body:       io.NopCloser(strings.NewReader("x")),
+		Request:    req,
+	}, nil
+}
+
+// ddsonicConcurrentResolves runs two resolutions of urls on p at once, each
+// with its own transport, released together; it returns their results.
+func ddsonicConcurrentResolves(t *testing.T, p *Player, urls []string, respond func(*http.Request) (*http.Response, error)) ([]error, []io.Closer) {
+	t.Helper()
+	var arrive sync.WaitGroup
+	arrive.Add(2)
+	release := make(chan struct{})
+	errs := make([]error, 2)
+	readers := make([]io.Closer, 2)
+	done := make(chan struct{}, 2)
+	for i := range 2 {
+		client := &http.Client{Transport: &ddsonicBarrierRT{arrive: &arrive, release: release, respond: respond}}
+		go func() {
+			defer func() { done <- struct{}{} }()
+			r, err := p.httpChunkedReaderFromStorageResolve(&librespot.NullLogger{}, client, &downloadpb.StorageResolveResponse{
+				Result: downloadpb.StorageResolveResponse_CDN,
+				Cdnurl: urls,
+			})
+			errs[i] = err
+			if r != nil {
+				readers[i] = r
+			}
+		}()
+	}
+	arrive.Wait()
+	close(release)
+	for range 2 {
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Fatal("a resolution did not return within 30s")
+		}
+	}
+	return errs, readers
+}
+
+// Two setups whose CDN host fails both record the failure in the map.
+func TestDDSonicContractCDNConcurrentFailures(t *testing.T) {
+	p := &Player{cdnQuarantine: make(map[string]time.Time)}
+	errs, _ := ddsonicConcurrentResolves(t, p, []string{"https://a.ddsonic.invalid/f"}, ddsonicCDNFail)
+	for i, err := range errs {
+		if err == nil {
+			t.Fatalf("resolution %d succeeded against a failing host", i)
+		}
+	}
+	if _, found := p.cdnQuarantine["a.ddsonic.invalid"]; !found || len(p.cdnQuarantine) != 1 {
+		t.Fatalf("the failing host is not the one quarantined host: %v", p.cdnQuarantine)
+	}
+}
+
+// With one host already quarantined, two setups that succeed on another host
+// both delete it from the populated map, and the quarantined one stays.
+func TestDDSonicContractCDNConcurrentDeletesOnPopulatedMap(t *testing.T) {
+	p := &Player{cdnQuarantine: map[string]time.Time{"a.ddsonic.invalid": time.Now()}}
+	errs, readers := ddsonicConcurrentResolves(t, p, []string{"https://b.ddsonic.invalid/f"}, ddsonicCDNServe)
+	for i, err := range errs {
+		if err != nil || readers[i] == nil {
+			t.Fatalf("resolution %d failed against a serving host: %v", i, err)
+		}
+		readers[i].Close()
+	}
+	if _, found := p.cdnQuarantine["a.ddsonic.invalid"]; !found || len(p.cdnQuarantine) != 1 {
+		t.Fatalf("the quarantine changed beyond the serving host: %v", p.cdnQuarantine)
+	}
+}

@@ -1,0 +1,15 @@
+package ap
+
+// ddsonic contract helper for the base-compatible mechanism probes
+// (audio_baseprobe_contract_test.go.txt). Like ap_helper.go.txt, it exists
+// only in the overlay the contract runner builds, over the staged base or
+// active tree; it is in no real copy of the SDK and in no ddsonic build. It
+// names only what go-librespot v0.9.1 already has.
+
+// DDSonicSubscribers is how many subscriptions a has for packets of type t:
+// whether a key service has registered with the access point.
+func DDSonicSubscribers(a *Accesspoint, t PacketType) int {
+	a.recvChansLock.RLock()
+	defer a.recvChansLock.RUnlock()
+	return len(a.recvChans[t])
+}

@@ -162,7 +162,7 @@ func (s *catalogView) more(q catalog.Query, kind catalog.SearchKind, heading str
 			return nil, err
 		}
 		return s.rows(found[kind]), nil
-	}}, ""} // read from the catalog alone, so a sync rereads it
+	}}, "", nil} // read from the catalog alone, so a sync rereads it
 }
 
 // restrict limits q to the configured sources, so results of a source that
@@ -247,18 +247,40 @@ func (s *catalogView) entry(r catalog.SearchResult) (e Entry, ok bool) {
 	return e, ok
 }
 
-// trackRow is a searched track's row: Enter plays its album from it, or
-// plays a station alone as a live stream.
+// trackRow is a searched track's row, labelled with its source: Enter plays
+// its album from it, or plays a station alone as a live stream. The label
+// is the row's, not the track's: what plays and what is queued is the track
+// as its source holds it.
 func (s *catalogView) trackRow(t catalog.Track, station bool) Entry {
 	track := PlayableTrack(t)
-	e := Entry{ID: catalogID(t.ID), Title: t.Title, Track: &track, PlayFrom: s.albumFrom(t), Source: t.Ref.Provider}
+	e := Entry{ID: catalogID(t.ID), Title: t.Title, Detail: SourceLabel(t.Ref.Provider), Track: &track,
+		PlayFrom: s.albumFrom(t), Source: t.Ref.Provider}
 	if station {
 		track.Stream, track.Realtime = true, true
+		track.ProviderMeta = s.starredStationMeta(track.Path)
 		e.PlayFrom = func(context.Context) ([]playlist.Track, int, error) {
 			return []playlist.Track{track}, 0, nil
 		}
 	}
 	return e
+}
+
+// starredStationMeta is the station streaming from url as the favorites hold
+// it, or nil when it is not starred. The catalog keeps a station's name and
+// stream alone, and its stations are the starred ones and radios.toml's; the
+// favorite's own track says which directory station a result is, so it can
+// be unstarred from the results and from the queue it plays into.
+func (s *catalogView) starredStationMeta(url string) map[string]string {
+	fs, ok := s.radioProv.(favoriteStations)
+	if !ok {
+		return nil
+	}
+	for _, t := range fs.FavoriteTracks() {
+		if t.Path == url {
+			return t.ProviderMeta
+		}
+	}
+	return nil
 }
 
 // artistRow is an artist's row, built by its source and labelled with it.
@@ -273,9 +295,20 @@ func (s *catalogView) artistRow(a catalog.Artist) (Entry, bool) {
 	default:
 		return Entry{}, false
 	}
-	e.Detail = SourceLabel(a.Ref.Provider)
+	e.Detail = s.sourceLabel(a.Ref.Provider)
 	e.Source = a.Ref.Provider
 	return e, true
+}
+
+// sourceLabel labels an album's or artist's row with its source. A
+// PartialAlbums source's are not saved albums or followed artists, only
+// what its tracks name, and the label says so.
+func (s *catalogView) sourceLabel(provider string) string {
+	label := SourceLabel(provider)
+	if b := s.synced[provider]; b != nil && b.partialAlbums {
+		label = joinDetail(label, FromTracks)
+	}
+	return label
 }
 
 // albumRow is an album's row, built by its source and labelled with it.
@@ -291,7 +324,7 @@ func (s *catalogView) albumRow(a catalog.Album) (Entry, bool) {
 		return Entry{}, false
 	}
 	// The source comes first so a long credit cannot truncate it away.
-	e.Detail = joinDetail(SourceLabel(a.Ref.Provider), e.Detail)
+	e.Detail = joinDetail(s.sourceLabel(a.Ref.Provider), e.Detail)
 	e.Source = a.Ref.Provider
 	return e, true
 }

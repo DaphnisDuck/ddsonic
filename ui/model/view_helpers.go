@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/bjarneo/cliamp/external/radio"
+	"github.com/bjarneo/cliamp/library"
 	"github.com/bjarneo/cliamp/playlist"
 	"github.com/bjarneo/cliamp/provider"
 	"github.com/bjarneo/cliamp/ui"
@@ -24,6 +25,9 @@ func trackViewName(track playlist.Track) string {
 	if track.Meta(provider.MetaPodcastFeed) != "" && track.Title != "" {
 		name = podcastEpisodeViewName(track)
 	}
+	// ddsonic: titles come from tags, feeds and imported playlists, so control
+	// characters are dropped before a row is drawn.
+	name = library.CleanText(name)
 	if track.Meta(provider.MetaMixcloudExclusive) == "true" {
 		return strings.TrimSpace(name) + restrictedViewSuffix
 	}
@@ -226,7 +230,7 @@ func (c *radioMarkerCache) starCount(m Model) int {
 	key := radioMarkerKey{
 		playlist: m.playlist, playlistRevision: m.playlist.Revision(),
 		favorites: m.radioFavorites, favoritesRevision: m.radioFavorites.Revision(),
-		savedPlaylist: m.loadedPlaylist != "",
+		savedPlaylist: m.loadedPlaylist != "" && !m.libraryEnabled(), // ddsonic: the library counts a loaded queue's starred stations too (library_favorite.go)
 	}
 	if c.key == key {
 		return c.count
@@ -367,7 +371,7 @@ func trackAlbumSuffix(t playlist.Track, showHeaders bool) string {
 	if showHeaders || t.Album == "" {
 		return ""
 	}
-	return " · " + t.Album
+	return " · " + library.CleanText(t.Album) // ddsonic: album tags are untrusted text
 }
 
 // playlistRow represents a single line in a track list, which can be either
@@ -543,7 +547,7 @@ func (m Model) albumSeparator(album string, year int) string {
 	if album == "" {
 		return dimStyle.Render(strings.Repeat("─", ui.PanelWidth))
 	}
-	label := album
+	label := library.CleanText(album) // ddsonic: album tags are untrusted text
 	if year != 0 {
 		label += fmt.Sprintf(" (%d)", year)
 	}

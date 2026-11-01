@@ -24,7 +24,7 @@ func TestBuildYTDLPipelineStreamDoesNotWaitForAStalledDownload(t *testing.T) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	p := &Player{sr: beep.SampleRate(100), bitDepth: 16}
 
-	tp, err := p.buildYTDLPipeline("https://www.youtube.com/watch?v=stall", 0)
+	tp, err := p.buildYTDLPipeline(p.beginYTDLLoad(ytdlPlayLoad, 0, false), "https://www.youtube.com/watch?v=stall", 0)
 	if err != nil {
 		t.Fatalf("buildYTDLPipeline() error = %v", err)
 	}
@@ -99,7 +99,7 @@ func TestPrefetchedYTDLTrackEndsWithShortRead(t *testing.T) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	p := &Player{sr: beep.SampleRate(100), bitDepth: 16}
 
-	tp, err := p.buildYTDLPipeline("https://www.youtube.com/watch?v=short", 0)
+	tp, err := p.buildYTDLPipeline(p.beginYTDLLoad(ytdlPlayLoad, 0, false), "https://www.youtube.com/watch?v=short", 0)
 	if err != nil {
 		t.Fatalf("buildYTDLPipeline() error = %v", err)
 	}

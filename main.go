@@ -36,6 +36,7 @@ import (
 	"github.com/bjarneo/cliamp/internal/appmeta"
 	"github.com/bjarneo/cliamp/internal/playback"
 	"github.com/bjarneo/cliamp/internal/resume"
+	"github.com/bjarneo/cliamp/internal/ytdlp"
 	"github.com/bjarneo/cliamp/ipc"
 	"github.com/bjarneo/cliamp/library"
 	"github.com/bjarneo/cliamp/luaplugin"
@@ -103,6 +104,11 @@ func restoreJellyfinContext(state resume.State, prov *jellyfin.Provider) ([]play
 }
 
 func run(overrides config.Overrides, positional []string, daemon, visualizer60FPS bool) error {
+	// ddsonic: no player without a usable IPC socket or with a config.toml
+	// that cannot be read as written (configcheck_ddsonic.go).
+	if err := startupChecks(); err != nil {
+		return err
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
@@ -112,6 +118,15 @@ func run(overrides config.Overrides, positional []string, daemon, visualizer60FP
 
 	closeLog, appliedLevel, logErr := initLogging(cfg.LogLevel)
 	defer closeLog()
+	// ddsonic: last of all, stop the yt-dlp runs nothing else waited for (a
+	// list still loading, a track being saved), so that none outlives
+	// ddsonic holding a copy of the browser's cookies.
+	defer func() {
+		if err := ytdlp.Shutdown(); err != nil {
+			applog.Warn("%v", err)
+			fmt.Fprintln(os.Stderr, err)
+		}
+	}()
 	if logErr != nil {
 		fmt.Fprintf(os.Stderr, "logging: %v (continuing without file log)\n", logErr)
 		applog.Status("logging: %v", logErr)
@@ -411,7 +426,7 @@ func run(overrides config.Overrides, positional []string, daemon, visualizer60FP
 	defer p.Close()
 
 	if spotifyProv != nil {
-		p.RegisterStreamerFactory("spotify:", spotifyProv.NewStreamer)
+		p.RegisterStreamerFactory("spotify:", spotifyProv.PlaybackStreamer) // ddsonic: decoded away from the speaker
 	}
 
 	if yaProv != nil {
@@ -591,6 +606,9 @@ func run(overrides config.Overrides, positional []string, daemon, visualizer60FP
 	m.SetFrameBorder(cfg.Ddsonic.Border)
 	m.SetArtwork(artworkLoader(cfg.Ddsonic.Artwork)) // ddsonic: main_ddsonic.go
 	cat.configure(&m)
+	if spotifyProv != nil {
+		librarySignIn(&m, spotifyProv) // ddsonic: main_ddsonic.go
+	}
 	if cfg.EQPreset != "" && cfg.EQPreset != "Custom" {
 		m.SetEQPreset(cfg.EQPreset, nil)
 	}
@@ -879,7 +897,7 @@ func userIPCError(err error) error {
 	if errors.Is(err, ipc.ErrNotRunning) {
 		return fmt.Errorf("%s is not running (no socket at %s)", appmeta.ClientName(), ipc.DefaultSocketPath()) // ddsonic
 	}
-	return err
+	return socketPathAdvice(err) // ddsonic: sockpath_ddsonic.go
 }
 
 func ipcSend(operation string, params ipc.Request) (ipc.Response, error) {

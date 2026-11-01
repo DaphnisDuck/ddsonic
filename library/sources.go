@@ -237,13 +237,25 @@ type favoriteStations interface {
 	FavoriteTracks() []playlist.Track
 }
 
+// StarredStationsLevel is implemented by the list of the starred stations,
+// read from the radio provider's favorites. The UI rereads it when a station
+// is starred or unstarred, and when radio's catalog sync, which follows
+// every such change, has run.
+type StarredStationsLevel interface {
+	StarredStations()
+}
+
+type starredStationsLevel struct{ funcLevel }
+
+func (*starredStationsLevel) StarredStations() {}
+
 // radio returns the Radio source menu: Favorites and Browse Stations.
 func radio(prov, channels playlist.Provider) Level {
 	var entries []Entry
 	if fs, ok := prov.(favoriteStations); ok {
-		entries = append(entries, Entry{Title: "Favorites", Open: TrackLevel("Favorites", prov, func(context.Context) ([]playlist.Track, error) {
-			return sortedByTitle(fs.FavoriteTracks()), nil
-		})})
+		entries = append(entries, Entry{Title: "Favorites", Open: &starredStationsLevel{funcLevel{"Favorites", func(context.Context) ([]Entry, error) {
+			return trackEntries(sortedByTitle(fs.FavoriteTracks())), nil
+		}}}})
 	}
 	entries = append(entries, Entry{Title: "Browse Stations", Open: browseStations(prov, channels)})
 	return Menu("Radio", entries...)

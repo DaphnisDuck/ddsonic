@@ -1,0 +1,286 @@
+package ap
+
+// ddsonic's contract with patch 0002's access-point side: connection
+// generations, their publication, and the one announcer slot behind
+// internal/keylink. Over the synthetic access point (ap_fake_helper.go.txt).
+// The T- and S- names are the rows of the design's governing test table.
+
+import (
+	"context"
+	"errors"
+	"runtime"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	librespot "github.com/devgianlu/go-librespot"
+	"github.com/devgianlu/go-librespot/internal/keylink"
+)
+
+func klClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
+func klFake(t *testing.T) *DDSonicFakeAP {
+	t.Helper()
+	f, err := DDSonicContractFakeAP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(f.Close)
+	return f
+}
+
+// klOwn makes a, an access point for a synthetic one, the test's to end, on
+// every path (R70-1). Registered as soon as a exists, its cleanup runs before
+// the fake's own: a's Close is joined, within 10 s, while the fake is still
+// up, and then no access point receive loop or pong ticker may be left. The
+// count is the whole process's: this package's contract tests run one at a
+// time, and the ones that start a receive loop of their own (reconnecting,
+// in the access point contract) join it before they end, so 0 is what an
+// owner that has finished leaves. A timeout fails the test, with every
+// goroutine's stack; it is an Errorf so the fake's cleanup still runs.
+func klOwn(t *testing.T, a *Accesspoint) {
+	t.Helper()
+	t.Cleanup(func() {
+		done := make(chan struct{})
+		go func() { a.Close(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Errorf("cleanup: the access point's Close did not return within 10s\ngoroutines at the failure:\n%s", klStacks())
+			return
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			n := klLoops()
+			if n == 0 {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("after the test's access point was closed: %d access point receive loops or pong tickers are running, want 0\ngoroutines at the failure:\n%s", n, klStacks())
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
+}
+
+// klStacks is every goroutine's stack, its buffer grown until nothing is cut
+// off: the failure-only diagnostic of klOwn's checks, never what decides them.
+func klStacks() string {
+	for n := 1 << 20; ; n *= 2 {
+		buf := make([]byte, n)
+		if m := runtime.Stack(buf, true); m < n {
+			return string(buf[:m])
+		}
+	}
+}
+
+// klLoops counts the goroutines inside an access point's receive loop or
+// pong ticker.
+func klLoops() int {
+	n := 0
+	for _, g := range strings.Split(klStacks(), "\n\n") {
+		if strings.Contains(g, "ap.(*Accesspoint).recvLoop(") || strings.Contains(g, "ap.(*Accesspoint).pongAckTicker(") {
+			n++
+		}
+	}
+	return n
+}
+
+// klUnconnected is a real access point for f that has not connected.
+func klUnconnected(f *DDSonicFakeAP) *Accesspoint {
+	addr := f.ln.Addr().String()
+	return NewAccesspoint(&librespot.NullLogger{}, func(context.Context) string { return addr }, "ddsonic-contract")
+}
+
+// klAnnouncements records what an attached announcer is told, and the
+// generation the access point reports at that moment.
+type klAnnouncements struct {
+	mu   sync.Mutex
+	next []uint64
+	seen []uint64
+}
+
+func (k *klAnnouncements) attach(t *testing.T, a *Accesspoint) {
+	t.Helper()
+	if err := keylink.AttachAnnouncer(a, func(next uint64) {
+		g, _ := a.Generation()
+		k.mu.Lock()
+		k.next, k.seen = append(k.next, next), append(k.seen, g)
+		k.mu.Unlock()
+	}); err != nil {
+		t.Fatalf("attaching the announcer: %v", err)
+	}
+}
+
+func (k *klAnnouncements) get() (next, seen []uint64) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return append([]uint64(nil), k.next...), append([]uint64(nil), k.seen...)
+}
+
+// T-I1: before any connect, generation 0 with an open channel.
+func TestDDSonicContractGenerationZeroBeforeConnect(t *testing.T) {
+	a := NewAccesspoint(&librespot.NullLogger{}, nil, "")
+	g, changed := a.Generation()
+	if g != 0 || changed == nil || klClosed(changed) {
+		t.Fatalf("a new access point's generation = %d (channel closed: %t), want 0 and open", g, changed != nil && klClosed(changed))
+	}
+}
+
+// T-H1 - T-H3: the hook's out-of-domain inputs. They are programming
+// failures (a panic) or, for a nil callback, documented and excluded from
+// production by the symbols gate.
+func TestDDSonicContractAttachAnnouncerDomain(t *testing.T) {
+	if keylink.AttachAnnouncer == nil {
+		t.Fatal("ap's init did not install keylink.AttachAnnouncer")
+	}
+	panics := func(f func()) (p bool) {
+		defer func() { p = recover() != nil }()
+		f()
+		return false
+	}
+	if !panics(func() { _ = keylink.AttachAnnouncer("not an access point", func(uint64) {}) }) {
+		t.Error("T-H1: a wrong dynamic type did not panic")
+	}
+	if !panics(func() { _ = keylink.AttachAnnouncer((*Accesspoint)(nil), func(uint64) {}) }) {
+		t.Error("T-H2: a typed-nil access point did not panic")
+	}
+	a := NewAccesspoint(&librespot.NullLogger{}, nil, "")
+	if err := keylink.AttachAnnouncer(a, nil); err != nil || a.announcer != nil {
+		t.Errorf("T-H3: a nil callback = %v, slot set %t; want nil and the slot empty", err, a.announcer != nil)
+	}
+	if err := keylink.AttachAnnouncer(a, func(uint64) {}); err != nil || a.announcer == nil {
+		t.Errorf("after a nil callback, the first real attach = %v, slot set %t", err, a.announcer != nil)
+	}
+	if err := keylink.AttachAnnouncer(a, func(uint64) {}); !errors.Is(err, keylink.ErrTaken) {
+		t.Errorf("a second attach = %v, want keylink.ErrTaken", err)
+	}
+}
+
+// T-A3: an initial connect with no announcer publishes generation 1 and
+// closes generation 0's channel.
+func TestDDSonicContractInitialConnectPublishesWithoutAnnouncer(t *testing.T) {
+	f := klFake(t)
+	a := klUnconnected(f)
+	klOwn(t, a)
+	_, changed0 := a.Generation()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := a.ConnectStored(ctx, "contract-user", []byte("contract-stored-credential")); err != nil {
+		t.Fatal(err)
+	}
+	g, changed1 := a.Generation()
+	if g != 1 || !klClosed(changed0) || klClosed(changed1) {
+		t.Fatalf("after the first connect: generation %d, old channel closed %t, new open %t; want 1, true, true", g, klClosed(changed0), !klClosed(changed1))
+	}
+	if a.announcer != nil {
+		t.Fatal("a connect set the announcer slot")
+	}
+}
+
+// T-A2: a successful authentication after the announcer is attached
+// announces exactly once, before the store: the announcer sees the old
+// generation, and is told the new one.
+func TestDDSonicContractPublicationAnnouncesBeforeStore(t *testing.T) {
+	f := klFake(t)
+	a := klUnconnected(f)
+	klOwn(t, a)
+	var k klAnnouncements
+	k.attach(t, a)
+	stages := 0
+	restore := DDSonicSetStageAfterAnnounce(func() {
+		stages++
+		if g, _ := a.Generation(); g != 0 {
+			t.Errorf("at the stage after the announcement the generation is already %d", g)
+		}
+	})
+	defer restore()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := a.ConnectStored(ctx, "contract-user", []byte("contract-stored-credential")); err != nil {
+		t.Fatal(err)
+	}
+	next, seen := k.get()
+	if len(next) != 1 || next[0] != 1 || seen[0] != 0 || stages != 1 {
+		t.Fatalf("announcements %v seen at generations %v, %d stages; want one announcement of 1, made at 0, and one stage", next, seen, stages)
+	}
+	if g, _ := a.Generation(); g != 1 {
+		t.Fatalf("generation %d after the publication, want 1", g)
+	}
+}
+
+// T-A1: a failed authentication announces nothing and stores nothing.
+func TestDDSonicContractFailedAuthenticationPublishesNothing(t *testing.T) {
+	f := klFake(t)
+	undo := f.Refuse()
+	defer undo()
+	a := klUnconnected(f)
+	klOwn(t, a)
+	var k klAnnouncements
+	k.attach(t, a)
+	_, changed := a.Generation()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	err := a.ConnectStored(ctx, "contract-user", []byte("contract-stored-credential"))
+	var loginErr *AccesspointLoginError
+	if !errors.As(err, &loginErr) {
+		t.Fatalf("a refused login = %v, want an AccesspointLoginError", err)
+	}
+	next, _ := k.get()
+	if g, _ := a.Generation(); g != 0 || len(next) != 0 || klClosed(changed) {
+		t.Fatalf("after a refused login: generation %d, announcements %v, channel closed %t; want 0, none, open", g, next, klClosed(changed))
+	}
+}
+
+// S42 and the reconnect path: the slot is never cleared while the access
+// point lives or after it closes, and each publication through a reconnect
+// is announced exactly once.
+func TestDDSonicContractReconnectAnnouncesOnceAndSlotStays(t *testing.T) {
+	f := klFake(t)
+	a := klUnconnected(f)
+	klOwn(t, a) // R70-1: owned on every path; the test's own Close below stays, and Close is idempotent
+	var k klAnnouncements
+	k.attach(t, a)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := a.ConnectStored(ctx, "contract-user", []byte("contract-stored-credential")); err != nil {
+		t.Fatal(err)
+	}
+	c1 := f.Next(5 * time.Second)
+	if c1 == nil {
+		t.Fatal("no login")
+	}
+	a.Receive() // start the receive loop, so the peer's close is seen
+	_, changed := a.Generation()
+	if err := c1.PeerClose(); err != nil {
+		t.Fatal(err)
+	}
+	if f.Next(10*time.Second) == nil {
+		t.Fatal("no reconnect")
+	}
+	select {
+	case <-changed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reconnect did not publish")
+	}
+	next, seen := k.get()
+	if len(next) != 2 || next[0] != 1 || next[1] != 2 || seen[1] != 1 {
+		t.Fatalf("announcements %v seen at %v; want 1 then 2, the second made at 1", next, seen)
+	}
+	if a.announcer == nil {
+		t.Fatal("S42: the slot was cleared while the access point lives")
+	}
+	a.Close()
+	if a.announcer == nil {
+		t.Fatal("S42: the slot was cleared by Close")
+	}
+}

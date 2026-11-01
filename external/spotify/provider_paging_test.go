@@ -7,8 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-
-	"golang.org/x/oauth2"
 )
 
 // stubSavedTracks serves /v1/me/tracks pages rendered by body and counts requests.
@@ -31,7 +29,7 @@ func stubSavedTracks(t *testing.T, calls *int, body func(offset, limit int) stri
 		}, nil
 	})
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
-	sess := &Session{tokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "token"})}
+	sess := staticSession()
 	return New(sess, "client", 320)
 }
 
@@ -430,7 +428,7 @@ func playlistStub(t *testing.T, id string, total int, snapshot, prefix *string, 
 		return nil, fmt.Errorf("unexpected Spotify API path %q", req.URL.Path)
 	})
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
-	sess := &Session{tokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "token"})}
+	sess := staticSession()
 	p := New(sess, "client", 320)
 	p.trackCache[id] = &playlistCache{snapshotID: *snapshot}
 	return p
@@ -522,7 +520,7 @@ func TestTracksPageServesSavedAlbumsWholly(t *testing.T) {
 	})
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
 
-	sess := &Session{tokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "token"})}
+	sess := staticSession()
 	p := New(sess, "client", 320)
 
 	tracks, next, err := p.TracksPage(savedAlbumIDPrefix+"alb", 0)

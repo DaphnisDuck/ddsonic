@@ -8,8 +8,14 @@
 # /src is a checkout of the tag; /out receives the binary archive, the
 # complete corresponding source, the SBOM and SHA256SUMS. The second argument
 # is the timestamp every file in the archives carries, so two runs on the same
-# commit give the same bytes. An optional third argument names the tree to
-# build instead of HEAD (a dry run of uncommitted work).
+# commit give the same bytes. An optional third argument names the commit to
+# build instead of HEAD. It must be a commit (a branch, a tag, a commit ID;
+# for a dry run of uncommitted work, a commit made for the purpose, such as
+# the one `git stash create` prints). A bare tree is refused: every build
+# names the exact commit it was made from. ddsonic: `git stash create` leaves
+# untracked files out, so uncommitted work that adds files (third_party/,
+# patches/) needs a commit that holds them; only what that commit holds is
+# archived and built.
 set -eu
 
 version=$1
@@ -19,7 +25,12 @@ if ! printf '%s\n' "$version" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]
 	echo "release: '$version' is not a version tag (v1.2.3 or v1.2.3-rc.1)" >&2
 	exit 1
 fi
-treeish=${3:-HEAD}
+# The source is fixed here, once: the name given is resolved to a commit ID,
+# and that ID, which cannot move, is what is archived, compiled, embedded in
+# the binary and written into the manifest. Resolving the name again later
+# would let a branch that moved meanwhile put one commit's ID on another
+# commit's code.
+commit=$(git -c safe.directory=/src -C /src rev-parse --verify "${3:-HEAD}^{commit}")
 name="ddsonic-${version#v}"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -28,7 +39,7 @@ trap 'rm -rf "$work"' EXIT
 # the same tree the source archive ships.
 tree="$work/$name-source"
 mkdir -p "$tree"
-git -c safe.directory=/src -C /src archive --format=tar "$treeish" | tar -x -C "$tree"
+git -c safe.directory=/src -C /src archive --format=tar "$commit" | tar -x -C "$tree"
 cd "$tree"
 go mod vendor
 mkdir native
@@ -40,18 +51,22 @@ Debian's changes); mpg123 is the upstream archive. packaging/Dockerfile shows
 how each is built, and packaging/release.sh how ddsonic is linked against them.
 NATIVE
 
+# The commit resolved at the top goes into the binary and into the archive's
+# manifest, so each names its source by itself; release acceptance requires
+# the two and the expected release commit to be the same.
 go build -a -trimpath -mod=vendor \
-	-ldflags="-s -w -buildid= -X main.version=${version} -extldflags '-lvorbisenc -lvorbis -lFLAC -logg -lmpg123 -lm'" \
+	-ldflags="-s -w -buildid= -X main.version=${version} -X main.sourceSHA=${commit} -extldflags '-lvorbisenc -lvorbis -lFLAC -logg -lmpg123 -lm'" \
 	-o "$work/ddsonic" .
 if readelf -d "$work/ddsonic" | grep -E 'Shared library:.*(FLAC|vorbis|ogg|mpg123)'; then
 	echo "release: codec libraries must be linked statically" >&2
 	exit 1
 fi
 got=$("$work/ddsonic" --version)
-case "$got" in
-*"$version"*) ;;
-*) echo "release: --version says '$got', want $version" >&2; exit 1 ;;
-esac
+want="ddsonic version ${version} (commit ${commit})"
+if [ "$got" != "$want" ]; then
+	echo "release: --version says '$got', want '$want'" >&2
+	exit 1
+fi
 
 pack() { # archive directory-name, from $work
 	tar -C "$work" --sort=name --mtime="@$epoch" --owner=0 --group=0 --numeric-owner \
@@ -62,6 +77,20 @@ bin="$name-linux-amd64"
 mkdir "$work/$bin"
 cp "$work/ddsonic" "$work/$bin/ddsonic"
 cp LICENSE LICENSE-GPL-3.0 README.md CHANGELOG.md "$work/$bin/"
+# The release manifest: what this archive is, for a machine to read. Release
+# acceptance (docs/ddsonic/acceptance.md) refuses an archive without it, or
+# one whose manifest, binary and expected commit do not agree.
+cat > "$work/$bin/RELEASE-MANIFEST.json" <<MANIFEST
+{
+  "name": "ddsonic",
+  "version": "${version}",
+  "source_sha": "${commit}",
+  "goos": "$(go env GOOS)",
+  "goarch": "$(go env GOARCH)",
+  "go_version": "$(go env GOVERSION)",
+  "binary_sha256": "$(sha256sum "$work/ddsonic" | cut -d' ' -f1)"
+}
+MANIFEST
 # The README's images go with it, at the paths it names them by, so the
 # archive's copy shows them. A picture the README names and the tree lacks
 # stops the build.

@@ -1,0 +1,62 @@
+# API documentation
+
+The API has multiple REST endpoints and a Websocket endpoint.
+
+## REST
+
+The REST API documentation is available as OpenAPI specification: [api-spec.yml](/api-spec.yml).
+
+## Websocket
+
+The websocket endpoint is available at `/events`. The following events are emitted:
+
+- `active`: The device has become active
+- `inactive`: The device has become inactive
+- `metadata`: A new track was loaded, the following metadata is available:
+    - `context_uri`: The context URI 
+    - `uri`: Track URI
+    - `name`: Track name
+    - `artist_names`: List of track artist names
+    - `album_name`: Track album name
+    - `album_cover_url`: Track album cover image URL
+    - `position`: Track position in milliseconds
+    - `duration`: Track duration in milliseconds
+    - `format`: Spotify name of the audio file being decoded, e.g. `OGG_VORBIS_160`
+    - `codec`: Codec family of that file: `vorbis`, `flac`, `mp3`, `aac` or `unknown`
+    - `bitrate`: Nominal bitrate in kbps, `null` for formats without a fixed one such as FLAC
+    - `sample_rate`: Sample rate of the decoded audio in Hz
+    - `bit_depth`: Bits per sample of the source audio, `null` for lossy formats
+- `will_play`: The player is about to play the specified track
+    - `context_uri`: The context URI
+    - `uri`: The track URI
+    - `play_origin`: Who started the playback
+- `playing`: The current track is playing
+    - `context_uri`: The context URI
+    - `uri`: The track URI
+    - `resume`: Was this resumed from paused playback?
+    - `play_origin`: Who started the playback
+- `not_playing`: The current track has finished playing
+    - `context_uri`: The context URI
+    - `uri`: The track URI
+    - `play_origin`: Who started the playback
+- `paused`: The current track is paused
+    - `context_uri`: The context URI
+    - `uri`: The track URI
+    - `play_origin`: Who started the playback
+- `stopped`: The current context is empty, nothing more to play
+    - `play_origin`: Who started the playback
+- `seek`: The current track was seeked, the following data is provided:
+    - `context_uri`: The context URI
+    - `uri`: The track URI
+    - `position`: Track position in milliseconds
+    - `duration`: Track duration in milliseconds
+    - `play_origin`: Who started the playback
+- `volume`: The player volume changed, the following data is provided:
+    - `value`: The volume, ranging from 0 to max
+    - `max`: The max volume value
+- `shuffle_context`: The player shuffling context setting changed
+    - `value`: Whether shuffling context is enabled
+- `repeat_context`: The player repeating context setting changed
+    - `value`: Whether repeating context is enabled
+- `repeat_track`: The player repeating track setting changed
+    - `value`: Whether repeating track is enabled

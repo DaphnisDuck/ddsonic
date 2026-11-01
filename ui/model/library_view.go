@@ -103,13 +103,41 @@ func (m *Model) libAdjustScroll() {
 }
 
 // libListBudget is how many rows the list gets: the body, less the search
-// input line on the search screen.
+// input line on the search screen and the level's note.
 func (m *Model) libListBudget() int {
 	_, budget := m.bodySize()
 	if _, ok := m.libSearchLevel(); ok {
 		budget--
 	}
+	budget -= len(m.libNote())
 	return max(budget, 1)
+}
+
+// libNoteMinRows is the fewest list rows a note leaves; a body too short
+// for that shows the list alone.
+const libNoteMinRows = 3
+
+// libNoteIndent is the note's left margin, the rows' own.
+const libNoteIndent = "  "
+
+// libNote is the top level's note (library.NotedLevel) as the lines shown
+// above its rows, or nil when it has none or the body is too short for
+// both. The note is wrapped to the panel, never cut short: what it
+// qualifies is the reason it is there.
+func (m *Model) libNote() []string {
+	nl, ok := m.libTop().level.(library.NotedLevel)
+	if !ok || m.libSigningInHere(m.libTop()) {
+		return nil
+	}
+	width, rows := m.bodySize()
+	var lines []string
+	for _, sentence := range nl.Note() {
+		lines = append(lines, wrapText(sentence, width-len(libNoteIndent))...)
+	}
+	if len(lines) == 0 || rows-len(lines) < libNoteMinRows {
+		return nil
+	}
+	return lines
 }
 
 func (m Model) libBreadcrumb() string {
@@ -137,7 +165,7 @@ func (m *Model) libHeaderLine() string {
 	if badge := m.libSyncBadge(); badge != "" {
 		label += "  " + badge
 	}
-	if (f.loading() && len(f.entries) == 0) || f.err != nil {
+	if _, pending := m.libPending(f); (f.loading() && len(f.entries) == 0) || f.err != nil || pending {
 		return sepHeader(label)
 	}
 	return sepHeaderN(label, f.cursor+1, len(f.entries))
@@ -152,10 +180,15 @@ func (m *Model) libSyncBadge() string {
 		st := m.lib.sync[provider]
 		var badge string
 		switch {
+		case st.needsAuth:
+			// Always named: it is the one badge that asks for something.
+			badge = library.SourceLabel(provider) + " sign-in required" + m.libCachedSuffix(provider)
+			badges = append(badges, badge)
+			continue
 		case st.running:
 			badge = "↻ syncing"
 		case st.lastErr != "":
-			badge = "sync failed · cached"
+			badge = "sync failed" + m.libCachedSuffix(provider)
 		case !st.lastSuccess.IsZero():
 			badge = "✓ synced " + syncAge(time.Since(st.lastSuccess))
 		default:
@@ -190,7 +223,7 @@ func (m *Model) libHelpLine() string {
 }
 
 func (m *Model) renderLibraryBody() string {
-	if sl, ok := m.libSearchLevel(); ok && !m.lib.signingIn {
+	if sl, ok := m.libSearchLevel(); ok && !m.libSigningInHere(m.libTop()) {
 		budget := m.libListBudget()
 		body := m.renderLibraryList(budget)
 		if sl.Query() == "" {
@@ -202,8 +235,11 @@ func (m *Model) renderLibraryBody() string {
 		}
 		return m.libSearchPrompt(sl) + "\n" + body
 	}
-	_, rows := m.bodySize()
-	return m.renderLibraryList(rows)
+	var b strings.Builder
+	for _, line := range m.libNote() {
+		b.WriteString(dimStyle.Render(libNoteIndent+line) + "\n")
+	}
+	return b.String() + m.renderLibraryList(m.libListBudget())
 }
 
 // renderLibraryList renders the top frame's rows, or its loading, sign-in
@@ -211,16 +247,12 @@ func (m *Model) renderLibraryBody() string {
 func (m *Model) renderLibraryList(budget int) string {
 	f := m.libTop()
 	switch {
-	case m.lib.signingIn:
-		lines := []string{loadingLine("Signing in — finish in your browser…")}
-		if m.lib.authURL != "" {
-			lines = append(lines, dimStyle.Render("  If no browser opened, visit:"), dimStyle.Render("  "+truncate(m.lib.authURL, ui.PanelWidth-4)))
-		}
-		return bodyLines(lines, budget)
+	case m.libSigningInHere(f):
+		return bodyLines(m.libSigningInLines(budget), budget)
 	case f.loading() && len(f.entries) == 0:
 		return bodyLines([]string{loadingLine("Loading " + f.level.Title() + "…")}, budget)
-	case errors.Is(f.err, playlist.ErrNeedsAuth):
-		return bodyMessage("Sign-in required. Press Enter to sign in.", budget)
+	case errors.Is(f.err, playlist.ErrNeedsAuth) && m.libCanSignIn(f):
+		return bodyMessage(libSignInPrompt, budget)
 	case f.err != nil:
 		return bodyLines([]string{
 			dimStyle.Render("  " + truncate(f.err.Error(), ui.PanelWidth-4)),
@@ -228,6 +260,9 @@ func (m *Model) renderLibraryList(budget int) string {
 		}, budget)
 	case len(f.entries) == 0:
 		return bodyMessage("Nothing here.", budget)
+	}
+	if provider, ok := m.libPending(f); ok {
+		return bodyMessage(m.libPendingText(provider), budget)
 	}
 
 	panel := ui.PanelWidth
@@ -288,14 +323,35 @@ func libTrackNumbers(entries []library.Entry) []int {
 	return numbers
 }
 
+// libTrackRow is formatTrackRow with a label after the name: "3. Name  Label
+// 4:05". The label is kept whole and the name gives way to it, down to four
+// cells; only a row too narrow for both shortens the label. Without a label
+// it is formatTrackRow's row.
+func libTrackRow(number int, name, label string, secs int) string {
+	if label == "" {
+		return formatTrackRow(number, name, secs)
+	}
+	// What formatTrackRow leaves for the name: the row less its number and
+	// its duration.
+	budget := ui.PanelWidth - libCursorPrefix - lipgloss.Width(fmt.Sprintf("%d. ", number))
+	if dur := formatTrackTime(secs); dur != "" {
+		budget -= lipgloss.Width(dur) + 1
+	}
+	const minName = 4
+	label = truncate(label, max(budget-minName-libTrackLabelGap, 1))
+	name = truncate(name, max(budget-libTrackLabelGap-lipgloss.Width(label), minName))
+	return formatTrackRow(number, name+strings.Repeat(" ", libTrackLabelGap)+label, secs)
+}
+
 // libEntryLabel renders "Title      Detail ›"; tracks use the numbered track
-// row with duration. A station is a live stream with neither, so it is a
-// plain row. Browsable rows end in "›". Up to listReadWidth the detail is
+// row with duration, and their detail, which only a search result has (its
+// source), follows the name. A station is a live stream with neither, so it
+// is a plain row. Browsable rows end in "›". Up to listReadWidth the detail is
 // right-aligned; on a wider terminal (titleCol > 0) it starts after a
 // titleCol-wide title column, or after a longer title.
 func libEntryLabel(e library.Entry, number, titleCol int) string {
 	if e.Track != nil && !e.Track.Realtime {
-		return formatTrackRow(number, library.CleanText(trackViewName(*e.Track)), e.Track.DurationSecs)
+		return libTrackRow(number, library.CleanText(trackViewName(*e.Track)), library.CleanText(e.Detail), e.Track.DurationSecs)
 	}
 	width := ui.PanelWidth - libCursorPrefix
 	suffix := ""

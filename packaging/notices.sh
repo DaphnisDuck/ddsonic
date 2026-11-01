@@ -13,7 +13,8 @@ cat <<'HEAD'
 ddsonic: third-party notices
 
 ddsonic's own source is MIT-licensed (see LICENSE). The ddsonic executable links
-go-librespot, which is GPL-3.0, so the executable as a whole is distributed
+a modified go-librespot (its section below says how it differs from upstream),
+which is GPL-3.0, so the executable as a whole is distributed
 under GPL-3.0 (see LICENSE-GPL-3.0). The complete corresponding source for
 this build is the ddsonic-<version>-source.tar.gz published beside it.
 
@@ -62,7 +63,44 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 go version -m "$binary" > "$tmp/buildinfo"
-awk '$1 == "dep" || $1 == "=>" { print $2, $3 }' "$tmp/buildinfo" | sort -u > "$tmp/shipped"
+awk '$1 == "dep" { print $2, $3 }' "$tmp/buildinfo" | sort -u > "$tmp/shipped"
+
+# ddsonic: go-librespot is replaced by the tracked tree third_party/go-librespot
+# (go.mod; docs/ddsonic/upstream.md), upstream v0.9.1 with ddsonic's patches.
+# The binary names a replacement on a "=>" line under its "dep" line. This one
+# replacement, exactly, is allowed, and vendor/modules.txt must record it. Its
+# license comes from the replacement tree, never from the module cache, which
+# would hold upstream's unmodified module.
+replaced_mod=github.com/devgianlu/go-librespot
+replaced_ver=v0.9.1
+replaced_dir=./third_party/go-librespot
+provenance=third_party/go-librespot.provenance
+awk '$1 == "=>" { print last, $2, $3 } { last = ($1 == "dep") ? $2 " " $3 : "" }' "$tmp/buildinfo" > "$tmp/replaced"
+printf '%s %s %s (devel)\n' "$replaced_mod" "$replaced_ver" "$replaced_dir" > "$tmp/replaced.want"
+if ! cmp -s "$tmp/replaced" "$tmp/replaced.want"; then
+	echo "notices: the binary's module replacements are not exactly $replaced_mod $replaced_ver => $replaced_dir:" >&2
+	diff "$tmp/replaced.want" "$tmp/replaced" >&2 || true
+	exit 1
+fi
+if [ "$(grep -c '=>' vendor/modules.txt)" != 1 ] || ! grep -qxF "# $replaced_mod $replaced_ver => $replaced_dir" vendor/modules.txt; then
+	echo "notices: vendor/modules.txt does not record exactly that replacement" >&2
+	exit 1
+fi
+# The provenance names the upstream base and each patch in the order it
+# applies; every patch must be in the tree at its recorded SHA-256, and no
+# other file may be in patches/go-librespot.
+if ! grep -qxF "module $replaced_mod" "$provenance" || ! grep -qxF "base-version $replaced_ver" "$provenance"; then
+	echo "notices: $provenance does not name $replaced_mod $replaced_ver" >&2
+	exit 1
+fi
+awk '$1 == "patch" { sub(/^sha256:/, "", $3); print $3 "  " $2 }' "$provenance" > "$tmp/patches"
+awk '{ print $2 }' "$tmp/patches" | sort > "$tmp/patches.listed"
+find patches/go-librespot -type f | sort > "$tmp/patches.present"
+if [ ! -s "$tmp/patches" ] || ! cmp -s "$tmp/patches.listed" "$tmp/patches.present" || ! sha256sum -c --quiet "$tmp/patches" >&2; then
+	echo "notices: the patches in patches/go-librespot are not the ones $provenance records" >&2
+	exit 1
+fi
+prov() { awk -v k="$1" '$1 == k { print $2 }' "$provenance"; }
 go list -mod=vendor -deps -f '{{with .Module}}{{.Path}} {{.Version}} {{end}}{{.ImportPath}}' . > "$tmp/list"
 # Three fields: a dependency's package. Fewer: the standard library or ddsonic.
 awk 'NF == 3' "$tmp/list" > "$tmp/pkgs"
@@ -78,12 +116,28 @@ modcache=$(go env GOMODCACHE)
 escape() { printf '%s' "$1" | sed 's/[A-Z]/!\L&/g'; }
 
 while read -r mod ver; do
-	root="$modcache/$(escape "$mod")@$ver"
-	if [ ! -d "$root" ]; then
-		echo "notices: $mod@$ver is not in the module cache" >&2
-		exit 1
+	if [ "$mod $ver" = "$replaced_mod $replaced_ver" ]; then
+		root=$replaced_dir
+		section "$mod $ver, modified by ddsonic"
+		cat <<MODIFIED
+This is a modified version of go-librespot. The executable is built from the
+tree third_party/go-librespot in the source archive: upstream $mod $ver
+(Go module checksum $(prov base-h1)) with these patches, in
+patches/go-librespot, applied in this order:
+$(awk '{ print "  " $2 "  sha256:" $1 }' "$tmp/patches")
+The modified tree's module hash is $(prov active-h1); ddsonic
+computes it, it is not an upstream hash. Each file the patches change or add
+starts with a dated notice of the change. go-librespot's license follows.
+
+MODIFIED
+	else
+		root="$modcache/$(escape "$mod")@$ver"
+		if [ ! -d "$root" ]; then
+			echo "notices: $mod@$ver is not in the module cache" >&2
+			exit 1
+		fi
+		section "$mod $ver"
 	fi
-	section "$mod $ver"
 	awk -v m="$mod" '$1 == m {
 		d = $3
 		while (index(d, m) == 1) {

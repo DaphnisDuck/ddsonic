@@ -1,0 +1,152 @@
+package ap
+
+// ddsonic's contract with go-librespot's access point, at the pinned
+// version. ddsonic retires a session without ever calling Close from a
+// caller, because Close can block; it relies on Done being closed first.
+// See docs/ddsonic/design/spotify-token-coordinator.md, 4.3 and 14.5.
+
+import (
+	"context"
+	"net"
+	"sync"
+	"testing"
+	"time"
+
+	librespot "github.com/devgianlu/go-librespot"
+	pb "github.com/devgianlu/go-librespot/proto/spotify"
+)
+
+// reconnecting is an access point whose real receive loop is inside its real
+// reconnect, held at the address resolver. release lets the reconnect end.
+func reconnecting(t *testing.T) (a *Accesspoint, release func()) {
+	t.Helper()
+	left, right := net.Pipe()
+	a = DDSonicContractAP(left)
+	a.welcome = &pb.APWelcome{}
+	entered := make(chan struct{})
+	var once sync.Once
+	a.addr = func(ctx context.Context) string {
+		once.Do(func() { close(entered) })
+		<-ctx.Done()
+		return "invalid address"
+	}
+	right.Close() // the receive fails, and the loop reconnects
+	loopDone := make(chan struct{})
+	go func() { a.recvLoop(); close(loopDone) }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		a.cancel()
+		t.Fatal("the receive loop did not reach its reconnect")
+	}
+	return a, func() {
+		a.cancel() // what Close does last; the tests reach in to end the cycle
+		select {
+		case <-loopDone:
+		case <-time.After(5 * time.Second):
+			t.Error("the receive loop did not end")
+		}
+	}
+}
+
+// STOP if this fails: ddsonic's retirement depends on it. While the access
+// point is reconnecting, a Close begun on another goroutine closes Done
+// promptly, whatever Close itself then waits for.
+func TestDDSonicContractDoneClosesBeforeCloseReturns(t *testing.T) {
+	a, release := reconnecting(t)
+	defer release()
+	go a.Close()
+	select {
+	case <-a.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Done was not closed by a Close begun during a reconnect")
+	}
+}
+
+// A reviewed expectation: in that same state Close does not return until the
+// reconnect ends. This is why no ddsonic caller calls it. If a later
+// go-librespot makes Close prompt, this fails; ddsonic stays correct, and the
+// expectation is updated in a reviewed change.
+func TestDDSonicContractCloseWaitsForReconnect(t *testing.T) {
+	a, release := reconnecting(t)
+	closed := make(chan struct{})
+	go func() { a.Close(); close(closed) }()
+	<-a.Done()
+	select {
+	case <-closed:
+		release()
+		t.Fatal("EXPECTATION CHANGED: Close returned while the access point was reconnecting")
+	case <-time.After(50 * time.Millisecond):
+	}
+	select {
+	case <-a.ctx.Done():
+		release()
+		t.Fatal("EXPECTATION CHANGED: the reconnect's context was cancelled before Close got past the connection lock")
+	default:
+	}
+	release()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return after the reconnect ended")
+	}
+}
+
+// STOP if this fails: Close may be called from more than one goroutine (the
+// bundle's closer, its tail, and go-librespot's own loop).
+func TestDDSonicContractCloseIsOnce(t *testing.T) {
+	a := NewAccesspoint(&librespot.NullLogger{}, nil, "")
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(a.Close)
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("concurrent Close calls did not all return")
+	}
+	select {
+	case <-a.Done():
+	default:
+		t.Fatal("Done is open after Close")
+	}
+}
+
+// A reviewed expectation: the identity getter a session builder calls waits
+// for the connection lock, with no context and no look at Done. It is why a
+// build ends on its own deadline and not on its builder's return.
+func TestDDSonicContractIdentityGetterWaitsForReconnect(t *testing.T) {
+	a := NewAccesspoint(&librespot.NullLogger{}, nil, "")
+	name := "synthetic"
+	a.welcome = &pb.APWelcome{CanonicalUsername: &name}
+	a.connMu.Lock() // as the receive loop holds it across a reconnect
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	got := make(chan string, 1)
+	go func() { got <- a.Username() }()
+	<-ctx.Done() // a setup deadline passes
+	closed := make(chan struct{})
+	go func() { a.Close(); close(closed) }()
+	<-a.Done()
+	select {
+	case <-got:
+		a.connMu.Unlock()
+		t.Fatal("EXPECTATION CHANGED: the identity getter returned without the connection lock")
+	case <-time.After(50 * time.Millisecond):
+	}
+	a.connMu.Unlock()
+	for what, ch := range map[string]<-chan struct{}{"the closer": closed} {
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s did not return", what)
+		}
+	}
+	select {
+	case <-got:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the getter did not return")
+	}
+}

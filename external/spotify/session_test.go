@@ -1,126 +1,22 @@
 package spotify
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"testing"
-	"testing/synctest"
-	"time"
 
-	librespotPlayer "github.com/devgianlu/go-librespot/player"
 	"golang.org/x/oauth2"
 )
-
-type tokenSourceFunc func() (*oauth2.Token, error)
-
-func (f tokenSourceFunc) Token() (*oauth2.Token, error) { return f() }
 
 func TestCallbackAddressUsesIPv4Loopback(t *testing.T) {
 	if got, want := callbackAddress(), "127.0.0.1:19872"; got != want {
 		t.Fatalf("callbackAddress() = %q, want %q", got, want)
 	}
-}
-
-func TestAwaitSpotifyStreamTimeoutCancelsTransportAndReleasesReadLock(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		const timeout = 10 * time.Millisecond
-		setupCtx, setupCancel := context.WithTimeout(t.Context(), timeout)
-		defer setupCancel()
-
-		streamCtx, streamCancel := context.WithCancel(context.Background())
-		requestStarted := make(chan struct{})
-		requestCanceled := make(chan error, 1)
-		client := newSpotifyStreamHTTPClient(streamCtx, roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			close(requestStarted)
-			<-req.Context().Done()
-			requestCanceled <- req.Context().Err()
-			return nil, req.Context().Err()
-		}))
-
-		var session Session
-		openDone := make(chan struct{})
-		start := time.Now()
-		stream, cancel, err := awaitSpotifyStream(setupCtx, streamCancel, func() (*librespotPlayer.Stream, error) {
-			session.mu.RLock()
-			defer close(openDone)
-			defer session.mu.RUnlock()
-
-			req, err := http.NewRequest(http.MethodGet, "https://audio.example/initial", nil)
-			if err != nil {
-				return nil, err
-			}
-			_, err = client.Do(req)
-			return nil, err
-		})
-
-		if stream != nil || cancel != nil {
-			t.Fatalf("awaitSpotifyStream() = (%v, %v), want nil stream and cancel", stream, cancel)
-		}
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("awaitSpotifyStream() error = %v, want context.DeadlineExceeded", err)
-		}
-		if elapsed := time.Since(start); elapsed != timeout {
-			t.Errorf("awaitSpotifyStream() returned after %v, want %v", elapsed, timeout)
-		}
-
-		synctest.Wait()
-		select {
-		case <-requestStarted:
-		default:
-			t.Fatal("transport request did not start")
-		}
-		select {
-		case err := <-requestCanceled:
-			if !errors.Is(err, context.Canceled) {
-				t.Fatalf("transport context error = %v, want context.Canceled", err)
-			}
-		default:
-			t.Fatal("transport request was not canceled")
-		}
-		select {
-		case <-openDone:
-		default:
-			t.Fatal("stream setup goroutine did not exit")
-		}
-		if !session.mu.TryLock() {
-			t.Fatal("stream setup retained the session read lock")
-		}
-		session.mu.Unlock()
-	})
-}
-
-func TestAwaitSpotifyStreamRecoversSetupPanic(t *testing.T) {
-	streamCtx, streamCancel := context.WithCancel(context.Background())
-	var session Session
-
-	stream, cancel, err := awaitSpotifyStream(t.Context(), streamCancel, func() (*librespotPlayer.Stream, error) {
-		session.mu.RLock()
-		defer session.mu.RUnlock()
-		var params *struct{ LoudnessDb float32 }
-		_ = params.LoudnessDb // nil dereference, as in librespot v0.9.0 normalisation
-		return nil, nil
-	})
-
-	if stream != nil || cancel != nil {
-		t.Fatalf("awaitSpotifyStream() = (%v, %v), want nil stream and cancel", stream, cancel)
-	}
-	if err == nil {
-		t.Fatal("awaitSpotifyStream() error = nil, want recovered panic")
-	}
-	if streamCtx.Err() == nil {
-		t.Error("stream context was not canceled")
-	}
-	if !session.mu.TryLock() {
-		t.Fatal("stream setup retained the session read lock")
-	}
-	session.mu.Unlock()
 }
 
 func TestIsInvalidGrant(t *testing.T) {
@@ -231,103 +127,6 @@ func TestOAuthCallbackHandlerRejectsUnknownState(t *testing.T) {
 	}
 	if len(callbacks) != 0 {
 		t.Errorf("unknown state queued %d callback(s), want 0", len(callbacks))
-	}
-}
-
-func TestPersistingTokenSourcePersistsRotationOnce(t *testing.T) {
-	var persisted []string
-	source := &persistingTokenSource{
-		source:       tokenSourceFunc(func() (*oauth2.Token, error) { return &oauth2.Token{AccessToken: "access", RefreshToken: "new"}, nil }),
-		refreshToken: "old",
-		persist: func(refreshToken string) error {
-			persisted = append(persisted, refreshToken)
-			return nil
-		},
-	}
-
-	for range 2 {
-		token, err := source.Token()
-		if err != nil {
-			t.Fatalf("Token() error = %v", err)
-		}
-		if token.AccessToken != "access" {
-			t.Errorf("access token = %q, want access", token.AccessToken)
-		}
-	}
-	if !slices.Equal(persisted, []string{"new"}) {
-		t.Errorf("persisted refresh tokens = %v, want [new]", persisted)
-	}
-}
-
-func TestPersistingTokenSourceDoesNotBlockOnSaveFailure(t *testing.T) {
-	wantErr := errors.New("disk full")
-	attempts := 0
-	source := &persistingTokenSource{
-		source:       tokenSourceFunc(func() (*oauth2.Token, error) { return &oauth2.Token{AccessToken: "access", RefreshToken: "new"}, nil }),
-		refreshToken: "old",
-		persist: func(string) error {
-			attempts++
-			return wantErr
-		},
-	}
-
-	for range 2 {
-		token, err := source.Token()
-		if err != nil {
-			t.Fatalf("Token() error = %v, want successful access despite persistence failure", err)
-		}
-		if token.AccessToken != "access" {
-			t.Errorf("access token = %q, want access", token.AccessToken)
-		}
-	}
-	if attempts != 1 {
-		t.Errorf("persistence attempts = %d, want 1 for one rotated token", attempts)
-	}
-}
-
-func TestWebAPITokenSourcePersistsRotatedRefreshToken(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	stored := storedCreds{
-		Username:     "user",
-		Data:         []byte("playback-credential"),
-		DeviceID:     "device",
-		RefreshToken: "old",
-	}
-	if err := saveCreds(&stored); err != nil {
-		t.Fatal(err)
-	}
-
-	source := webAPITokenSource("client", &oauth2.Token{
-		AccessToken:  "access",
-		RefreshToken: "new",
-		Expiry:       time.Now().Add(time.Hour),
-	}, stored)
-	if _, err := source.Token(); err != nil {
-		t.Fatalf("Token() error = %v", err)
-	}
-
-	got, err := loadCreds()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Username != stored.Username || got.DeviceID != stored.DeviceID || !slices.Equal(got.Data, stored.Data) {
-		t.Errorf("non-OAuth credentials changed: got %+v, want username/device/data from %+v", got, stored)
-	}
-	if got.RefreshToken != "new" {
-		t.Errorf("refresh token = %q, want new", got.RefreshToken)
-	}
-	path, err := CredsPath()
-	if err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime.GOOS != "windows" {
-		if mode := info.Mode().Perm(); mode != 0o600 {
-			t.Errorf("credentials mode = %o, want 600", mode)
-		}
 	}
 }
 

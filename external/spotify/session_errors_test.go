@@ -96,9 +96,9 @@ func TestEnsureWebAPIRestoresToken(t *testing.T) {
 				t.Fatal(err)
 			}
 			calls := fakeTokenEndpoint(t, tt.status, tt.body)
-			p := New(&Session{clientID: "client"}, "client", 320)
+			p := New(tokenSession(nil), "client", 320)
 
-			err := p.ensureWebAPI()
+			err := ensureWebAPI(p)
 			if (err != nil) != tt.wantErr || errors.Is(err, playlist.ErrNeedsAuth) != tt.needsAuth {
 				t.Fatalf("ensureWebAPI() = %v, want error %v, needs auth %v", err, tt.wantErr, tt.needsAuth)
 			}
@@ -113,7 +113,7 @@ func TestEnsureWebAPIRestoresToken(t *testing.T) {
 				t.Errorf("stored creds = %+v, want the rotated refresh token", creds)
 			}
 			// Restored once; later calls use the token source.
-			if err := p.ensureWebAPI(); err != nil || *calls != 1 {
+			if err := ensureWebAPI(p); err != nil || *calls != 1 {
 				t.Errorf("second ensureWebAPI() = %v after %d token calls, want no new refresh", err, *calls)
 			}
 		})

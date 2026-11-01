@@ -5,7 +5,7 @@ ddsonic keeps your Spotify library and an index of your local music folder in on
 ## What it holds
 
 - **Spotify:** saved albums, followed artists, liked songs, and the playlists you own or follow, with their tracks. Album track lists are cached as you open albums, and in the background for the rest of your saved albums.
-- **YouTube Music:** your music playlists (and those listed in `youtube_playlists`) with their tracks, and Liked Music. Each track's artist, album and year is read in the background, which gives YouTube its Albums and Artists; an album holds only the tracks of it you have. See [youtube.md](youtube.md).
+- **YouTube Music:** your music playlists (and those listed in `youtube_playlists`) with their tracks, and Liked Music. Each track's artist, album and year is read in the background, which gives YouTube its Albums from tracks and Artists from tracks; an album holds only the tracks of it you have. Saved YouTube Music Library Albums and followed artists are not synchronized. See [youtube.md](youtube.md).
 - **Local:** every audio file under the music folder, grouped into albums, artists and genres. The folder is `initial_directory` in `config.toml`, else `$XDG_MUSIC_DIR`, else `~/Music`.
 - **Radio:** your favorite stations and the built-in and `radios.toml` stations, so [search](search.md) finds them. They are read from local files at every start and whenever you star or unstar a station. Browsing Radio still reads them directly.
 - **Search index:** a full-text index of everything above, kept in step with every change. See [search.md](search.md).
@@ -45,7 +45,10 @@ A sync either applies completely or changes nothing:
 
 - **Spotify:** if any page of a collection fails, or the library changes while it's being read, that collection keeps what it had.
 - **Local:** if the music folder is missing, or is empty while the catalog holds files (an unmounted drive, for example), the index is left as it is. Files under a folder ddsonic can't read are kept too.
-- **Sign-in:** a Spotify sign-in that fails because Spotify is unreachable or down is reported as that error, not as "sign-in required". The sync retries by itself.
+- **Sign-in:** a Spotify sign-in that fails because Spotify is unreachable or down is reported as that error, not as "sign-in required". The sync retries by itself. When the sync does need you to sign in (never signed in, reset, or revoked by Spotify), the heading reads `Spotify sign-in required` and Spotify's menu offers **Sign in to Spotify** ([navigation.md](navigation.md)); the catalog keeps what it had. A sign-in Spotify revokes while ddsonic runs is noticed at the next call; the stored credential is replaced only when you have signed in again.
+- **Sign-in, two known limits in 1.0:**
+  - Spotify hands out a new refresh token with some renewals, and ddsonic stores it only once the renewal has been accepted by a session that is still open. If you quit, or the work is cancelled, in the moment between Spotify issuing it and ddsonic accepting it, the stored sign-in is left as it was, and the next start may ask you to sign in again. The stored sign-in is never left half-written.
+  - A session that a sign-in replaces is retired at once: nothing uses it any more. Its network connection is closed by the Spotify library, which can take a while when that library is in the middle of reconnecting (a network fault, say). Until then the old connection, and what belongs to it, stays in memory; several can pile up if you sign in repeatedly during such a fault. They go when the library finishes, or when you quit.
 
 ## Settings
 

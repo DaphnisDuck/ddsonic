@@ -89,9 +89,9 @@ func TestSearchResultsBySection(t *testing.T) {
 		{"Artists", "Holst", "Local"},
 		{"Albums", "Cached", "Spotify · Ozawa"},
 		{"Albums", "The Planets", "Local · Holst · 1990"},
-		{"Tracks", "Venus", ""},
+		{"Tracks", "Venus", "Local"},
 		{"Playlists", "Mine", "Spotify · 1 tracks"},
-		{"Stations", "WBGO", ""},
+		{"Stations", "WBGO", "Radio"},
 		{beyondSection, "Search Spotify for “holst”", ""},
 		{beyondSection, "Search the radio directory for “holst”", ""},
 	}
@@ -318,7 +318,7 @@ func TestPartialAlbums(t *testing.T) {
 	yt := SyncedSource{Provider: "youtube", Title: "YouTube Music", Player: &fakeProvider{name: "YouTube Music"},
 		Collections: []string{catalog.CollectionAlbums}, PartialAlbums: true}
 
-	albums := load(t, child(t, SyncedMenu(c, yt), "Albums"))
+	albums := load(t, child(t, SyncedMenu(c, yt), AlbumsFromTracks))
 	var row Entry
 	for _, e := range albums {
 		if e.Title == "Best of Chicago" {
@@ -382,4 +382,135 @@ func TestSearchMoreLoadsOverlap(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// sharedRecording is a search fixture in which one recording is held by
+// every kind of source at once: Local, Spotify and a source whose albums
+// come from its tracks (YouTube Music), with a radio station beside them.
+func sharedRecording(t *testing.T) (*fakeCatalog, Level) {
+	t.Helper()
+	cat, _, _ := newCatalogFixture()
+	held := func(id int64, provider, uri string) catalog.SearchResult {
+		return catalog.SearchResult{Kind: catalog.SearchTrack, Provider: provider, Track: &catalog.Track{
+			ID: id, Ref: lref3(provider, uri), Title: "Shared Song", Artist: "Echo Artist", PlayableURI: uri}}
+	}
+	cat.found = catalog.SearchResults{
+		catalog.SearchTrack: {
+			held(71, catalog.Local, "/m/echo/1.mp3"),
+			held(72, catalog.Spotify, "spotify:track:t72"),
+			held(73, catalog.YouTube, "https://music.youtube.com/watch?v=v73"),
+		},
+		catalog.SearchStation: {{Kind: catalog.SearchStation, Provider: catalog.Radio,
+			Track: &catalog.Track{ID: 74, Ref: lref3(catalog.Radio, "https://echo"), Title: "Echo FM", PlayableURI: "https://echo"}}},
+	}
+	sp := &searchable{liveSpotify{fakeProvider: fakeProvider{name: "Spotify"}}}
+	yt := SyncedSource{Provider: catalog.YouTube, Title: "YouTube Music", Player: &fakeProvider{name: "YouTube Music"},
+		Collections: []string{catalog.CollectionLiked}, PartialAlbums: true}
+	root := Root(Sources{Spotify: sp, Local: &fakeProvider{name: "Local"}, Radio: &directoryRadio{fakeProvider{name: "Radio"}},
+		MusicDir: "/m", Catalog: cat, Synced: append(spotifySynced(sp), yt)})
+	return cat, child(t, root, "Search")
+}
+
+// Every row of an ordinary search says which source it is from, track and
+// station rows included. A recording held in several sources is one row
+// per source, and the label is all that tells those rows apart.
+func TestSearchTrackRowsNameTheirSource(t *testing.T) {
+	_, search := sharedRecording(t)
+	type row struct{ section, title, source, detail string }
+	var got []row
+	for _, e := range searchFor(t, search, "shared") {
+		if e.Track == nil {
+			continue
+		}
+		got = append(got, row{e.Section, e.Title, e.Source, e.Detail})
+		// The label is the source's display name, whatever the source.
+		if e.Detail != SourceLabel(e.Source) {
+			t.Errorf("row %q of %q is labelled %q, want %q", e.Title, e.Source, e.Detail, SourceLabel(e.Source))
+		}
+	}
+	want := []row{
+		{"Tracks", "Shared Song", catalog.Local, "Local"},
+		{"Tracks", "Shared Song", catalog.Spotify, "Spotify"},
+		// A track is a synced track: "from tracks" belongs to the albums
+		// and artists such a source derives, not to the track itself.
+		{"Tracks", "Shared Song", catalog.YouTube, "YouTube"},
+		{"Stations", "Echo FM", catalog.Radio, "Radio"},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("track and station rows =\n%v\nwant\n%v", got, want)
+	}
+}
+
+// The label is on the row, not in what the row plays: the track that is
+// played or queued keeps its own title and artist.
+func TestSearchTrackLabelStaysOutOfTheTrack(t *testing.T) {
+	_, search := sharedRecording(t)
+	for _, e := range searchFor(t, search, "shared") {
+		if e.Track == nil {
+			continue
+		}
+		if e.Title != e.Track.Title || strings.Contains(e.Track.Title+e.Track.Artist+e.Track.Album, e.Detail) {
+			t.Errorf("row %q of %q plays %+v: the source label leaked into the track", e.Title, e.Source, *e.Track)
+		}
+		if e.PlayFrom == nil {
+			t.Errorf("row %q of %q has nothing to play", e.Title, e.Source)
+		}
+	}
+}
+
+// "More tracks…" lists rows of the same kind, built the same way.
+func TestSearchMoreTrackRowsNameTheirSource(t *testing.T) {
+	cat, search := sharedRecording(t)
+	var many []catalog.SearchResult
+	for i := range 30 {
+		provider := []string{catalog.Local, catalog.Spotify, catalog.YouTube}[i%3]
+		many = append(many, catalog.SearchResult{Kind: catalog.SearchTrack, Provider: provider, Track: &catalog.Track{
+			ID: int64(200 + i), Ref: lref3(provider, fmt.Sprint("t", i)), Title: fmt.Sprintf("Song %d", i), PlayableURI: fmt.Sprint("uri", i)}})
+	}
+	cat.found = catalog.SearchResults{catalog.SearchTrack: many}
+	var more *Entry
+	rows := searchFor(t, search, "song")
+	for i, e := range rows {
+		if e.Section == "Tracks" && strings.HasPrefix(e.Title, "More") {
+			more = &rows[i]
+		}
+	}
+	if more == nil {
+		t.Fatalf("no More row among %v", titles(rows))
+	}
+	all := load(t, more.Open)
+	if len(all) != 30 {
+		t.Fatalf("More tracks = %d rows, want 30", len(all))
+	}
+	for _, e := range all {
+		if e.Detail == "" || e.Detail != SourceLabel(e.Source) {
+			t.Errorf("More row %q of %q is labelled %q", e.Title, e.Source, e.Detail)
+		}
+	}
+}
+
+// Outside search a list is one source's, and its track rows carry no
+// label: an album's tracks, a playlist's, Liked Songs.
+func TestBrowsedTrackRowsCarryNoSourceLabel(t *testing.T) {
+	_, _, root := newCatalogFixture()
+	lists := map[string][]Entry{
+		"an album's tracks":   load(t, child(t, child(t, root, "Albums"), "Cached")),
+		"a playlist's tracks": load(t, child(t, child(t, root, "Playlists"), "Mine")),
+		"Liked Songs":         load(t, child(t, root, "Liked Songs")),
+	}
+	for name, entries := range lists {
+		tracks := 0
+		for _, e := range entries {
+			if e.Track == nil {
+				continue
+			}
+			tracks++
+			if e.Detail != "" {
+				t.Errorf("%s: track row %q is labelled %q, want none", name, e.Title, e.Detail)
+			}
+		}
+		if tracks == 0 {
+			t.Errorf("%s: no track rows to check: %v", name, titles(entries))
+		}
+	}
 }

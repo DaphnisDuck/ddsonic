@@ -1,0 +1,457 @@
+package audio
+
+// ddsonic's contract with go-librespot's access point and key provider about
+// a connection that its peer closes, at the pinned version. The real
+// Accesspoint and KeyProvider run against a synthetic access point on
+// loopback TCP (ap.DDSonicContractFakeAP), so the peer's close is a real one.
+//
+// With patch 0002 the key provider stamps each request with the connection
+// generation it was written on, and ends a request whose connection was
+// replaced with ConnectionReplacedError, at once and without sending it
+// again. What ddsonic does about it is in external/spotify/playback_ddsonic.go:
+// it starts the access point's receive loop when a playback bundle is made
+// (service, below, is that call), and it opens the track once more after a
+// replacement, within its one recovery.
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	librespot "github.com/devgianlu/go-librespot"
+	"github.com/devgianlu/go-librespot/ap"
+)
+
+var contractKey = []byte("0123456789abcdef")
+
+// service is the call ddsonic makes on every playback bundle's access
+// point: Receive with no packet types, which registers nothing and starts
+// the receive loop.
+func service(a *ap.Accesspoint) { a.Receive() }
+
+// agedAP is an access point authenticated against a new synthetic one, with
+// its receive loop not started, and the fake's end of its connection.
+func agedAP(t *testing.T) (*ap.DDSonicFakeAP, *ap.Accesspoint, *ap.DDSonicFakeConn) {
+	t.Helper()
+	f, err := ap.DDSonicContractFakeAP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(f.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	a, err := f.Connect(ctx)
+	if err != nil {
+		t.Fatalf("connecting to the synthetic access point: %v", err)
+	}
+	ownAP(t, a)
+	c := f.Next(5 * time.Second)
+	if c == nil {
+		t.Fatal("the synthetic access point saw no login")
+	}
+	return f, a, c
+}
+
+// ownAP makes a, an access point on a synthetic one, the test's to end, on
+// every path (R70-1). Registered as soon as a exists, its cleanup runs after
+// the test's later cleanups (its gates' and holds' releases) and before the
+// fake's own: a's Close is joined while the fake is still up, and then the
+// SDK's loops are awaited to 0, the state the next test starts from.
+func ownAP(t *testing.T, a *ap.Accesspoint) {
+	t.Helper()
+	t.Cleanup(func() {
+		if closeJoined(t, "cleanup", a) {
+			quietLoops(t, "after the test's access point was closed")
+		}
+	})
+}
+
+type keyResult struct {
+	key []byte
+	err error
+	in  time.Duration
+}
+
+// requestKey makes one key request on its own goroutine.
+func requestKey(ctx context.Context, p *KeyProvider) <-chan keyResult {
+	out := make(chan keyResult, 1)
+	go func() {
+		start := time.Now()
+		key, err := p.Request(ctx, make([]byte, 16), make([]byte, 20))
+		out <- keyResult{key, err, time.Since(start)}
+	}()
+	return out
+}
+
+func awaitKey(t *testing.T, what string, out <-chan keyResult, limit time.Duration) keyResult {
+	t.Helper()
+	select {
+	case r := <-out:
+		return r
+	case <-time.After(limit):
+		t.Fatalf("%s did not end within %v", what, limit)
+		return keyResult{}
+	}
+}
+
+// answer waits for a key request on c and answers it.
+func answer(t *testing.T, c *ap.DDSonicFakeConn) {
+	t.Helper()
+	req, ok := c.Wait(ap.PacketTypeRequestKey, 5*time.Second)
+	if !ok {
+		t.Fatal("no key request reached the access point's current connection")
+	}
+	if err := c.AnswerKey(req, contractKey); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// firstKeyOnOpenConnection is a first key request on a connection nobody
+// closed: it is answered.
+func firstKeyOnOpenConnection(t *testing.T, serviced bool) {
+	_, a, c := agedAP(t)
+	if serviced {
+		service(a)
+	}
+	out := requestKey(context.Background(), NewAudioKeyProvider(&librespot.NullLogger{}, a))
+	answer(t, c)
+	r := awaitKey(t, "the first key request", out, 5*time.Second)
+	if r.err != nil || !bytes.Equal(r.key, contractKey) {
+		t.Fatalf("the first key request = %x, %v; want the key", r.key, r.err)
+	}
+}
+
+// The controls, each a test of its own (the runner counts every test that
+// passes, and one synthetic access point is open at a time): a prompt first
+// play, as the SDK is used without ddsonic's call, and with it.
+func TestDDSonicContractFirstKeyOnOpenConnection(t *testing.T) { firstKeyOnOpenConnection(t, false) }
+
+func TestDDSonicContractFirstKeyOnServicedConnection(t *testing.T) { firstKeyOnOpenConnection(t, true) }
+
+// The aged first play, when nothing services the access point before the
+// first key request. The peer closes the idle connection; the client does not
+// notice. The first key request then starts the receive loop and writes at
+// the same moment. With the write ordered first (the barrier holds the loop's
+// read until the write has returned), the request goes onto the closed
+// connection, the write succeeds, the loop then sees the close and
+// reconnects. v0.9.1 lost the request there and ended it at its 15 second
+// deadline. STOP if this fails: with patch 0002 the request is not sent
+// again, and ends at once, with ConnectionReplacedError{1, 2}, the positive
+// evidence ddsonic opens the track once more on.
+func TestDDSonicContractUnservicedPeerCloseReplacesFirstKey(t *testing.T) {
+	f, a, c1 := agedAP(t)
+
+	// Unserviced: a ping is not answered, and the peer's close not noticed.
+	if err := c1.Send(ap.PacketTypePing, []byte{0, 0, 0, 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c1.Wait(ap.PacketTypePong, 300*time.Millisecond); ok {
+		t.Fatal("EXPECTATION CHANGED: an access point nobody services answered a ping")
+	}
+	if err := c1.PeerClose(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if n := f.Logins(); n != 1 {
+		t.Fatalf("EXPECTATION CHANGED: an access point nobody services reconnected by itself (%d logins)", n)
+	}
+
+	// The first key request, its write ordered before the loop's first read.
+	release, writes := ap.DDSonicContractGateReads(a)
+	t.Cleanup(release) // R70-1: a failure before the release below must not leave the loop's read held
+	out := requestKey(context.Background(), NewAudioKeyProvider(&librespot.NullLogger{}, a))
+	for i := 0; i < 2; i++ { // the packet, and its mac
+		select {
+		case err := <-writes:
+			if err != nil {
+				t.Fatalf("the key request's write to the peer-closed connection failed (%v): this ordering is not the lost one", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the first key request was not written")
+		}
+	}
+	if _, ok := c1.Wait(ap.PacketTypeRequestKey, 5*time.Second); !ok {
+		t.Fatal("the first key request did not reach the closed connection")
+	}
+	release()
+
+	// The loop now sees the close and reconnects; the request is replaced,
+	// promptly, and not sent again.
+	c2 := f.Next(10 * time.Second)
+	if c2 == nil {
+		t.Fatal("the access point did not reconnect once its receive loop ran")
+	}
+	r := awaitKey(t, "the replaced key request", out, 5*time.Second)
+	var replaced *ConnectionReplacedError
+	if !errors.As(r.err, &replaced) || replaced.Sent != 1 || replaced.Now != 2 {
+		t.Fatalf("STOP: the first key request = %x, %v; want ConnectionReplacedError{1, 2}", r.key, r.err)
+	}
+	if _, ok := c2.Wait(ap.PacketTypeRequestKey, time.Second); ok {
+		t.Fatal("STOP: the key request was sent again on the new connection")
+	}
+}
+
+// STOP if this fails: it is ddsonic's fix for the aged first play. With the
+// access point serviced from the start, pings are answered; when the peer
+// closes the idle connection the client notices and re-authenticates by
+// itself, with no request made; and the first key request, made afterwards,
+// is answered promptly on the new connection.
+func TestDDSonicContractServicedPeerCloseFirstKeySucceeds(t *testing.T) {
+	f, a, c1 := agedAP(t)
+	service(a)
+
+	if err := c1.Send(ap.PacketTypePing, []byte{0, 0, 0, 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c1.Wait(ap.PacketTypePong, 5*time.Second); !ok {
+		t.Fatal("a serviced access point did not answer a ping")
+	}
+	if err := c1.PeerClose(); err != nil {
+		t.Fatal(err)
+	}
+	c2 := f.Next(10 * time.Second)
+	if c2 == nil || f.Logins() != 2 {
+		t.Fatalf("a serviced access point did not re-authenticate after its peer closed (%d logins)", f.Logins())
+	}
+
+	out := requestKey(context.Background(), NewAudioKeyProvider(&librespot.NullLogger{}, a))
+	answer(t, c2)
+	r := awaitKey(t, "the aged first key request", out, 5*time.Second)
+	if r.err != nil || !bytes.Equal(r.key, contractKey) {
+		t.Fatalf("the aged first key request = %x, %v; want the key", r.key, r.err)
+	}
+	if r.in > 2*time.Second {
+		t.Errorf("the aged first key request took %v", r.in)
+	}
+	if _, ok := c1.Wait(ap.PacketTypeRequestKey, 100*time.Millisecond); ok {
+		t.Error("the aged first key request went to the closed connection")
+	}
+}
+
+// A key request that is in flight when the connection is replaced. STOP if
+// this fails: the access point's generation moves from 1 to 2 at the
+// reconnect, the request is not sent again, and it ends by itself with
+// ConnectionReplacedError{1, 2}, with its caller's context still live. A
+// request made again on the same provider is answered on the new connection.
+func TestDDSonicContractInFlightKeyAcrossReconnect(t *testing.T) {
+	f, a, c1 := agedAP(t)
+	service(a)
+	p := NewAudioKeyProvider(&librespot.NullLogger{}, a)
+
+	if g, _ := a.Generation(); g != 1 {
+		t.Fatalf("STOP: an authenticated access point is at generation %d, want 1", g)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	first := requestKey(ctx, p)
+	if _, ok := c1.Wait(ap.PacketTypeRequestKey, 5*time.Second); !ok {
+		t.Fatal("the key request did not reach the access point")
+	}
+	if err := c1.PeerClose(); err != nil { // unanswered, and the connection goes
+		t.Fatal(err)
+	}
+	c2 := f.Next(10 * time.Second)
+	if c2 == nil {
+		t.Fatal("the access point did not reconnect")
+	}
+	r := awaitKey(t, "the in-flight key request", first, 5*time.Second)
+	var replaced *ConnectionReplacedError
+	if !errors.As(r.err, &replaced) || replaced.Sent != 1 || replaced.Now != 2 {
+		t.Fatalf("STOP: the in-flight key request = %x, %v; want ConnectionReplacedError{1, 2}", r.key, r.err)
+	}
+	if g, _ := a.Generation(); g != 2 {
+		t.Fatalf("STOP: the reconnect left the generation at %d, want 2", g)
+	}
+	if _, ok := c2.Wait(ap.PacketTypeRequestKey, time.Second); ok {
+		t.Fatal("STOP: the in-flight key request was sent again on the new connection")
+	}
+	again := requestKey(context.Background(), p)
+	answer(t, c2)
+	r = awaitKey(t, "the key request made again", again, 5*time.Second)
+	if r.err != nil || !bytes.Equal(r.key, contractKey) {
+		t.Fatalf("STOP: the key request made again = %x, %v; want the key", r.key, r.err)
+	}
+}
+
+// STOP if this fails: it is the evidence ddsonic rebuilds a session on. An
+// access point whose reconnect fails for good closes itself: Done closes,
+// and a key request fails at once with ErrAccesspointClosed.
+func TestDDSonicContractFailedReconnectClosesAccessPoint(t *testing.T) {
+	_, a, c1 := agedAP(t)
+	service(a)
+	ap.DDSonicContractForgetWelcome(a)
+	if err := c1.PeerClose(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-a.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("the access point did not close itself after its reconnect failed for good")
+	}
+	r := awaitKey(t, "a key request on the closed access point", requestKey(context.Background(), NewAudioKeyProvider(&librespot.NullLogger{}, a)), 5*time.Second)
+	if !errors.Is(r.err, ap.ErrAccesspointClosed) {
+		t.Fatalf("a key request on the closed access point = %v, want ap.ErrAccesspointClosed", r.err)
+	}
+}
+
+// sdkLoops counts the goroutines inside each of the SDK's loops that an
+// access point and its key provider run: the provider's writer and receiver,
+// the access point's receive loop, and its pong ticker.
+func sdkLoops() (writers, receivers, recvLoops, tickers int) {
+	buf := make([]byte, 8<<20)
+	for _, g := range strings.Split(string(buf[:runtime.Stack(buf, true)]), "\n\n") {
+		switch {
+		case strings.Contains(g, "audio.(*KeyProvider).writer("):
+			writers++
+		case strings.Contains(g, "audio.(*KeyProvider).receiver("):
+			receivers++
+		case strings.Contains(g, "ap.(*Accesspoint).recvLoop("):
+			recvLoops++
+		case strings.Contains(g, "ap.(*Accesspoint).pongAckTicker("):
+			tickers++
+		}
+	}
+	return
+}
+
+// loopsAt waits, within 10 s, for the SDK's loops to number n each, and
+// reports whether they did and the last counts.
+func loopsAt(n int) (ok bool, writers, receivers, recvLoops, tickers int) {
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		writers, receivers, recvLoops, tickers = sdkLoops()
+		if writers == n && receivers == n && recvLoops == n && tickers == n {
+			return true, writers, receivers, recvLoops, tickers
+		}
+		if time.Now().After(deadline) {
+			return false, writers, receivers, recvLoops, tickers
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// awaitLoops waits for the SDK's loops to number n each. Its failure says
+// what it always said, then every goroutine's stack (R70-1).
+func awaitLoops(t *testing.T, what string, n int) {
+	t.Helper()
+	if ok, writers, receivers, recvLoops, tickers := loopsAt(n); !ok {
+		t.Fatalf("%s: %d key writers, %d key receivers, %d receive loops and %d pong tickers are running, want %d of each\ngoroutines at the failure:\n%s", what, writers, receivers, recvLoops, tickers, n, contractStacks())
+	}
+}
+
+// quietLoops is awaitLoops(0) for a cleanup (R70-1): the same bound and the
+// same text, as an Errorf, so the cleanups after it (the fake's) still run.
+func quietLoops(t *testing.T, what string) {
+	t.Helper()
+	if ok, writers, receivers, recvLoops, tickers := loopsAt(0); !ok {
+		t.Errorf("%s: %d key writers, %d key receivers, %d receive loops and %d pong tickers are running, want %d of each\ngoroutines at the failure:\n%s", what, writers, receivers, recvLoops, tickers, 0, contractStacks())
+	}
+}
+
+// STOP if this fails: nothing of an access point's key service outlives it,
+// and a late answer reaches nobody. A request in flight when its connection
+// is replaced ends with ConnectionReplacedError; the same track asked for on a
+// new access point gets its own answer, though both requests carry the same
+// sequence number; closing the old access point ends its key writer and
+// receiver, its receive loop and its ticker, with no answer needed from the
+// server.
+//
+// Two rounds on one synthetic access point. In one the server never answers
+// the replaced request; in the other it answers it late, on the old access
+// point's new connection, and the answer is discarded there. Every round ends
+// with nothing of the old access point running, before the new one is closed.
+func TestDDSonicContractCloseEndsTheKeyServiceAndLateAnswers(t *testing.T) {
+	f, err := ap.DDSonicContractFakeAP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(f.Close)
+	// R70-1: after every access point's own cleanup below and before the
+	// fake's, nothing of the SDK's loops is left. The rounds keep their own
+	// 2 -> 1 -> 0 counts; this is the test's final boundary only.
+	t.Cleanup(func() { quietLoops(t, "after the test's access points were closed") })
+	connect := func() (*ap.Accesspoint, *ap.DDSonicFakeConn, *KeyProvider) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		a, err := f.Connect(ctx)
+		if err != nil {
+			t.Fatalf("connecting to the synthetic access point: %v", err)
+		}
+		// R70-1: owned on every path. On the normal one the round has
+		// already closed it, and Close is idempotent.
+		t.Cleanup(func() { closeJoined(t, "cleanup", a) })
+		c := f.Next(5 * time.Second)
+		if c == nil {
+			t.Fatal("the synthetic access point saw no login")
+		}
+		service(a)
+		return a, c, NewAudioKeyProvider(&librespot.NullLogger{}, a)
+	}
+	awaitLoops(t, "before anything is connected", 0)
+
+	lateKey := []byte("LATE-ANSWER-0000")
+	for round, late := range []bool{false, true} {
+		// The old bundle: a key request goes out, and the connection is
+		// replaced under it with no answer.
+		old, c1, oldKeys := connect()
+		lost := requestKey(context.Background(), oldKeys)
+		lostReq, ok := c1.Wait(ap.PacketTypeRequestKey, 5*time.Second)
+		if !ok {
+			t.Fatalf("round %d: the key request did not reach the access point", round)
+		}
+		if err := c1.PeerClose(); err != nil {
+			t.Fatal(err)
+		}
+		c2 := f.Next(10 * time.Second)
+		if c2 == nil {
+			t.Fatalf("round %d: the access point did not reconnect", round)
+		}
+		var replaced *ConnectionReplacedError
+		if r := awaitKey(t, "the replaced key request", lost, 5*time.Second); !errors.As(r.err, &replaced) {
+			t.Fatalf("round %d: the replaced key request = %x, %v; want ConnectionReplacedError", round, r.key, r.err)
+		}
+		awaitLoops(t, "with the old access point reconnected", 1)
+
+		// The replacement bundle: the same track is asked for again. Its
+		// request has the sequence number the replaced one had.
+		fresh, c3, freshKeys := connect()
+		again := requestKey(context.Background(), freshKeys)
+		freshReq, ok := c3.Wait(ap.PacketTypeRequestKey, 5*time.Second)
+		if !ok {
+			t.Fatalf("round %d: the request made again did not reach the new access point", round)
+		}
+		if !bytes.Equal(freshReq.Payload, lostReq.Payload) {
+			t.Fatalf("round %d: the request made again is not the replaced one over (%x, %x): the test shows nothing about sequence numbers", round, freshReq.Payload, lostReq.Payload)
+		}
+		if late { // an answer for the replaced request, on the old access point
+			if err := c2.AnswerKey(lostReq, lateKey); err != nil {
+				t.Fatal(err)
+			}
+			kpUntil(t, "the late answer discarded by the old provider", func() bool { return kpState(oldKeys).unknown == 1 })
+		}
+		if err := c3.AnswerKey(freshReq, contractKey); err != nil {
+			t.Fatal(err)
+		}
+		r := awaitKey(t, "the request made again", again, 5*time.Second)
+		if r.err != nil || !bytes.Equal(r.key, contractKey) {
+			t.Fatalf("round %d: the request made again = %x, %v; want its own key, not the late answer", round, r.key, r.err)
+		}
+		awaitLoops(t, "with both access points up", 2)
+
+		// The old bundle is retired: its access point is closed.
+		go old.Close()
+		select {
+		case <-old.Done():
+		case <-time.After(5 * time.Second):
+			t.Fatalf("round %d: closing the old access point did not close Done", round)
+		}
+		awaitLoops(t, "after the old access point was closed", 1)
+
+		go fresh.Close()
+		awaitLoops(t, "after the round", 0)
+	}
+}

@@ -55,12 +55,16 @@ func ddsonicSetupProviders() []providerSpec {
 		"Otherwise ddsonic uses the built-in client_id shared by every",
 		"librespot-based player, which Spotify rate-limits more often.",
 		"",
-		"You sign in the first time you open Spotify in ddsonic.",
+		"You sign in from ddsonic's library: open Spotify there and",
+		"press Enter on \"Sign in to Spotify\".",
 	}
 	spotify.save = mergeSave(spotify)
 
 	ytmusic.intro = []string{
 		"Your YouTube Music playlists and liked music. Needs yt-dlp.",
+		"Saved Library Albums and followed artists are not synchronized:",
+		"\"Albums from tracks\" and \"Artists from tracks\" group what those",
+		"tracks name, and albums may be incomplete.",
 		"",
 		"Browser cookies need no setup beyond a browser signed in to",
 		"YouTube. On Linux, name a Chrome-family browser with its keyring,",
@@ -114,7 +118,7 @@ func localSetupSpec() providerSpec {
 			if err != nil {
 				return "", err
 			}
-			if err := setTopLevelKey("initial_directory", `"`+dir+`"`); err != nil {
+			if err := setTopLevelKey("initial_directory", config.QuoteString(dir)); err != nil {
 				return "", err
 			}
 			return "Saved initial_directory = " + dir + ".", nil

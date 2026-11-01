@@ -34,6 +34,7 @@ type StreamerFactory func(uri string) (beep.StreamSeekCloser, beep.Format, time.
 type Player struct {
 	mu              sync.Mutex
 	lifecycleMu     sync.Mutex // serializes source commits without covering setup or process waits
+	ytdlLoads       ytdlLoads  // ddsonic: YouTube tracks still loading (ytdl_load_ddsonic.go)
 	sr              beep.SampleRate
 	gapless         *gaplessStreamer
 	current         *trackPipeline // active track's resources
@@ -196,6 +197,7 @@ func (p *Player) PlayAt(path string, knownDuration, offset time.Duration) error 
 func (p *Player) SetPlaybackGeneration(generation uint64) {
 	p.lifecycleMu.Lock()
 	p.playGen.Store(generation)
+	p.declareYTDLPlayback() // ddsonic: the request before this one is no longer wanted
 	p.lifecycleMu.Unlock()
 }
 
@@ -235,14 +237,25 @@ func (p *Player) PlayYTDLForGeneration(pageURL string, knownDuration time.Durati
 }
 
 func (p *Player) playYTDL(pageURL string, knownDuration time.Duration, generation uint64, requireCurrent bool) error {
+	// ddsonic: the load is cancelled when its track is no longer wanted
+	// (ytdl_load_ddsonic.go). A request without a generation supersedes the
+	// loads before it itself.
+	if !requireCurrent {
+		p.discardYTDLLoads(ytdlPlayLoad)
+	}
+	load := p.beginYTDLLoad(ytdlPlayLoad, generation, requireCurrent)
+	defer p.endYTDLLoad(load) // ends the load, and its probe, unless it was installed
+	if load.unwanted() {
+		return ytdlLoadResult(load, requireCurrent, nil)
+	}
 	// Probe duration concurrently with pipeline setup so it doesn't delay playback.
 	probeCh := make(chan time.Duration, 1)
 	if knownDuration == 0 {
-		go func() { probeCh <- probeYTDLDuration(pageURL) }()
+		go func() { probeCh <- probeYTDLDuration(load.ctx, pageURL) }()
 	}
-	tp, err := p.buildYTDLPipeline(pageURL, 0)
+	tp, err := p.buildYTDLPipeline(load, pageURL, 0)
 	if err != nil {
-		return err
+		return ytdlLoadResult(load, requireCurrent, err)
 	}
 	if knownDuration == 0 {
 		// The probe ran concurrently with buildYTDLPipeline. Try to
@@ -277,6 +290,11 @@ func (p *Player) playPipeline(tp *trackPipeline) error {
 func (p *Player) playPipelineForGeneration(tp *trackPipeline, generation uint64) error {
 	p.lifecycleMu.Lock()
 	if generation != 0 && p.playGen.Load() != generation {
+		p.lifecycleMu.Unlock()
+		go tp.close()
+		return nil
+	}
+	if !p.claimYTDLLoad(tp) { // ddsonic: its load was discarded
 		p.lifecycleMu.Unlock()
 		go tp.close()
 		return nil
@@ -366,17 +384,14 @@ func (p *Player) Preload(path string, knownDuration time.Duration) error {
 
 // PreloadYTDL builds a yt-dlp pipe pipeline and queues it for gapless transition.
 func (p *Player) PreloadYTDL(pageURL string, knownDuration time.Duration) error {
-	tp, err := p.buildYTDLPipeline(pageURL, 0)
-	if err != nil {
-		return err
-	}
-	tp.knownDuration = knownDuration
-	return p.preloadPipeline(tp)
+	return p.preloadYTDL(pageURL, knownDuration, 0, false) // ddsonic
 }
 
 // BeginPreload invalidates older preload work and returns the current token.
 func (p *Player) BeginPreload() uint64 {
-	return p.preloadGen.Add(1)
+	gen := p.preloadGen.Add(1)
+	p.discardYTDLLoads(ytdlPreloadLoad) // ddsonic: the preload before this one is no longer wanted
+	return gen
 }
 
 // PreloadForGeneration queues a stream only when generation is still current.
@@ -391,12 +406,7 @@ func (p *Player) PreloadForGeneration(path string, knownDuration time.Duration, 
 
 // PreloadYTDLForGeneration queues a yt-dlp stream only when generation is still current.
 func (p *Player) PreloadYTDLForGeneration(pageURL string, knownDuration time.Duration, generation uint64) error {
-	tp, err := p.buildYTDLPipeline(pageURL, 0)
-	if err != nil {
-		return err
-	}
-	tp.knownDuration = knownDuration
-	return p.preloadPipelineForGeneration(tp, generation)
+	return p.preloadYTDL(pageURL, knownDuration, generation, true) // ddsonic
 }
 
 // preloadPipeline queues a ready trackPipeline for gapless transition.
@@ -410,6 +420,12 @@ func (p *Player) preloadPipelineForGeneration(tp *trackPipeline, generation uint
 	speaker.Lock()
 	p.mu.Lock()
 	if generation != 0 && p.preloadGen.Load() != generation {
+		p.mu.Unlock()
+		speaker.Unlock()
+		go tp.close()
+		return nil
+	}
+	if !p.claimYTDLLoad(tp) { // ddsonic: its load was discarded
 		p.mu.Unlock()
 		speaker.Unlock()
 		go tp.close()
@@ -434,6 +450,7 @@ func (p *Player) preloadPipelineForGeneration(tp *trackPipeline, generation uint
 // pipeline we're about to close.
 func (p *Player) ClearPreload() {
 	p.preloadGen.Add(1)
+	p.discardYTDLLoads(ytdlPreloadLoad) // ddsonic
 	speaker.Lock()
 	p.gapless.SetNext(nil)
 	speaker.Unlock()
@@ -481,6 +498,10 @@ func (p *Player) Stop() {
 	// so it cannot arm a next track on the stopped player.
 	p.preloadGen.Add(1)
 	p.lifecycleMu.Lock()
+	// ddsonic: a YouTube track still loading has no pipeline to stop yet.
+	// Discarded under lifecycleMu, a load is either installed before this
+	// and stopped below, or refused when it is ready.
+	p.stopYTDLLoads()
 	p.mu.Lock()
 	active := p.current
 	p.mu.Unlock()
@@ -643,6 +664,7 @@ func (p *Player) commitPreparedSeek(cur *trackPipeline, seeker preparedFFmpegSee
 // SeekYTDL to discard its result instead of swapping streams.
 func (p *Player) CancelSeekYTDL() {
 	p.seekGen.Add(1)
+	p.discardYTDLLoads(ytdlSeekLoad) // ddsonic
 }
 
 // SeekYTDL seeks a yt-dlp stream by restarting the pipeline at the target
@@ -650,21 +672,41 @@ func (p *Player) CancelSeekYTDL() {
 // If a newer seek is requested (via CancelSeekYTDL) while this one is
 // building, the result is discarded.
 func (p *Player) SeekYTDL(d time.Duration) error {
+	// ddsonic: what is playing and the count of Stops are noted together,
+	// under the lock Stop holds from counting itself to clearing what is
+	// playing. A seek sees a Stop either not at all, and is then discarded
+	// by it or refused when it registers, or completely, and finds nothing
+	// to seek in. Only the noting is under the lock; yt-dlp is not.
+	p.lifecycleMu.Lock()
 	gen := p.seekGen.Load()
-
+	seek := p.noteYTDLSeek(gen)
 	// Snapshot current state without speaker lock.
 	p.mu.Lock()
 	cur := p.current
 	p.mu.Unlock()
+	p.lifecycleMu.Unlock()
 	if cur == nil || !cur.ytdlSeek {
 		return nil
 	}
+	ytdlSeekNoted() // ddsonic: a seam for tests
 
 	// Read position, then mute the current stream so the speaker outputs
 	// silence while the new pipeline is being built (which blocks on Peek
 	// waiting for yt-dlp data). Without this, the old audio keeps playing
 	// at the pre-seek position during the rebuild.
 	speaker.Lock()
+	// ddsonic: only if cur is still what is playing and the seek is still
+	// wanted, judged under the locks a replacement is made under. Otherwise
+	// this would mute the track that replaced cur, which nothing would
+	// unmute: the seek's load is refused and its recovery leaves a track
+	// that is not its own alone.
+	p.mu.Lock()
+	overtaken := p.current != cur || !p.ytdlSeekWanted(seek)
+	p.mu.Unlock()
+	if overtaken {
+		speaker.Unlock()
+		return nil
+	}
 	curPos := ytdlPlayedPosition(cur) // ddsonic: upstream 70e5f79e (ytdl_ddsonic.go)
 	p.gapless.Replace(nil)
 	p.gaplessAdvance.Store(false)
@@ -677,10 +719,13 @@ func (p *Player) SeekYTDL(d time.Duration) error {
 	startSec := int(newPos.Seconds())
 
 	// Build pipeline WITHOUT speaker lock (this is the slow part — spawns yt-dlp).
-	tp, err := p.buildYTDLPipeline(cur.path, startSec)
+	ytdlSeekCaptured()                // ddsonic: a seam for tests
+	load := p.beginYTDLSeekLoad(seek) // ddsonic: discarded by Stop, another track and a newer seek
+	defer p.endYTDLLoad(load)
+	tp, err := p.buildYTDLPipeline(load, cur.path, startSec)
 	if err != nil {
 		p.restoreYTDLSeekSource(cur, gen)
-		return fmt.Errorf("yt-dlp seek: %w", err)
+		return seekYTDLFailed(load, err) // ddsonic: a discarded seek is not a failure
 	}
 	tp.knownDuration = cur.knownDuration
 	tp.ytdlSeek = true
@@ -699,7 +744,7 @@ func (p *Player) SeekYTDL(d time.Duration) error {
 func (p *Player) commitYTDLSeek(cur, replacement *trackPipeline, gen int64) bool {
 	speaker.Lock()
 	p.mu.Lock()
-	if p.seekGen.Load() != gen || p.current != cur {
+	if p.seekGen.Load() != gen || p.current != cur || !p.claimYTDLLoad(replacement) { // ddsonic: or its load was discarded
 		p.mu.Unlock()
 		speaker.Unlock()
 		return false

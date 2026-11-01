@@ -31,6 +31,7 @@ var nameLiterals = map[string]struct {
 	"cmd/setup_ddsonic.go":        {5, "sentences of setup help, one naming docs/ddsonic/youtube.md"},
 	"commands_ddsonic.go":         {1, "the path docs/ddsonic/youtube.md in an error"},
 	"catalog/sqlite/store.go":     {1, "an error's text; the catalog packages import no application identity"},
+	"acceptance/catalog.go":       {1, "the path docs/ddsonic/acceptance/cases.yaml"},
 }
 
 // TestProductNameIsWrittenInOnePlace fails when a string in production Go

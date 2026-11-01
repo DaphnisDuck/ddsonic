@@ -21,9 +21,11 @@ import (
 // one test.
 func stubSessionSetup(t *testing.T, timeout time.Duration, create func(context.Context, string) (*Session, error)) {
 	t.Helper()
+	quiesce(t) // a setup still running reads these
 	oldCreate, oldTimeout := newSessionSilent, sessionSetupTimeout
 	newSessionSilent, sessionSetupTimeout = create, timeout
 	t.Cleanup(func() { newSessionSilent, sessionSetupTimeout = oldCreate, oldTimeout })
+	settleBackground(t)
 }
 
 // returnsWithin fails the test when fn has not returned after limit: the
@@ -87,9 +89,10 @@ func TestEnsureSessionEndsAStalledSetup(t *testing.T) {
 	}
 }
 
-// A caller that arrives while a setup is stalled waits for the lock. It must
-// get its turn when the stalled setup times out, not wait forever.
-func TestEnsureSessionCallerBehindAStalledSetupGetsItsTurn(t *testing.T) {
+// A caller that arrives while a setup is stalled shares it: one build from
+// the stored credential runs at a time. It is not made to wait forever: it
+// gets the stalled setup's own end, and the call after that sets up again.
+func TestEnsureSessionCallerBehindAStalledSetupGetsItsEnd(t *testing.T) {
 	entered := make(chan struct{}, 2)
 	var calls atomic.Int32
 	stubSessionSetup(t, 50*time.Millisecond, func(ctx context.Context, _ string) (*Session, error) {
@@ -102,14 +105,17 @@ func TestEnsureSessionCallerBehindAStalledSetupGetsItsTurn(t *testing.T) {
 
 	first := make(chan error, 1)
 	go func() { first <- p.ensureSession() }()
-	<-entered // the first setup is stalled and holds the lock
+	<-entered // the first setup is stalled
 
 	err := returnsWithin(t, 5*time.Second, "a second ensureSession behind a stalled one", p.ensureSession)
-	if err == nil || calls.Load() != 2 {
-		t.Fatalf("the second caller: error = %v, setups = %d; want it to run its own setup after the first timed out", err, calls.Load())
+	if !errors.Is(err, context.DeadlineExceeded) || calls.Load() != 1 {
+		t.Fatalf("the second caller: error = %v, setups = %d; want the one stalled setup's deadline error", err, calls.Load())
 	}
 	if err := <-first; !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("the first caller's error = %v, want the deadline error", err)
+	}
+	if err := returnsWithin(t, 5*time.Second, "the call after the stalled setup", p.ensureSession); err == nil || calls.Load() != 2 {
+		t.Fatalf("the next caller: error = %v, setups = %d; want it to set up again", err, calls.Load())
 	}
 }
 

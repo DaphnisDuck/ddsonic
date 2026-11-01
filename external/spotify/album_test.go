@@ -11,8 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-
-	"golang.org/x/oauth2"
 )
 
 // albumSpotify fakes the album endpoints plus a search that returns both albums
@@ -95,7 +93,7 @@ func albumSpotify(t *testing.T, albumHits, trackHits, albumTracks int) (*Spotify
 	})
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
 
-	sess := &Session{tokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "token"})}
+	sess := staticSession()
 	return New(sess, "client", 320), &searchType
 }
 

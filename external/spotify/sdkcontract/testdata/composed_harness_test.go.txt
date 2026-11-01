@@ -1,0 +1,2633 @@
+package spotify
+
+// ddsonic composed stage (M3b2, plan v7): the harness. This file exists only
+// in the overlay the SDK contract runner builds for its composed step
+// (external/spotify/zz_ddsonic_composed_harness_test.go); go test ./... never
+// compiles it. It runs the real ddsonic Session and provider over the real
+// SDK constructor and player, with only remote services and the access point
+// replaced by loopback fixtures (plan v7 §2):
+//
+//   - the router (§2.2), installed as http.DefaultTransport, with its exact
+//     allowlist, lifecycle states and scoped expectations;
+//   - F-HTTP, the fixture server behind it, and F-AP with the D10 observer
+//     (§2.3, ap_composed_observer.go.txt);
+//   - serial ownership with poison (§2.4);
+//   - teardown T1-T10, the selectors Q, branch F with its checkpoint F1a,
+//     the global-write rule and the happens-before set H (§2.5);
+//   - the call-through observations D1-D5 and D11 (§2.7).
+//
+// Lines marked "MUTATION-POINT <name>" are where a control's named mutant
+// changes this file (the mutant inputs are kept with the run logs).
+
+import (
+	"bytes"
+	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"math"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	librespot "github.com/devgianlu/go-librespot"
+	"github.com/devgianlu/go-librespot/ap"
+	"github.com/devgianlu/go-librespot/flac"
+	"github.com/devgianlu/go-librespot/mp3"
+	librespotPlayer "github.com/devgianlu/go-librespot/player"
+	pbct "github.com/devgianlu/go-librespot/proto/spotify/clienttoken/http/v0"
+	downloadpb "github.com/devgianlu/go-librespot/proto/spotify/download"
+	extmetadatapb "github.com/devgianlu/go-librespot/proto/spotify/extendedmetadata"
+	audiofilespb "github.com/devgianlu/go-librespot/proto/spotify/extendedmetadata/audiofiles"
+	pblogin5 "github.com/devgianlu/go-librespot/proto/spotify/login5/v3"
+	metadatapb "github.com/devgianlu/go-librespot/proto/spotify/metadata"
+	"github.com/devgianlu/go-librespot/session"
+	"github.com/gopxl/beep/v2"
+	"golang.org/x/oauth2"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
+)
+
+// ---------------------------------------------------------------------------
+// Errors the router answers with.
+
+var (
+	errComposedUnroutable = errors.New("composed router: request not on the allowlist")
+	errComposedLateUse    = errors.New("composed router: closed: a late use")
+	errComposedPoisoned   = errors.New("composed router: poisoned")
+)
+
+// ---------------------------------------------------------------------------
+// The router (plan v7 §2.2).
+
+type routerState int32
+
+const (
+	routerOpen routerState = iota
+	routerClosed
+	routerPoisoned
+)
+
+func (s routerState) String() string {
+	return [...]string{"open", "closed", "poisoned"}[s]
+}
+
+// composedRecord is one request as the router saw it.
+type composedRecord struct {
+	Seq    int64
+	Method string
+	Host   string
+	Path   string
+	Query  string
+	Class  string // A1..A9, or "" when unmatched
+	Phase  string
+	Why    string // for a violation: unmatched, phase, 3xx
+	Stack  string
+	Time   time.Time
+	CtxErr string // the request context's state at entry; "" when live (plan v9 §2.2)
+	CtxID  string // the identity of the request's context
+}
+
+func (r composedRecord) String() string {
+	return fmt.Sprintf("#%d %s %s%s class=%q phase=%s why=%s ctx=%q", r.Seq, r.Method, r.Host, r.Path, r.Class, r.Phase, r.Why, r.CtxErr)
+}
+
+// composedAttempt is one call into the router, in any state: the attempt
+// ledger the checked cut and the watches read (plan v9 §2.2, §2.5). An
+// attempt is a transport call, never evidence of network I/O.
+type composedAttempt struct {
+	Seq       int64
+	Host      string
+	Path      string
+	Range     string
+	CtxErr    string // the request context's state at entry; "" when live
+	CtxID     string // the identity of the request's context
+	State     string // the router's state when it took the call
+	Local     bool   // refused inside the router: never delegated
+	Delegated bool
+	Done      bool   // RoundTrip has returned
+	Err       string // what RoundTrip returned
+}
+
+// composedTailGate is FC13's reader-tail gate (plan v9 §2.5): it parks, at
+// RoundTrip entry and before the router's state is read, each attempt for
+// its path whose context had ended at entry, until T5r (or F2) opens it.
+type composedTailGate struct {
+	path      string
+	open      chan struct{}
+	openOnce  sync.Once
+	first     chan struct{}
+	firstOnce sync.Once
+	parked    atomic.Int32
+}
+
+func (g *composedTailGate) park() {
+	g.parked.Add(1)
+	g.firstOnce.Do(func() { close(g.first) })
+	<-g.open
+}
+
+// FirstParked is closed when the gate parks its first attempt.
+func (g *composedTailGate) FirstParked() <-chan struct{} { return g.first }
+
+// composedDelegHold is FC14's router delegation hold (plan v9 §2.5): it
+// parks a matching attempt after admission and before delegation.
+type composedDelegHold struct {
+	path, rng string
+	parked    chan struct{}
+	parkOnce  sync.Once
+	release   chan struct{}
+	relOnce   sync.Once
+}
+
+func (d *composedDelegHold) Parked() <-chan struct{} { return d.parked }
+func (d *composedDelegHold) Release()                { d.relOnce.Do(func() { close(d.release) }) }
+
+// composedDue is when a declared late use becomes due (plan v9 §2.2).
+type composedDue int
+
+const (
+	dueT9    composedDue = iota // provoked before T9: checked exactly at T9
+	dueFinal                    // provoked after the test's own teardown: checked by ZZ
+)
+
+// composedPattern names requests exactly: method, host and path, each
+// either a literal or "*" for any.
+type composedPattern struct{ Method, Host, Path string }
+
+func (p composedPattern) matches(r composedRecord) bool {
+	m := func(want, got string) bool { return want == "*" || want == got }
+	return m(p.Method, r.Method) && m(p.Host, r.Host) && m(p.Path, r.Path)
+}
+
+func (p composedPattern) String() string { return p.Method + " " + p.Host + p.Path }
+
+type composedRouter struct {
+	name        string
+	fixtureAddr string // the F-HTTP listener: the only address ever dialled
+	transport   *http.Transport
+	state       atomic.Int32 // a routerState; loaded by every RoundTrip
+
+	mu           sync.Mutex
+	seq          int64
+	phase        string
+	allowControl bool
+	inFlight     int // client-side RoundTrips inside the router
+	log          []composedRecord
+	violations   []composedRecord
+	lateUses     []composedRecord
+	poisonUses   []composedRecord
+	dials        []string
+	counts       map[string]int // phase/class
+	// declared late uses: the only late uses this router may record (ZZ,
+	// over its whole life), and those due at T9 (plan v9 §2.2).
+	declaredLate map[composedPattern]int
+	dueLate      map[composedPattern]composedDue
+	// attempts is every call into RoundTrip, in order (plan v9 §2.2).
+	attempts []*composedAttempt
+	// events is the harness's event log (FC5): who received which request.
+	events func(string)
+
+	tailGate  atomic.Pointer[composedTailGate]  // FC13 only
+	delegHold atomic.Pointer[composedDelegHold] // FC14 only
+}
+
+func newComposedRouter(name, fixtureAddr string) *composedRouter {
+	r := &composedRouter{name: name, fixtureAddr: fixtureAddr, phase: "P-H", counts: map[string]int{}, declaredLate: map[composedPattern]int{}, dueLate: map[composedPattern]composedDue{}}
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	r.transport = &http.Transport{
+		Proxy:             nil,
+		ForceAttemptHTTP2: false,
+		TLSClientConfig:   nil,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			target := r.fixtureAddr // MUTATION-POINT FC4: target := addr
+			r.mu.Lock()
+			r.dials = append(r.dials, target)
+			r.mu.Unlock()
+			return dialer.DialContext(ctx, "tcp", target)
+		},
+		MaxIdleConnsPerHost: 16,
+	}
+	return r
+}
+
+var (
+	reStorage = regexp.MustCompile(`^/storage-resolve/v2/files/audio/interactive/[0-9]+/[0-9a-f]{40}$`)
+	reCDN     = regexp.MustCompile(`^/audio/[0-9a-f]{40}$`)
+	reControl = regexp.MustCompile(`^/followup/[A-Za-z0-9_-]+$`)
+)
+
+// classify is the exact allowlist: method + host + path (plan v7 §2.2).
+func (r *composedRouter) classify(req *http.Request, allowControl bool) string {
+	host, path, m := req.URL.Hostname(), req.URL.Path, req.Method
+	switch host { // MUTATION-POINT FC2: host-only
+	case "clienttoken.spotify.com":
+		if m == "POST" && path == "/v1/clienttoken" {
+			return "A1"
+		}
+	case "apresolve.spotify.com":
+		q := req.URL.Query()
+		if m == "GET" && (path == "/" || path == "") && len(q) == 1 && len(q["type"]) == 1 {
+			switch q["type"][0] {
+			case "accesspoint", "spclient", "dealer":
+				return "A2"
+			}
+		}
+	case "login5.spotify.com":
+		if m == "POST" && path == "/v3/login" {
+			return "A3"
+		}
+	case "spclient.composed.invalid":
+		if m == "POST" && path == "/extended-metadata/v0/extended-metadata" {
+			return "A4"
+		}
+		if m == "GET" && reStorage.MatchString(path) {
+			return "A5"
+		}
+	case "cdn.composed.invalid":
+		if m == "GET" && reCDN.MatchString(path) && req.Header.Get("Range") != "" {
+			return "A6"
+		}
+	case "accounts.spotify.com":
+		if m == "POST" && path == "/api/token" {
+			return "A7"
+		}
+	case "api.spotify.com":
+		return "A8"
+	case "control.composed.invalid":
+		if allowControl && m == "GET" && reControl.MatchString(path) {
+			return "A9"
+		}
+	}
+	return ""
+}
+
+// phaseForbids is the phase rule of plan v7 §3.2.
+func phaseForbids(phase, class string) bool {
+	switch phase {
+	case "P1":
+		return class == "A1" || class == "A2" || class == "A3" || class == "A7" || class == "A8"
+	case "P2":
+		return class == "A7" || class == "A8"
+	}
+	return false
+}
+
+func (r *composedRouter) RoundTrip(req *http.Request) (resp *http.Response, err error) {
+	// The entry observation (plan v9 §2.2): the request context's state and
+	// identity, read before anything else. For a C-cap client this is the
+	// stream's own context (S/session.go:91-92).
+	ctx := req.Context()
+	rec := composedRecord{Method: req.Method, Host: req.URL.Hostname(), Path: req.URL.Path, Query: req.URL.RawQuery, Time: time.Now(), Stack: string(stackOfCaller()), CtxID: fmt.Sprintf("%p", ctx)}
+	if e := ctx.Err(); e != nil {
+		rec.CtxErr = e.Error()
+	}
+	att := &composedAttempt{Host: rec.Host, Path: rec.Path, Range: req.Header.Get("Range"), CtxErr: rec.CtxErr, CtxID: rec.CtxID}
+	// FC13's reader-tail gate: before the router's state is read and before
+	// admission (plan v9 §2.5).
+	if g := r.tailGate.Load(); g != nil && rec.CtxErr != "" && att.Host == "cdn.composed.invalid" && att.Path == g.path {
+		g.park()
+	}
+	switch routerState(r.state.Load()) {
+	case routerClosed:
+		r.mu.Lock()
+		r.seq++
+		rec.Seq, rec.Phase, rec.Why = r.seq, r.phase, "late use"
+		att.Seq, att.State, att.Local, att.Done, att.Err = r.seq, "closed", true, true, errComposedLateUse.Error()
+		r.lateUses = append(r.lateUses, rec)
+		r.attempts = append(r.attempts, att)
+		r.mu.Unlock()
+		if r.events != nil {
+			r.events("late-use:" + r.name)
+		}
+		return nil, errComposedLateUse
+	case routerPoisoned:
+		r.mu.Lock()
+		r.seq++
+		rec.Seq, rec.Phase, rec.Why = r.seq, r.phase, "poisoned"
+		att.Seq, att.State, att.Local, att.Done, att.Err = r.seq, "poisoned", true, true, errComposedPoisoned.Error()
+		r.poisonUses = append(r.poisonUses, rec)
+		r.attempts = append(r.attempts, att)
+		r.mu.Unlock()
+		if r.events != nil {
+			r.events("poison-use:" + rec.Host + rec.Path)
+		}
+		return nil, errComposedPoisoned
+	}
+	r.mu.Lock()
+	r.inFlight++
+	r.seq++
+	rec.Seq, rec.Phase = r.seq, r.phase
+	att.Seq, att.State = r.seq, "open"
+	rec.Class = r.classify(req, r.allowControl)
+	switch {
+	case rec.Class == "":
+		rec.Why = "unmatched"
+	case phaseForbids(rec.Phase, rec.Class):
+		rec.Why = "phase"
+	}
+	r.log = append(r.log, rec)
+	if rec.Why != "" {
+		r.violations = append(r.violations, rec)
+		att.Local = true
+	} else {
+		r.counts[rec.Phase+"/"+rec.Class]++
+	}
+	r.attempts = append(r.attempts, att)
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.inFlight--
+		att.Done = true
+		if err != nil {
+			att.Err = err.Error()
+		}
+		r.mu.Unlock()
+	}()
+	if r.events != nil {
+		r.events("router:" + rec.Host + rec.Path)
+	}
+	if rec.Why != "" {
+		return nil, errComposedUnroutable // MUTATION-POINT FC1
+	}
+	// FC14's delegation hold: after admission, before delegation.
+	if d := r.delegHold.Load(); d != nil && att.Path == d.path && att.Range == d.rng {
+		d.parkOnce.Do(func() { close(d.parked) })
+		<-d.release
+	}
+	out := req.Clone(req.Context()) // MUTATION-POINT FC13-MW
+	out.URL.Scheme = "http"
+	// The correlation of a receipt with its attempt: on the router's own
+	// clone only; the request it received is not changed.
+	out.Header.Set("X-Composed-Seq", strconv.FormatInt(rec.Seq, 10))
+	r.mu.Lock()
+	att.Delegated = true
+	r.mu.Unlock()
+	resp, err = r.transport.RoundTrip(out)
+	if err == nil && resp.StatusCode >= 300 && resp.StatusCode < 400 { // MUTATION-POINT FC3
+		r.mu.Lock()
+		v := rec
+		v.Why = "3xx"
+		r.violations = append(r.violations, v)
+		r.mu.Unlock()
+	}
+	return resp, err
+}
+
+// setState is the router's own, synchronized transition: no global is
+// written (plan v7 §2.2, R25-1).
+func (r *composedRouter) setState(s routerState) { r.state.Store(int32(s)) }
+
+func (r *composedRouter) State() routerState { return routerState(r.state.Load()) }
+
+// Seq is the last attempt ID the router allocated.
+func (r *composedRouter) Seq() int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.seq
+}
+
+// Attempts is a snapshot of the attempt ledger.
+func (r *composedRouter) Attempts() []composedAttempt {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]composedAttempt, len(r.attempts))
+	for i, a := range r.attempts {
+		out[i] = *a
+	}
+	return out
+}
+
+// openTailGate opens FC13's reader-tail gate, if armed: at T5r's start, or
+// at F2 when branch F comes first. It runs once.
+func (r *composedRouter) openTailGate() {
+	if g := r.tailGate.Load(); g != nil {
+		g.openOnce.Do(func() { close(g.open) })
+	}
+}
+
+func (r *composedRouter) SetPhase(p string) {
+	r.mu.Lock()
+	r.phase = p
+	r.mu.Unlock()
+}
+
+// Count is how many allowlisted requests of class were routed in phase.
+func (r *composedRouter) Count(phase, class string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.counts[phase+"/"+class]
+}
+
+// CountHost is how many requests the router saw for host, in any state.
+func (r *composedRouter) CountHost(host string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, rec := range r.log {
+		if rec.Host == host {
+			n++
+		}
+	}
+	return n
+}
+
+func (r *composedRouter) Violations() []composedRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.violations)
+}
+
+func (r *composedRouter) LateUses() []composedRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.lateUses)
+}
+
+func (r *composedRouter) PoisonUses() []composedRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.poisonUses)
+}
+
+func (r *composedRouter) Dials() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.dials)
+}
+
+func (r *composedRouter) Log() []composedRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.log)
+}
+
+// waitIdle waits up to d for the router's client-side in-flight count to be
+// zero. The count is read under the router's mutex, so a reader's earlier
+// load of http.DefaultTransport is ordered before what follows (H).
+func (r *composedRouter) waitIdle(d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for {
+		r.mu.Lock()
+		n := r.inFlight
+		r.mu.Unlock()
+		if n == 0 {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// composedRouters is every router the process created, for ZZNoLateUse.
+var (
+	composedRoutersMu sync.Mutex
+	composedRouters   []*composedRouter
+)
+
+func stackOfCaller() []byte {
+	buf := make([]byte, 16<<10)
+	return buf[:runtime.Stack(buf, false)]
+}
+
+// ---------------------------------------------------------------------------
+// The tripwire: a previous transport that records and refuses.
+
+type composedTripwire struct {
+	calls atomic.Int32
+	log   func(string)
+}
+
+func (w *composedTripwire) RoundTrip(req *http.Request) (*http.Response, error) {
+	w.calls.Add(1)
+	if w.log != nil {
+		w.log("tripwire:" + req.URL.Hostname() + req.URL.Path)
+	}
+	return nil, errors.New("composed tripwire: the previous transport was reached")
+}
+
+// composedRefuseAll is the transport X that FC12's M-T mutant assigns.
+type composedRefuseAll struct {
+	calls atomic.Int32
+	log   func(string)
+}
+
+var errComposedRefusedByX = errors.New("composed refuse-all transport X")
+
+func (x *composedRefuseAll) RoundTrip(req *http.Request) (*http.Response, error) {
+	x.calls.Add(1)
+	if x.log != nil {
+		x.log("X:" + req.URL.Hostname() + req.URL.Path)
+	}
+	return nil, errComposedRefusedByX
+}
+
+// ---------------------------------------------------------------------------
+// The fixture catalog and F-HTTP (plan v7 §2.2, §6.2).
+
+// The decryptor's base IV (T/audio/decryptor.go:16): the fixture encrypts
+// with the same AES-128-CTR the player decrypts with.
+var composedBaseIV = []byte{0x72, 0xe0, 0x67, 0xfb, 0xdd, 0xcb, 0xcf, 0x77, 0xeb, 0xe8, 0xbc, 0x64, 0x3f, 0x63, 0x0d, 0x93}
+
+const composedChunk = 512 * 1024
+
+type composedTrack struct {
+	ID     librespot.SpotifyId
+	FileID []byte
+	Format metadatapb.AudioFile_Format
+	Key    []byte
+	Plain  []byte
+	Enc    []byte
+}
+
+func (tr *composedTrack) URI() string     { return tr.ID.Uri() }
+func (tr *composedTrack) FileHex() string { return hex.EncodeToString(tr.FileID) }
+func (tr *composedTrack) Chunks() int     { return (len(tr.Enc) + composedChunk - 1) / composedChunk }
+
+func composedEncrypt(key, plain []byte) []byte {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		panic(err)
+	}
+	out := make([]byte, len(plain))
+	cipher.NewCTR(block, composedBaseIV).XORKeyStream(out, plain)
+	return out
+}
+
+func composedTrackFrom(n byte, format metadatapb.AudioFile_Format, plain []byte) *composedTrack {
+	gid := bytes.Repeat([]byte{0x5d, n}, 8)
+	file := bytes.Repeat([]byte{0xf1, n}, 10)
+	key := bytes.Repeat([]byte{0xa5, n}, 8)
+	return &composedTrack{
+		ID:     librespot.SpotifyIdFromGid(librespot.SpotifyIdTypeTrack, gid),
+		FileID: file, Format: format, Key: key, Plain: plain, Enc: composedEncrypt(key, plain),
+	}
+}
+
+// composedMP3Object builds the 6.5-chunk MP3 object of plan v7 §6.2 from
+// tone.mp3.bin: its ID3v2 tag, then its audio frames (the LAME Info frame is
+// left out, so that its frame count cannot end decoding early) repeated, and
+// zero bytes to exactly 3,407,872 bytes.
+func composedMP3Object() ([]byte, error) {
+	src, err := os.ReadFile(filepath.Join("testdata", "tone.mp3.bin"))
+	if err != nil {
+		return nil, err
+	}
+	if len(src) < 10 || string(src[:3]) != "ID3" {
+		return nil, errors.New("tone.mp3.bin: no ID3v2 tag")
+	}
+	tag := 10 + (int(src[6])<<21 | int(src[7])<<14 | int(src[8])<<7 | int(src[9]))
+	bitrates := map[uint32]int{1: 32, 2: 40, 3: 48, 4: 56, 5: 64, 6: 80, 7: 96, 8: 112, 9: 128, 10: 160, 11: 192, 12: 224, 13: 256, 14: 320}
+	var frames [][]byte
+	for i := tag; i+4 <= len(src); {
+		h := binary.BigEndian.Uint32(src[i:])
+		if h>>21 != 0x7ff || (h>>10)&3 != 0 {
+			return nil, fmt.Errorf("tone.mp3.bin: no frame sync at %d", i)
+		}
+		size := 144000*bitrates[(h>>12)&0xf]/44100 + int((h>>9)&1)
+		if size <= 4 || i+size > len(src) {
+			return nil, fmt.Errorf("tone.mp3.bin: frame at %d of %d bytes", i, size)
+		}
+		frame := src[i : i+size]
+		if !bytes.Contains(frame, []byte("Info")) && !bytes.Contains(frame, []byte("Xing")) {
+			frames = append(frames, frame)
+		}
+		i += size
+	}
+	if len(frames) == 0 {
+		return nil, errors.New("tone.mp3.bin: no audio frames")
+	}
+	const total = 6*composedChunk + composedChunk/2
+	out := append([]byte(nil), src[:tag]...)
+	for k := 0; ; k++ {
+		f := frames[k%len(frames)]
+		if len(out)+len(f) > total {
+			break
+		}
+		out = append(out, f...)
+	}
+	out = append(out, make([]byte, total-len(out))...)
+	return out, nil
+}
+
+// composedCDNRecord is one range request at the CDN.
+type composedCDNRecord struct {
+	File      string
+	Chunk     int
+	Arrived   time.Time
+	CtxEnded  time.Time // zero if its context never ended while held
+	Held      bool
+	Status    int
+	Completed time.Time
+}
+
+type composedHold struct {
+	arrived    chan struct{}
+	arriveOnce sync.Once // the arrival is announced once, whatever the number of handlers
+	release    chan struct{}
+	once       sync.Once // release, distinct from arrival
+	ctxEnd     chan time.Time
+	waiting    int // handlers held here now (under fx.mu)
+	reached    int // handlers that have reached this hold (under fx.mu)
+}
+
+// arrive announces the hold's first arrival: an idempotent, synchronized
+// operation for every handler that reaches it (R29-2).
+func (h *composedHold) arrive(hook func(), key string) {
+	h.arriveOnce.Do(func() { // MUTATION-POINT R29-2
+		if hook != nil {
+			hook()
+		}
+		close(h.arrived)
+	})
+}
+
+// composedReceipt is one entry of F-HTTP's ordered receipt ledger (plan v9
+// §2.2): a handler entered, which is the actual fixture I/O.
+type composedReceipt struct {
+	Pos      int    // the ledger position
+	Seq      int64  // X-Composed-Seq: the carrying attempt's ID; -1 when absent or invalid
+	SeqText  string // the header as received
+	Host     string
+	Path     string
+	Range    string
+	Arrived  time.Time
+	Running  bool      // the handler has not returned
+	WaitKey  string    // the hold the handler waits at now, or ""
+	CtxEnded time.Time // when its server-side context ended before the handler returned
+	Status   int
+}
+
+type composedReceiptKey struct{}
+
+// composedStatusWriter records the status a handler wrote.
+type composedStatusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *composedStatusWriter) WriteHeader(code int) {
+	if w.status == 0 {
+		w.status = code
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *composedStatusWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+// Flush passes a handler's flush through (L5 (b)'s headers-then-body hold).
+func (w *composedStatusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// composedFixtures is F-HTTP: the fixture server the router dials.
+type composedFixtures struct {
+	ln  net.Listener
+	srv *http.Server
+
+	mu       sync.Mutex
+	tracks   map[string]*composedTrack // by base62 id
+	files    map[string]*composedTrack // by file hex
+	holds    map[string]*composedHold  // "cdn/<file>/<chunk>", "metadata" or "control/<name>"
+	ignore   map[string]bool           // holds that ignore their release (FC6)
+	cdn      []composedCDNRecord
+	ledger   []*composedReceipt // every handler entry, in order (plan v9 §2.2)
+	handlers int
+	// I4's controls: a status storage-resolve answers with, and one per CDN
+	// file; 0 serves normally.
+	storageStatus int
+	cdnStatus     map[string]int
+	events        func(string)
+	served        sync.WaitGroup // Serve's goroutine
+	// arriveHook, when a test sets it, runs inside a hold's first arrival
+	// announcement (the shared-hold control).
+	arriveHook func()
+	// panics are the server's own reports of a handler panic: never a
+	// mechanism result; T9 requires none.
+	panics []string
+	// I18's metadata controls (plan v9 §8; M3B2-S4 bundle, RB-2), default
+	// off and set only by the row that selects them: metaStatus, when not 0,
+	// is the HTTP status of every extended-metadata POST's response, after
+	// the request's hold; restrict, by base62 id, makes a track's TRACK_V4
+	// forbidden in the given countries, with an optional alternative.
+	metaStatus int
+	restrict   map[string]composedRestriction
+}
+
+// composedRestriction is one track's TRACK_V4 country restriction (RB-2):
+// forbidden is a concatenation of two-letter country codes ("US", the
+// country ddsonic gives the player), and alt, when not nil, is the one
+// alternative served for it (itself added to the fixture, with its own file,
+// key and CDN object).
+type composedRestriction struct {
+	forbidden string
+	alt       *composedTrack
+}
+
+// composedPanicLog records net/http's own report of a handler panic.
+type composedPanicLog struct{ fx *composedFixtures }
+
+func (w composedPanicLog) Write(p []byte) (int, error) {
+	w.fx.mu.Lock()
+	w.fx.panics = append(w.fx.panics, string(p))
+	w.fx.mu.Unlock()
+	return len(p), nil
+}
+
+// Panics is every handler panic the server reported.
+func (fx *composedFixtures) Panics() []string {
+	fx.mu.Lock()
+	defer fx.mu.Unlock()
+	return slices.Clone(fx.panics)
+}
+
+// HoldCounts is how many handlers have reached the hold, and how many are
+// held there now.
+func (fx *composedFixtures) HoldCounts(key string) (reached, waiting int) {
+	fx.mu.Lock()
+	defer fx.mu.Unlock()
+	if h := fx.holds[key]; h != nil {
+		return h.reached, h.waiting
+	}
+	return 0, 0
+}
+
+func startComposedFixtures() (*composedFixtures, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	fx := &composedFixtures{ln: ln, tracks: map[string]*composedTrack{}, files: map[string]*composedTrack{}, holds: map[string]*composedHold{}, ignore: map[string]bool{}, cdnStatus: map[string]int{}}
+	fx.srv = &http.Server{Handler: fx, ReadHeaderTimeout: 10 * time.Second}
+	fx.srv.ErrorLog = log.New(composedPanicLog{fx}, "", 0)
+	fx.served.Add(1)
+	go func() {
+		defer fx.served.Done()
+		_ = fx.srv.Serve(ln)
+	}()
+	return fx, nil
+}
+
+func (fx *composedFixtures) Add(tr *composedTrack) {
+	fx.mu.Lock()
+	defer fx.mu.Unlock()
+	fx.tracks[tr.ID.Base62()] = tr
+	fx.files[tr.FileHex()] = tr
+}
+
+// Hold arms a hold on key; arrived is closed when a request reaches it.
+// release lets it, and every later one, through.
+func (fx *composedFixtures) Hold(key string) (arrived <-chan struct{}, release func()) {
+	h := &composedHold{arrived: make(chan struct{}), release: make(chan struct{}), ctxEnd: make(chan time.Time, 1)}
+	fx.mu.Lock()
+	fx.holds[key] = h
+	fx.mu.Unlock()
+	return h.arrived, func() { h.once.Do(func() { close(h.release) }) }
+}
+
+// IgnoreRelease makes the hold on key ignore its release and its request's
+// context: a handler that does not return until the process ends (FC6).
+func (fx *composedFixtures) IgnoreRelease(key string) {
+	fx.mu.Lock()
+	fx.ignore[key] = true
+	fx.mu.Unlock()
+}
+
+// HoldCtxEnded reports when the held request's context ended, if it did
+// within d.
+func (fx *composedFixtures) HoldCtxEnded(key string, d time.Duration) (time.Time, bool) {
+	fx.mu.Lock()
+	h := fx.holds[key]
+	fx.mu.Unlock()
+	if h == nil {
+		return time.Time{}, false
+	}
+	select {
+	case at := <-h.ctxEnd:
+		h.ctxEnd <- at
+		return at, true
+	case <-time.After(d):
+		return time.Time{}, false
+	}
+}
+
+func (fx *composedFixtures) CDN() []composedCDNRecord {
+	fx.mu.Lock()
+	defer fx.mu.Unlock()
+	return slices.Clone(fx.cdn)
+}
+
+// Ledger is a snapshot of the receipt ledger.
+func (fx *composedFixtures) Ledger() []composedReceipt {
+	fx.mu.Lock()
+	defer fx.mu.Unlock()
+	out := make([]composedReceipt, len(fx.ledger))
+	for i, rc := range fx.ledger {
+		out[i] = *rc
+	}
+	return out
+}
+
+// WaitingReceipt is the ledger position of the receipt waiting at the hold
+// on key now.
+func (fx *composedFixtures) WaitingReceipt(key string) (int, bool) {
+	fx.mu.Lock()
+	defer fx.mu.Unlock()
+	for _, rc := range fx.ledger {
+		if rc.Running && rc.WaitKey == key {
+			return rc.Pos, true
+		}
+	}
+	return -1, false
+}
+
+// AwaitCtxEnded waits up to d for the receipt at pos to record that its
+// server-side context ended before its handler returned (W3).
+func (fx *composedFixtures) AwaitCtxEnded(pos int, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for {
+		fx.mu.Lock()
+		ended := pos >= 0 && pos < len(fx.ledger) && !fx.ledger[pos].CtxEnded.IsZero()
+		fx.mu.Unlock()
+		if ended {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// receive appends a receipt to the ledger at handler entry (plan v9 §2.2).
+func (fx *composedFixtures) receive(r *http.Request, host string) *composedReceipt {
+	rc := &composedReceipt{Seq: -1, SeqText: r.Header.Get("X-Composed-Seq"), Host: host, Path: r.URL.Path, Range: r.Header.Get("Range"), Arrived: time.Now(), Running: true}
+	if v, err := strconv.ParseInt(rc.SeqText, 10, 64); err == nil && v > 0 {
+		rc.Seq = v
+	}
+	fx.mu.Lock()
+	rc.Pos = len(fx.ledger)
+	fx.ledger = append(fx.ledger, rc)
+	fx.mu.Unlock()
+	return rc
+}
+
+func (fx *composedFixtures) waitHandlersIdle(d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for {
+		fx.mu.Lock()
+		n := fx.handlers
+		fx.mu.Unlock()
+		if n == 0 {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// wait holds a request at key, if a hold is armed there. It returns false
+// when the request's context ended while held.
+func (fx *composedFixtures) wait(key string, r *http.Request) bool {
+	fx.mu.Lock()
+	h, ignore, hook := fx.holds[key], fx.ignore[key], fx.arriveHook
+	if h != nil {
+		h.reached++
+	}
+	fx.mu.Unlock()
+	if h == nil {
+		return true
+	}
+	h.arrive(hook, key)
+	if ignore {
+		select {} // FC6: a handler that ignores its release; it ends with its process
+	}
+	rc, _ := r.Context().Value(composedReceiptKey{}).(*composedReceipt)
+	fx.mu.Lock()
+	h.waiting++
+	if rc != nil {
+		rc.WaitKey = key
+	}
+	fx.mu.Unlock()
+	defer func() {
+		fx.mu.Lock()
+		h.waiting--
+		if rc != nil {
+			rc.WaitKey = ""
+		}
+		fx.mu.Unlock()
+	}()
+	select {
+	case <-h.release:
+		return r.Context().Err() == nil
+	case <-r.Context().Done():
+		at := time.Now()
+		if rc != nil {
+			fx.mu.Lock()
+			rc.CtxEnded = at
+			fx.mu.Unlock()
+		}
+		select {
+		case h.ctxEnd <- at:
+		default:
+		}
+		return false
+	}
+}
+
+func (fx *composedFixtures) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	fx.mu.Lock()
+	fx.handlers++
+	fx.mu.Unlock()
+	defer func() {
+		fx.mu.Lock()
+		fx.handlers--
+		fx.mu.Unlock()
+	}()
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	// The receipt ledger (plan v9 §2.2): appended at handler entry.
+	rc := fx.receive(r, host)
+	r = r.WithContext(context.WithValue(r.Context(), composedReceiptKey{}, rc))
+	sw := &composedStatusWriter{ResponseWriter: w}
+	w = sw
+	defer func() {
+		ended := r.Context().Err() != nil
+		fx.mu.Lock()
+		rc.Running, rc.Status = false, sw.status
+		if ended && rc.CtxEnded.IsZero() {
+			rc.CtxEnded = time.Now()
+		}
+		fx.mu.Unlock()
+	}()
+	if fx.events != nil {
+		fx.events("fixture:" + host + r.URL.Path)
+	}
+	switch host {
+	case "clienttoken.spotify.com":
+		fx.writeProto(w, &pbct.ClientTokenResponse{
+			ResponseType: pbct.ClientTokenResponseType_RESPONSE_GRANTED_TOKEN_RESPONSE,
+			Response: &pbct.ClientTokenResponse_GrantedToken{GrantedToken: &pbct.GrantedTokenResponse{
+				Token: "composed-client-token", ExpiresAfterSeconds: 3600, RefreshAfterSeconds: 3600,
+			}},
+		})
+	case "apresolve.spotify.com":
+		var resp struct {
+			Accesspoint []string `json:"accesspoint,omitempty"`
+			Dealer      []string `json:"dealer,omitempty"`
+			Spclient    []string `json:"spclient,omitempty"`
+		}
+		switch r.URL.Query().Get("type") {
+		case "accesspoint":
+			resp.Accesspoint = []string{composedAPAddr.Load().(string)}
+		case "spclient":
+			resp.Spclient = []string{"spclient.composed.invalid:443"}
+		case "dealer":
+			resp.Dealer = []string{"dealer.composed.invalid:443"}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	case "login5.spotify.com":
+		fx.writeProto(w, &pblogin5.LoginResponse{Response: &pblogin5.LoginResponse_Ok{Ok: &pblogin5.LoginOk{
+			Username: "ddsonic-composed", AccessToken: "composed-login5-token",
+			StoredCredential: []byte("composed-stored"), AccessTokenExpiresIn: 3600,
+		}}})
+	case "spclient.composed.invalid":
+		if r.URL.Path == "/extended-metadata/v0/extended-metadata" {
+			// The request body is read before the hold: net/http starts the
+			// background read that ends r.Context() on a client close only
+			// once a request body is consumed, so a held POST with its body
+			// unread could never see its context end. The hold is still
+			// before any response header.
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, err.Error(), 400)
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			if !fx.wait("metadata", r) {
+				return
+			}
+			fx.serveMetadata(w, r)
+			return
+		}
+		fx.serveStorage(w, r)
+	case "cdn.composed.invalid":
+		fx.serveCDN(w, r)
+	case "accounts.spotify.com":
+		_ = r.ParseForm()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "composed-web-token", "token_type": "Bearer", "expires_in": 3600,
+			"refresh_token": "composed-refresh", "scope": strings.Join(oauthScopes, " "),
+		})
+	case "control.composed.invalid":
+		name := strings.TrimPrefix(r.URL.Path, "/followup/")
+		if name == "redirect" {
+			http.Redirect(w, r, "https://elsewhere.invalid/", http.StatusFound)
+			return
+		}
+		if !fx.wait("control/"+name, r) {
+			return
+		}
+		_, _ = io.WriteString(w, "ok")
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (fx *composedFixtures) writeProto(w http.ResponseWriter, m proto.Message) {
+	data, err := proto.Marshal(m)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-protobuf")
+	_, _ = w.Write(data)
+}
+
+func (fx *composedFixtures) serveMetadata(w http.ResponseWriter, r *http.Request) {
+	// RB-2: a selected HTTP status for the POST itself (not an extension
+	// header's StatusCode), snapshotted under the fixture's lock, which is
+	// released before anything is written. 0 serves as before.
+	fx.mu.Lock()
+	status := fx.metaStatus
+	fx.mu.Unlock()
+	if status != 0 {
+		w.WriteHeader(status)
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	var req extmetadatapb.BatchedEntityRequest
+	if err := proto.Unmarshal(body, &req); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	resp := &extmetadatapb.BatchedExtensionResponse{}
+	for _, er := range req.EntityRequest {
+		id, err := librespot.SpotifyIdFromUri(er.EntityUri)
+		if err != nil {
+			continue
+		}
+		fx.mu.Lock()
+		tr := fx.tracks[id.Base62()]
+		res, restricted := fx.restrict[id.Base62()]
+		fx.mu.Unlock()
+		if tr == nil {
+			continue
+		}
+		for _, q := range er.Query {
+			var m proto.Message
+			switch q.ExtensionKind {
+			case extmetadatapb.ExtensionKind_TRACK_V4:
+				track := &metadatapb.Track{Gid: tr.ID.Id(), Name: proto.String("composed"), Duration: proto.Int32(60000)}
+				if restricted { // RB-2; an unrestricted track is served as before
+					track.Restriction = []*metadatapb.Restriction{{CountryRestriction: &metadatapb.Restriction_CountriesForbidden{CountriesForbidden: res.forbidden}}}
+					if res.alt != nil {
+						track.Alternative = []*metadatapb.Track{{Gid: res.alt.ID.Id()}}
+					}
+				}
+				m = track
+			case extmetadatapb.ExtensionKind_AUDIO_FILES:
+				format := tr.Format
+				m = &audiofilespb.AudioFilesExtensionResponse{Files: []*audiofilespb.ExtendedAudioFile{{File: &metadatapb.AudioFile{FileId: tr.FileID, Format: &format}}}}
+			default:
+				continue
+			}
+			a, err := anypb.New(m)
+			if err != nil {
+				continue
+			}
+			resp.ExtendedMetadata = append(resp.ExtendedMetadata, &extmetadatapb.EntityExtensionDataArray{
+				ExtensionKind: q.ExtensionKind,
+				ExtensionData: []*extmetadatapb.EntityExtensionData{{
+					Header:        &extmetadatapb.EntityExtensionDataHeader{StatusCode: 200},
+					EntityUri:     er.EntityUri,
+					ExtensionData: a,
+				}},
+			})
+		}
+	}
+	fx.writeProto(w, resp)
+}
+
+// SetStorageStatus makes storage-resolve answer with code (0: serve).
+func (fx *composedFixtures) SetStorageStatus(code int) {
+	fx.mu.Lock()
+	fx.storageStatus = code
+	fx.mu.Unlock()
+}
+
+// SetCDNStatus makes every range request for file answer with code (0:
+// serve).
+func (fx *composedFixtures) SetCDNStatus(file string, code int) {
+	fx.mu.Lock()
+	fx.cdnStatus[file] = code
+	fx.mu.Unlock()
+}
+
+// SetMetadataStatus makes every extended-metadata POST answer with the HTTP
+// status code after its hold (0: serve). RB-2, I18's metadata-error subject
+// only.
+func (fx *composedFixtures) SetMetadataStatus(code int) {
+	fx.mu.Lock()
+	fx.metaStatus = code
+	fx.mu.Unlock()
+}
+
+// Restrict makes tr's TRACK_V4 forbidden in countries, with alt (nil: none)
+// as its one alternative; alt must itself be added. RB-2, I18's restricted
+// and relink subjects only.
+func (fx *composedFixtures) Restrict(tr *composedTrack, countries string, alt *composedTrack) {
+	fx.mu.Lock()
+	if fx.restrict == nil {
+		fx.restrict = map[string]composedRestriction{}
+	}
+	fx.restrict[tr.ID.Base62()] = composedRestriction{forbidden: countries, alt: alt}
+	fx.mu.Unlock()
+}
+
+func (fx *composedFixtures) serveStorage(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(r.URL.Path, "/")
+	file := parts[len(parts)-1]
+	// I4 (a): storage-resolve held after its receipt.
+	if !fx.wait("storage", r) {
+		return
+	}
+	fx.mu.Lock()
+	tr, status := fx.files[file], fx.storageStatus
+	fx.mu.Unlock()
+	if status != 0 {
+		http.Error(w, "composed storage-resolve control", status)
+		return
+	}
+	if tr == nil {
+		http.NotFound(w, r)
+		return
+	}
+	fx.writeProto(w, &downloadpb.StorageResolveResponse{
+		Result: downloadpb.StorageResolveResponse_CDN,
+		Cdnurl: []string{"https://cdn.composed.invalid/audio/" + file},
+		Fileid: tr.FileID,
+	})
+}
+
+var reRange = regexp.MustCompile(`^bytes=(\d+)-(\d+)$`)
+
+func (fx *composedFixtures) serveCDN(w http.ResponseWriter, r *http.Request) {
+	file := strings.TrimPrefix(r.URL.Path, "/audio/")
+	fx.mu.Lock()
+	tr := fx.files[file]
+	fx.mu.Unlock()
+	m := reRange.FindStringSubmatch(r.Header.Get("Range"))
+	if tr == nil || m == nil {
+		http.Error(w, "bad range", 416)
+		return
+	}
+	start, _ := strconv.Atoi(m[1])
+	end, _ := strconv.Atoi(m[2])
+	chunk := start / composedChunk
+	key := fmt.Sprintf("cdn/%s/%d", file, chunk)
+	fx.mu.Lock()
+	idx := len(fx.cdn)
+	_, held := fx.holds[key]
+	fx.cdn = append(fx.cdn, composedCDNRecord{File: file, Chunk: chunk, Arrived: time.Now(), Held: held})
+	fx.mu.Unlock()
+	if fx.events != nil {
+		fx.events(fmt.Sprintf("cdn-arrived:%d", chunk))
+	}
+	if !fx.wait(key, r) {
+		fx.mu.Lock()
+		fx.cdn[idx].CtxEnded = time.Now()
+		fx.mu.Unlock()
+		return
+	}
+	fx.mu.Lock()
+	status := fx.cdnStatus[file]
+	fx.mu.Unlock()
+	if status != 0 { // I4's A6 control
+		http.Error(w, "composed CDN control", status)
+		fx.mu.Lock()
+		fx.cdn[idx].Status = status
+		fx.mu.Unlock()
+		return
+	}
+	if start >= len(tr.Enc) {
+		http.Error(w, "range", 416)
+		return
+	}
+	end = min(end, len(tr.Enc)-1)
+	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(tr.Enc)))
+	w.Header().Set("Content-Length", strconv.Itoa(end-start+1))
+	w.WriteHeader(http.StatusPartialContent)
+	// L5 (b): headers sent, then the body held at "cdnbody/<file>/<chunk>".
+	bodyKey := fmt.Sprintf("cdnbody/%s/%d", file, chunk)
+	fx.mu.Lock()
+	_, bodyHeld := fx.holds[bodyKey]
+	fx.mu.Unlock()
+	if bodyHeld {
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		if !fx.wait(bodyKey, r) {
+			fx.mu.Lock()
+			fx.cdn[idx].CtxEnded = time.Now()
+			fx.mu.Unlock()
+			return
+		}
+	}
+	_, err := w.Write(tr.Enc[start : end+1])
+	fx.mu.Lock()
+	fx.cdn[idx].Status = http.StatusPartialContent
+	if err == nil {
+		fx.cdn[idx].Completed = time.Now()
+	}
+	fx.mu.Unlock()
+}
+
+// composedAPAddr is F-AP's address, for apresolve's answer. It is written
+// at install (W1), before any reader exists.
+var composedAPAddr atomic.Value
+
+// ---------------------------------------------------------------------------
+// Serial ownership and poison (plan v7 §2.4).
+
+type composedPoisonRecord struct {
+	Test  string
+	Joins string
+	At    time.Time
+}
+
+type composedHolder struct {
+	Test  string
+	Since time.Time
+}
+
+var (
+	composedSlot       = make(chan struct{}, 1)
+	composedPoison     atomic.Pointer[composedPoisonRecord]
+	composedPoisoned   = make(chan struct{})
+	composedPoisonOnce sync.Once
+	composedHeldBy     atomic.Pointer[composedHolder]
+)
+
+func composedPoisonErr(p *composedPoisonRecord) error {
+	return fmt.Errorf("composed state poisoned by %s: %s", p.Test, p.Joins)
+}
+
+// tryAcquireComposed is acquireComposed's core: it returns the error
+// instead of failing a test.
+func tryAcquireComposed(test string, timeout time.Duration) error {
+	if p := composedPoison.Load(); p != nil { // MUTATION-POINT FC6-precheck
+		return composedPoisonErr(p)
+	}
+	select {
+	case composedSlot <- struct{}{}:
+		if p := composedPoison.Load(); p != nil {
+			return composedPoisonErr(p) // defensive; the slot stays taken
+		}
+	case <-composedPoisoned: // MUTATION-POINT FC6-wake
+		return composedPoisonErr(composedPoison.Load())
+	case <-time.After(timeout):
+		h := composedHeldBy.Load()
+		if h == nil {
+			return fmt.Errorf("composed state held for %v", timeout)
+		}
+		return fmt.Errorf("composed state held by %s for %v", h.Test, time.Since(h.Since).Round(time.Millisecond))
+	}
+	composedHeldBy.Store(&composedHolder{Test: test, Since: time.Now()})
+	return nil
+}
+
+func acquireComposed(t *testing.T) {
+	t.Helper()
+	if err := tryAcquireComposed(t.Name(), 30*time.Second); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func releaseComposed() {
+	composedHeldBy.Store(nil)
+	<-composedSlot
+}
+
+// poisonComposed is F3: the record, the wake-up, and the slot kept.
+func poisonComposed(test, joins string) {
+	composedPoisonOnce.Do(func() {
+		composedPoison.Store(&composedPoisonRecord{Test: test, Joins: joins, At: time.Now()})
+		close(composedPoisoned)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// The selectors Q (plan v7 §2.5).
+
+type composedGoroutine struct {
+	ID          int
+	Header      string
+	CreatorFunc string
+	CreatorFile string
+	Top         string
+	Text        string
+}
+
+func (g composedGoroutine) String() string {
+	return fmt.Sprintf("goroutine %d [%s] top %s, created by %s at %s", g.ID, g.Header, g.Top, g.CreatorFunc, g.CreatorFile)
+}
+
+func composedGoroutines() []composedGoroutine {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	var gs []composedGoroutine
+	for _, block := range strings.Split(string(buf), "\n\n") {
+		lines := strings.Split(strings.TrimSpace(block), "\n")
+		if len(lines) == 0 || !strings.HasPrefix(lines[0], "goroutine ") {
+			continue
+		}
+		g := composedGoroutine{Text: block}
+		head := strings.TrimPrefix(lines[0], "goroutine ")
+		if sp := strings.IndexByte(head, ' '); sp > 0 {
+			g.ID, _ = strconv.Atoi(head[:sp])
+			g.Header = strings.Trim(head[sp+1:], "[]:")
+		}
+		if len(lines) > 1 {
+			g.Top = lines[1]
+		}
+		for i, l := range lines {
+			if strings.HasPrefix(l, "created by ") {
+				f := strings.TrimPrefix(l, "created by ")
+				if k := strings.Index(f, " in goroutine "); k >= 0 {
+					f = f[:k]
+				}
+				g.CreatorFunc = f
+				if i+1 < len(lines) {
+					file := strings.TrimSpace(lines[i+1])
+					if k := strings.LastIndex(file, ":"); k >= 0 {
+						file = file[:k]
+					}
+					g.CreatorFile = file
+				}
+			}
+		}
+		gs = append(gs, g)
+	}
+	return gs
+}
+
+func currentGoroutineID() int {
+	buf := make([]byte, 64)
+	buf = buf[:runtime.Stack(buf, false)]
+	f := strings.Fields(string(buf))
+	if len(f) > 1 {
+		id, _ := strconv.Atoi(f[1])
+		return id
+	}
+	return -1
+}
+
+var composedQ2 = []string{"net/http.(*conn).serve(", "net/http.(*Server).Serve(", "net/http.(*persistConn).readLoop(", "net/http.(*persistConn).writeLoop("}
+
+// inQ is the selector of plan v7 §2.5: Q1 by the creating go statement's
+// package and file, Q2 by four named net/http frames.
+func inQ(g composedGoroutine) bool {
+	const sdk = "github.com/devgianlu/go-librespot/"
+	const app = "github.com/bjarneo/cliamp/external/spotify."
+	switch {
+	case strings.HasPrefix(g.CreatorFunc, sdk):
+		return true // the staged SDK, with H/ and D10
+	case strings.HasPrefix(g.CreatorFunc, app):
+		base := filepath.Base(g.CreatorFile)
+		if !strings.HasSuffix(base, "_test.go") {
+			return true // a non-test file of S/
+		}
+		return strings.HasPrefix(base, "zz_ddsonic_composed_") || base == "composed_bypass_ddsonic_test.go"
+	}
+	for _, f := range composedQ2 {
+		if strings.Contains(g.Text, f) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchQ is every goroutine in Q but self.
+func matchQ(self int) []composedGoroutine {
+	var out []composedGoroutine
+	for _, g := range composedGoroutines() {
+		if g.ID != self && inQ(g) {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+func waitQEmpty(self int, d time.Duration) []composedGoroutine {
+	deadline := time.Now().Add(d)
+	for {
+		left := matchQ(self)
+		if len(left) == 0 || time.Now().After(deadline) {
+			return left
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The harness.
+
+const composedJoin = 20 * time.Second
+
+type composedD1Call struct {
+	Phase string
+	Start time.Time
+	done  chan struct{}
+	Sess  *session.Session
+	Err   error
+}
+
+// Returned reports whether the call has returned (its channel is closed).
+func (c *composedD1Call) Returned() bool {
+	select {
+	case <-c.done:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *composedD1Call) WaitReturned(d time.Duration) bool {
+	select {
+	case <-c.done:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
+type composedOptions struct {
+	// tripwire installs a recording tripwire as the previous transport,
+	// before the router.
+	tripwire bool
+	// childControl permits the survivor group (FC12).
+	childControl bool
+	allowControl bool
+	// joinBound overrides the 20 s join bound, for a child control only.
+	joinBound time.Duration
+}
+
+// composedDecoder is a counted real decoder handed out by D3.
+type composedDecoder struct {
+	Format string
+	closes func() int32
+}
+
+func (d *composedDecoder) Closes() int32 { return d.closes() }
+
+type composedHarness struct {
+	t      *testing.T
+	opts   composedOptions
+	self   int
+	router *composedRouter
+	fx     *composedFixtures
+	ap     *ap.DDSonicComposedFake
+	orig   http.RoundTripper // http.DefaultTransport before the test
+	prev   http.RoundTripper // what T10 restores: orig, or the tripwire
+	trip   *composedTripwire
+	x      *composedRefuseAll
+
+	restoreSeams []func()
+	releases     []func()
+	cancels      []context.CancelFunc
+	closers      []io.Closer
+	providers    []*SpotifyProvider
+	sessions     []*Session
+
+	calls     sync.WaitGroup
+	callNames sync.Map
+	survivors sync.WaitGroup
+	survLive  atomic.Int32
+
+	mu      sync.Mutex
+	d1      []*composedD1Call
+	d2      int
+	d3      int
+	d3wg    sync.WaitGroup
+	d3ctx   []context.Context
+	d3dec   []*composedDecoder
+	d4      []uint64
+	d5      int
+	d11     int
+	d11hold chan struct{}
+	onOpen  func(point string) // D6: openHook's per-test barrier
+	// onService runs, when a test sets it, as a bundle is serviced, before
+	// the real servicing starts the access point's receive loop.
+	onService func(b *playback)
+	// onNewStream, when a test sets it, is D2's before-hold and returned
+	// call-through observation and barrier (plan v9 §2.7, §3.3; M3B2-S4
+	// bundle, RB-3); nil, the default, keeps D2 a counter only.
+	onNewStream func(ev composedD2Event)
+	// D6 (plan v9 §2.7): decisionHook, detachHook and beforeAccept, counted
+	// per point and dispatched to the test's barrier when it sets one; and
+	// closeLibrespot, counted per librespot session (L6, I5-O).
+	decisions  map[string]int
+	onDecision func(point string)
+	detaches   map[string]int
+	onDetach   func(point string)
+	accepts    int
+	onAccept   func(n int)
+	closedLS   []*session.Session
+	events     []string
+	seq        int64
+
+	expViol map[composedPattern]int
+
+	// watches are the registered subject watches (plan v9 §2.5).
+	watches []*composedWatch
+	// t5rDone records that T5r ended within its bound (W4).
+	t5rDone bool
+
+	// checkpoint is branch F's F1a hook: nil except in FC12.
+	checkpoint func(stage string)
+	// teardown's result: "" or the failed step, and the branch taken.
+	failedStep string
+	branchF    bool
+	t6done     bool
+	reported   []composedGoroutine
+}
+
+// Event appends to the harness's event log under its mutex (FC5).
+func (h *composedHarness) Event(name string) int64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.seq++
+	h.events = append(h.events, fmt.Sprintf("%d:%s", h.seq, name))
+	return h.seq
+}
+
+func (h *composedHarness) Events() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.events)
+}
+
+// EventSeq is the sequence number of the first event with prefix, or 0.
+func (h *composedHarness) EventSeq(prefix string) int64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, e := range h.events {
+		n, name, _ := strings.Cut(e, ":")
+		if strings.HasPrefix(name, prefix) {
+			v, _ := strconv.ParseInt(n, 10, 64)
+			return v
+		}
+	}
+	return 0
+}
+
+// Go tracks a test call; T5a joins it.
+func (h *composedHarness) Go(name string, fn func()) {
+	h.calls.Add(1)
+	h.callNames.Store(name, true)
+	go func() {
+		defer h.calls.Done()
+		defer h.callNames.Delete(name)
+		fn()
+	}()
+}
+
+// GoSurvivor tracks a goroutine a child control keeps alive through
+// teardown (plan v7 §2.5, R26-1). T5 does not join it; it stays in Q; its
+// presence at the end of T5 forces branch F.
+func (h *composedHarness) GoSurvivor(name string, fn func()) {
+	if !h.opts.childControl {
+		h.t.Fatal("GoSurvivor is for a child control only")
+	}
+	h.survivors.Add(1)
+	h.survLive.Add(1)
+	go func() {
+		defer h.survivors.Done()
+		defer h.survLive.Add(-1)
+		fn()
+	}()
+}
+
+// JoinSurvivors waits up to d for the survivor group (the owning control's
+// own bounded join).
+func (h *composedHarness) JoinSurvivors(d time.Duration) bool {
+	return waitGroupWithin(&h.survivors, d)
+}
+
+func waitGroupWithin(wg *sync.WaitGroup, d time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
+func (h *composedHarness) Context() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	h.mu.Lock()
+	h.cancels = append(h.cancels, cancel)
+	h.mu.Unlock()
+	return ctx, cancel
+}
+
+// OnRelease registers a barrier release for T1.
+func (h *composedHarness) OnRelease(f func()) {
+	h.mu.Lock()
+	h.releases = append(h.releases, f)
+	h.mu.Unlock()
+}
+
+func (h *composedHarness) KeepCloser(c io.Closer) {
+	h.mu.Lock()
+	h.closers = append(h.closers, c)
+	h.mu.Unlock()
+}
+
+// Provider is a real provider over the dummy stored credential.
+func (h *composedHarness) Provider() *SpotifyProvider {
+	p := New(nil, composedClientID, 320)
+	h.mu.Lock()
+	h.providers = append(h.providers, p)
+	h.mu.Unlock()
+	return p
+}
+
+func (h *composedHarness) KeepSession(s *Session) {
+	h.mu.Lock()
+	h.sessions = append(h.sessions, s)
+	h.mu.Unlock()
+}
+
+func (h *composedHarness) Phase(p string) { h.router.SetPhase(p) }
+
+// OnOpen sets the test's barrier at openHook's named points (D6).
+func (h *composedHarness) OnOpen(f func(point string)) {
+	h.mu.Lock()
+	h.onOpen = f
+	h.mu.Unlock()
+}
+
+// composedD2Event is one D2 call-through point (RB-3): "before-hold", before
+// the real Session.NewStream (so before holdPlayback), or "returned", after
+// it returned, with what it returned. Attempt is D2's existing counter value
+// for that call. The stream itself stays its caller's: only whether one was
+// returned is reported.
+type composedD2Event struct {
+	Point   string
+	Attempt int
+	Err     error
+	Stream  bool
+}
+
+// OnNewStream sets the test's D2 observation and barrier (nil clears it). f
+// runs outside the harness's lock, on the calling goroutine, so a test may
+// hold the call there; it must register its own T1 release.
+func (h *composedHarness) OnNewStream(f func(ev composedD2Event)) {
+	h.mu.Lock()
+	h.onNewStream = f
+	h.mu.Unlock()
+}
+
+// OnAccept sets the test's barrier at beforeAccept (nil clears it). The
+// active stage's servicing, decision and detach barriers and counts are in
+// the active adapter (composed_controls_test.go.txt).
+func (h *composedHarness) OnAccept(f func(n int)) {
+	h.mu.Lock()
+	h.onAccept = f
+	h.mu.Unlock()
+}
+
+// ClosedLibrespot reports whether the real closeLibrespot ran for sess.
+func (h *composedHarness) ClosedLibrespot(sess *session.Session) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Contains(h.closedLS, sess)
+}
+
+// Bundle is the provider's session and its current playback bundle, read
+// under the session's lock.
+func (h *composedHarness) Bundle(p *SpotifyProvider) (*Session, *playback) {
+	s := p.sessionNow()
+	if s == nil {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s, s.play
+}
+
+// composedAPGoroutines counts the live access points' receive loops and pong
+// tickers (the object-scoped baseline of plan v9 §6.2, L6).
+func composedAPGoroutines() (recvLoops, tickers int) {
+	for _, g := range composedGoroutines() {
+		if strings.Contains(g.Text, "ap.(*Accesspoint).recvLoop(") {
+			recvLoops++
+		}
+		if strings.Contains(g.Text, "ap.(*Accesspoint).pongAckTicker(") {
+			tickers++
+		}
+	}
+	return
+}
+
+func (h *composedHarness) ExpectViolation(p composedPattern, n int) {
+	h.mu.Lock()
+	h.expViol[p] += n
+	h.mu.Unlock()
+}
+
+// ExpectLateUse declares late uses on this test's router, with when they
+// become due (plan v9 §2.2): dueT9 ones are checked exactly at T9, and every
+// declaration is checked exactly by ZZNoLateUse over the router's life.
+func (h *composedHarness) ExpectLateUse(p composedPattern, n int, due composedDue) {
+	h.router.mu.Lock()
+	h.router.declaredLate[p] += n
+	h.router.dueLate[p] = due
+	h.router.mu.Unlock()
+}
+
+// ArmReaderTailGate arms FC13's reader-tail gate for file (plan v9 §2.5).
+func (h *composedHarness) ArmReaderTailGate(file string) *composedTailGate {
+	g := &composedTailGate{path: "/audio/" + file, open: make(chan struct{}), first: make(chan struct{})}
+	h.router.tailGate.Store(g)
+	return g
+}
+
+// HoldDelegation arms FC14's router delegation hold for file's range; T1
+// releases it (plan v9 §2.5).
+func (h *composedHarness) HoldDelegation(file, rng string) *composedDelegHold {
+	d := &composedDelegHold{path: "/audio/" + file, rng: rng, parked: make(chan struct{}), release: make(chan struct{})}
+	h.router.delegHold.Store(d)
+	h.OnRelease(d.Release)
+	return d
+}
+
+// composedCut is the checked subject cut (plan v9 §2.5).
+type composedCut struct {
+	File  string
+	Path  string
+	Seq0  int64  // the last attempt ID the router had allocated
+	R0    int    // the receipt ledger's length: receipts after the cut are at R0 or later
+	CtxID string // the subject stream's context identity
+	Held  int    // the held receipt's ledger position, or -1
+}
+
+// composedWatch is a registered subject watch (plan v9 §2.5).
+type composedWatch struct {
+	composedCut
+	Seq1         int64
+	WantReceipts int  // 0, except FC14's declared exact count
+	MinAttempts  int  // FC13's non-vacuity: attempts after the subject
+	Boundary     bool // FC14: the counted receipts' attempt IDs are at or below Seq0
+}
+
+const composedCDNHost = "cdn.composed.invalid"
+
+// tryCut is one attempt at the checked cut: in one critical section, the
+// router's mutex then F-HTTP's (the only nested order), it checks (i)
+// attribution, (ii) every earlier attempt accounted for and (iii) only the
+// held work live, then records Seq0, R0 and the identity. checked = false is
+// FC14's CutUnchecked.
+func (h *composedHarness) tryCut(file string, held int, checked bool) (composedCut, error) {
+	r, fx := h.router, h.fx
+	path := "/audio/" + file
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	fx.mu.Lock()
+	defer fx.mu.Unlock()
+	c := composedCut{File: file, Path: path, Seq0: r.seq, R0: len(fx.ledger), Held: held}
+	carrier := int64(-1)
+	if held >= 0 {
+		if held >= len(fx.ledger) {
+			return c, fmt.Errorf("no receipt #%d", held)
+		}
+		rc := fx.ledger[held]
+		if rc.Path != path || !rc.Running || rc.WaitKey == "" {
+			return c, fmt.Errorf("the held receipt #%d is not waiting at a barrier for %s", held, path)
+		}
+		carrier = rc.Seq
+	}
+	for _, a := range r.attempts {
+		if a.Host == composedCDNHost && a.Path == path && (carrier < 0 || a.Seq == carrier) {
+			c.CtxID = a.CtxID
+			break
+		}
+	}
+	if !checked {
+		return c, nil
+	}
+	received := map[int64]bool{}
+	for _, rc := range fx.ledger {
+		if rc.Seq > 0 {
+			received[rc.Seq] = true
+		}
+	}
+	for _, a := range r.attempts { // MUTATION-POINT FC14-MNA
+		if a.Host != composedCDNHost || a.Path != path {
+			continue
+		}
+		switch {
+		case a.CtxID != c.CtxID:
+			return c, fmt.Errorf("(i) attempt #%d carries another context identity: another stream has used the file", a.Seq)
+		case !a.Local && !received[a.Seq]:
+			return c, fmt.Errorf("(ii) attempt #%d was admitted and has no receipt", a.Seq)
+		case !a.Done && a.Seq != carrier:
+			return c, fmt.Errorf("(iii) attempt #%d is still inside RoundTrip", a.Seq)
+		}
+	}
+	for _, rc := range fx.ledger {
+		if rc.Path == path && rc.Running && rc.Pos != held {
+			return c, fmt.Errorf("(iii) receipt #%d for the file is still running", rc.Pos)
+		}
+	}
+	return c, nil
+}
+
+// Cut is the checked cut, retried for up to d with no hold released (plan
+// v9 §2.5). Its bound exhausted is the row's STOP 9.
+func (h *composedHarness) Cut(file string, held int, d time.Duration) (composedCut, error) {
+	deadline := time.Now().Add(d)
+	for {
+		c, err := h.tryCut(file, held, true)
+		if err == nil || time.Now().After(deadline) {
+			return c, err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TryCut is one attempt at the checked cut, without retrying (FC14).
+func (h *composedHarness) TryCut(file string, held int) (composedCut, error) {
+	return h.tryCut(file, held, true)
+}
+
+// CutUnchecked records a cut without its checks (FC14 only).
+func (h *composedHarness) CutUnchecked(file string) composedCut {
+	c, _ := h.tryCut(file, -1, false)
+	return c
+}
+
+// Watch registers a watch on a cut, with Seq1 read now (after the subject
+// action has returned).
+func (h *composedHarness) Watch(c composedCut) *composedWatch {
+	w := &composedWatch{composedCut: c, Seq1: h.router.Seq()}
+	h.mu.Lock()
+	h.watches = append(h.watches, w)
+	h.mu.Unlock()
+	return w
+}
+
+func (h *composedHarness) D1Calls() []*composedD1Call {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.d1)
+}
+
+func (h *composedHarness) Counts() (d1, d2, d3, d5, d11 int, d4 []uint64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.d1), h.d2, h.d3, h.d5, h.d11, slices.Clone(h.d4)
+}
+
+func (h *composedHarness) Decoders() []*composedDecoder {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.d3dec)
+}
+
+const composedClientID = "00000000000000000000000000c0ffee"
+
+var composedDummyData = bytes.Repeat([]byte{0xd5}, 32)
+
+const composedDeviceID = "c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ff"
+
+// withComposed runs body in a composed scope: install, then the deferred
+// teardown, on every exit (plan v7 §2.4-§2.5).
+func withComposed(t *testing.T, opts composedOptions, body func(h *composedHarness)) *composedHarness {
+	t.Helper()
+	acquireComposed(t)
+	h := &composedHarness{t: t, opts: opts, self: currentGoroutineID(), expViol: map[composedPattern]int{}}
+	// Q at the start: nothing may already be running.
+	if left := matchQ(h.self); len(left) != 0 {
+		releaseComposed()
+		t.Fatalf("composed: goroutines in Q before the test started (a failed earlier cleanup): %v", left)
+	}
+	h.install()
+	func() {
+		defer h.teardown()
+		body(h)
+	}()
+	return h
+}
+
+func (h *composedHarness) bound() time.Duration {
+	if h.opts.joinBound > 0 {
+		return h.opts.joinBound
+	}
+	return composedJoin
+}
+
+func (h *composedHarness) install() {
+	t := h.t
+	var err error
+	if h.ap, err = ap.DDSonicComposedStart(); err != nil {
+		releaseComposed()
+		t.Fatal(err)
+	}
+	if h.fx, err = startComposedFixtures(); err != nil {
+		h.ap.Stop()
+		h.ap.Restore()
+		releaseComposed()
+		t.Fatal(err)
+	}
+	h.fx.events = func(s string) { h.Event(s) }
+	composedAPAddr.Store(h.ap.Addr())
+	// W1: the shared globals are written here, before any reader of this
+	// test exists.
+	h.orig = http.DefaultTransport
+	h.prev = h.orig
+	if h.opts.tripwire {
+		h.trip = &composedTripwire{log: func(s string) { h.Event(s) }}
+		http.DefaultTransport = h.trip
+		h.prev = h.trip
+	}
+	h.router = newComposedRouter(t.Name(), h.fx.ln.Addr().String())
+	h.router.allowControl = h.opts.allowControl
+	h.router.events = func(s string) { h.Event(s) }
+	composedRoutersMu.Lock()
+	composedRouters = append(composedRouters, h.router)
+	composedRoutersMu.Unlock()
+	http.DefaultTransport = h.router
+	h.installSeams()
+	if err := saveCreds(&storedCreds{Username: "ddsonic-composed", Data: composedDummyData, DeviceID: composedDeviceID, RefreshToken: "composed-refresh"}); err != nil {
+		t.Errorf("composed: dummy credentials: %v", err)
+	}
+}
+
+// RestoreOriginal puts the test's original transport back after a test
+// that installed a tripwire as the previous transport has finished with it.
+// It does nothing in a poisoned process.
+func (h *composedHarness) RestoreOriginal() {
+	if composedPoison.Load() == nil && h.trip != nil && http.DefaultTransport == h.trip {
+		http.DefaultTransport = h.orig
+	}
+}
+
+// installSeams sets D1-D5 and D11: call-throughs and counters only.
+func (h *composedHarness) installSeams() {
+	origNew, origNS, origPNS, origRec, origInter, origInit, origOpen := newLibrespotSession, sessionNewStream, playerNewStream, sessionReconnect, interactiveTokens, initSessionPlayer, openHook
+	h.restoreSeams = append(h.restoreSeams, func() {
+		newLibrespotSession, sessionNewStream, playerNewStream, sessionReconnect, interactiveTokens, initSessionPlayer, openHook = origNew, origNS, origPNS, origRec, origInter, origInit, origOpen
+	})
+	origAccept, origCloseLS := beforeAccept, closeLibrespot
+	h.restoreSeams = append(h.restoreSeams, func() {
+		beforeAccept, closeLibrespot = origAccept, origCloseLS
+	})
+	// The stage's own decision and detach points (the active adapter: D6's
+	// decisionHook and detachHook, and recoveryTimeout's save/restore; the
+	// stock adapter: none, rc.4 has no such seams).
+	h.installStageRecoveryHooks()
+	beforeAccept = func() {
+		h.mu.Lock()
+		h.accepts++
+		n, f := h.accepts, h.onAccept
+		h.mu.Unlock()
+		if f != nil {
+			f(n)
+		}
+	}
+	// closeLibrespot: a call-through, counted per librespot session.
+	closeLibrespot = func(p *librespotPlayer.Player, sess *session.Session) {
+		h.mu.Lock()
+		h.closedLS = append(h.closedLS, sess)
+		h.mu.Unlock()
+		origCloseLS(p, sess)
+	}
+	// The stage's own servicing seam (the active adapter: serviceAccessPoint's
+	// call-through; the stock adapter: none, rc.4 has no such seam).
+	h.installStageService()
+	// D6: openHook, dispatched to the test's barrier when it sets one.
+	openHook = func(point string) {
+		h.Event("open:" + point)
+		h.mu.Lock()
+		f := h.onOpen
+		h.mu.Unlock()
+		if f != nil {
+			f(point)
+		}
+	}
+	// D1: the bypass, counted, refused unless the router is installed and
+	// open; each call's return is announced on its own channel (H).
+	newLibrespotSession = func(ctx context.Context, opts *session.Options) (*session.Session, error) {
+		if http.DefaultTransport != h.router || h.router.State() != routerOpen {
+			return nil, errors.New("composed bypass: the router is not installed and open")
+		}
+		call := &composedD1Call{Start: time.Now(), done: make(chan struct{})}
+		h.router.mu.Lock()
+		call.Phase = h.router.phase
+		h.router.mu.Unlock()
+		h.mu.Lock()
+		h.d1 = append(h.d1, call)
+		h.mu.Unlock()
+		h.Event("d1-start")
+		sess, err := composedLibrespotSession(ctx, opts)
+		call.Sess, call.Err = sess, err
+		close(call.done)
+		h.Event("d1-return")
+		return sess, err
+	}
+	// D2, with RB-3's default-off before-hold and returned call-through
+	// points: one real call with the same arguments and results; the
+	// counter moves where it did; the test's function runs outside h.mu.
+	sessionNewStream = func(s *Session, ctx context.Context, id librespot.SpotifyId, bitrate int) (*librespotPlayer.Stream, context.CancelFunc, error) {
+		h.mu.Lock()
+		h.d2++
+		n, f := h.d2, h.onNewStream
+		h.mu.Unlock()
+		if f == nil {
+			return origNS(s, ctx, id, bitrate)
+		}
+		f(composedD2Event{Point: "before-hold", Attempt: n})
+		stream, cancel, err := origNS(s, ctx, id, bitrate)
+		f(composedD2Event{Point: "returned", Attempt: n, Err: err, Stream: stream != nil})
+		return stream, cancel, err
+	}
+	// D3: real Player.NewStream starts, the setup context, the in-flight
+	// count, and real MP3/FLAC decoders wrapped in a Close counter.
+	playerNewStream = func(b *playback, ctx context.Context, client *http.Client, id librespot.SpotifyId, bitrate int) (*librespotPlayer.Stream, error) {
+		h.d3wg.Add(1)
+		defer h.d3wg.Done()
+		h.mu.Lock()
+		h.d3++
+		h.d3ctx = append(h.d3ctx, ctx)
+		h.mu.Unlock()
+		stream, err := origPNS(b, ctx, client, id, bitrate)
+		if err == nil && stream != nil {
+			switch d := stream.Source.(type) {
+			case *mp3.Decoder:
+				c := &countedMP3{Decoder: d}
+				stream.Source = c
+				h.mu.Lock()
+				h.d3dec = append(h.d3dec, &composedDecoder{Format: "mp3", closes: c.closes.Load})
+				h.mu.Unlock()
+			case *flac.Decoder:
+				c := &countedFLAC{Decoder: d}
+				stream.Source = c
+				h.mu.Lock()
+				h.d3dec = append(h.d3dec, &composedDecoder{Format: "flac", closes: c.closes.Load})
+				h.mu.Unlock()
+			}
+		}
+		return stream, err
+	}
+	// D4.
+	sessionReconnect = func(s *Session, ctx context.Context, gen uint64) error {
+		h.mu.Lock()
+		h.d4 = append(h.d4, gen)
+		h.mu.Unlock()
+		return origRec(s, ctx, gen)
+	}
+	// D5: counted; still refuses.
+	interactiveTokens = func(ctx context.Context, flows []oauthFlow) ([]*oauth2.Token, error) {
+		h.mu.Lock()
+		h.d5++
+		h.mu.Unlock()
+		return origInter(ctx, flows)
+	}
+	// D11: counted, and held when a test arms it.
+	initSessionPlayer = func(s *Session) error {
+		h.mu.Lock()
+		h.d11++
+		hold := h.d11hold
+		h.mu.Unlock()
+		if hold != nil {
+			<-hold
+		}
+		return origInit(s)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Teardown (plan v7 §2.5).
+
+func (h *composedHarness) teardown() {
+	if p := recover(); p != nil {
+		h.teardownSteps()
+		panic(p)
+	}
+	h.teardownSteps()
+}
+
+func (h *composedHarness) fail(step string) {
+	if h.failedStep == "" {
+		h.failedStep = step
+	}
+}
+
+func (h *composedHarness) teardownSteps() {
+	t := h.t
+	bound := h.bound()
+	// T1: release every barrier, idempotently.
+	h.mu.Lock()
+	releases := slices.Clone(h.releases)
+	if h.d11hold != nil {
+		close(h.d11hold)
+		h.d11hold = nil
+	}
+	h.mu.Unlock()
+	for _, f := range releases {
+		f()
+	}
+	// T2: cancel every test-owned context.
+	h.mu.Lock()
+	cancels := slices.Clone(h.cancels)
+	closers := slices.Clone(h.closers)
+	providers := slices.Clone(h.providers)
+	sessions := slices.Clone(h.sessions)
+	h.mu.Unlock()
+	for _, c := range cancels {
+		c()
+	}
+	// T3: close every accepted streamer the test still holds.
+	for _, c := range closers {
+		_ = c.Close()
+	}
+	// T4: close the provider(s) and Session(s): the real Close, retireNow and
+	// closeLibrespot.
+	for _, p := range providers {
+		p.Close()
+	}
+	for _, s := range sessions {
+		s.Close()
+	}
+	// T5: join the users, in order, each bounded.
+	switch {
+	case !waitGroupWithin(&h.calls, bound):
+		h.fail("T5a (the test's tracked calls)")
+	case !waitGroupWithin(&builds, bound):
+		h.fail("T5b (builds)")
+	case !waitGroupWithin(&tails, bound):
+		h.fail("T5c (tails)")
+	case !waitGroupWithin(&h.d3wg, bound):
+		h.fail("T5d (D3 in-flight playerNewStream)")
+	case !h.drainReaderTails(composedReaderTailBound): // MUTATION-POINT FC13-MR5
+		h.fail("T5r (reader tails)")
+	case !h.router.waitIdle(bound):
+		h.fail("T5e (router in-flight)")
+	case h.survLive.Load() > 0:
+		h.fail("T5 (a survivor is live)")
+	}
+	if h.failedStep != "" {
+		h.branchFRun()
+		return
+	}
+	// T6: stop the fixtures; nothing is restored here.
+	h.stopFixtures()
+	// T6-AFTER (FC13's M-R5 moves T5r here)
+	// T7: join the stopped fixture workers.
+	switch {
+	case !h.ap.JoinWorkers(bound):
+		h.fail("T7 (F-AP observer workers)")
+	case !waitGroupWithin(&h.fx.served, bound):
+		h.fail("T7 (F-HTTP Serve)")
+	case !h.fx.waitHandlersIdle(bound):
+		h.fail("T7 (F-HTTP handlers)")
+	}
+	// T8: quiescence.
+	if h.failedStep == "" {
+		if left := waitQEmpty(h.self, bound); len(left) != 0 {
+			h.reported = left
+			h.fail("T8 (quiescence)")
+		}
+	}
+	if h.failedStep != "" {
+		h.branchFRun()
+		return
+	}
+	// T9: the declared scope, exactly.
+	h.checkScope()
+	// T10: H, then W2, then the slot.
+	if err := h.establishH(); err != nil {
+		h.fail("T10 (H: " + err.Error() + ")")
+		h.branchFRun()
+		return
+	}
+	for i := len(h.restoreSeams) - 1; i >= 0; i-- {
+		h.restoreSeams[i]()
+	}
+	http.DefaultTransport = h.prev // W2
+	h.ap.Restore()
+	h.Event("restore")
+	releaseComposed()
+	if h.trip == nil && http.DefaultTransport != h.orig {
+		t.Error("composed: http.DefaultTransport was not restored")
+	}
+}
+
+func (h *composedHarness) stopFixtures() {
+	if h.t6done {
+		return
+	}
+	h.t6done = true
+	_ = h.fx.srv.Close()
+	h.router.transport.CloseIdleConnections()
+	if !h.branchF {
+		h.router.setState(routerClosed)
+	}
+	h.ap.Stop()
+}
+
+// establishH is the happens-before set H (plan v7 §2.5): every possible
+// reader has finished, synchronized through a primitive the harness also
+// uses. The waits on calls, builds, tails, D3 and the router were T5's.
+func (h *composedHarness) establishH() error {
+	for i, c := range h.D1Calls() {
+		if !c.WaitReturned(time.Second) {
+			return fmt.Errorf("D1 call %d has not returned", i)
+		}
+		if c.Sess != nil {
+			a := c.Sess.Accesspoint()
+			if !ap.DDSonicComposedAPDone(a) {
+				return fmt.Errorf("D1 call %d: its access point is not done", i)
+			}
+			ap.DDSonicComposedConnMuSync(a)
+		}
+	}
+	return nil
+}
+
+// checkScope is T9: violations equal the declaration exactly; no handler
+// panicked; every authenticated connection was drained by D10.
+func (h *composedHarness) checkScope() {
+	t := h.t
+	if p := h.fx.Panics(); len(p) != 0 {
+		t.Errorf("T9: a fixture handler panicked: %v", p)
+	}
+	drained, logins := h.ap.Drained(), h.ap.Logins()
+	occ, capacity := h.ap.Occupancy()
+	if drained != logins || occ > capacity {
+		t.Errorf("T9: D10: every authenticated connection drained: drained %d, logins %d; observed conns occupancy at most %d of capacity %d", drained, logins, occ, capacity)
+	}
+	h.mu.Lock()
+	want := map[composedPattern]int{}
+	for k, v := range h.expViol {
+		want[k] = v
+	}
+	h.mu.Unlock()
+	got := map[composedPattern]int{}
+	var unmatched []composedRecord
+	for _, v := range h.router.Violations() {
+		found := false
+		for p := range want {
+			if p.matches(v) {
+				got[p]++
+				found = true
+				break
+			}
+		}
+		if !found {
+			unmatched = append(unmatched, v)
+		}
+	}
+	for p, n := range want {
+		if got[p] != n {
+			t.Errorf("T9: declared %d violation(s) of %v, recorded %d", n, p, got[p])
+		}
+	}
+	if len(unmatched) != 0 {
+		t.Errorf("T9: undeclared violations: %v", unmatched)
+	}
+	h.checkLateDue()
+	h.checkReceipts()
+}
+
+// composedReaderTailBound is T5r's bound: a controlled-test bound, not a
+// production bound on the reader's surviving work (plan v9 §2.5, §11).
+const composedReaderTailBound = 120 * time.Second
+
+// drainReaderTails is T5r (plan v9 §2.5): with F-HTTP, the open router and
+// F-AP live, it opens FC13's reader-tail gate if armed, then waits for every
+// SDK reader prefetch worker to end. After T5a-T5d nothing can create one,
+// so their absence, once observed, is stable; it is not an H edge.
+func (h *composedHarness) drainReaderTails(d time.Duration) bool {
+	start, seq0 := time.Now(), h.router.Seq()
+	h.router.openTailGate()
+	waited := false
+	for {
+		left := 0
+		for _, g := range composedGoroutines() {
+			if strings.Contains(g.CreatorFunc, "(*HttpChunkedReader).startPrefetch") {
+				left++
+			}
+		}
+		if left == 0 {
+			h.t5rDone = true
+			if waited || h.router.tailGate.Load() != nil {
+				h.t.Logf("COMPOSED-READER-TAIL %v %d", time.Since(start).Round(time.Millisecond), h.router.Seq()-seq0)
+			}
+			return true
+		}
+		if time.Since(start) > d {
+			return false
+		}
+		waited = true
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// checkLateDue is T9's late-use check (plan v9 §2.2): the late uses recorded
+// so far equal the dueT9 declarations exactly, and none matches a dueFinal
+// pattern yet. ZZNoLateUse checks every declaration over the router's life.
+func (h *composedHarness) checkLateDue() {
+	r := h.router
+	r.mu.Lock()
+	decl := map[composedPattern]int{}
+	due := map[composedPattern]composedDue{}
+	for p, n := range r.declaredLate {
+		decl[p], due[p] = n, r.dueLate[p]
+	}
+	late := slices.Clone(r.lateUses)
+	r.mu.Unlock()
+	want, got := map[composedPattern]int{}, map[composedPattern]int{}
+	for p, n := range decl {
+		if due[p] == dueT9 {
+			want[p] = n
+		}
+	}
+	var undeclared, early []string
+	for _, l := range late {
+		matched := false
+		for p := range decl {
+			if p.matches(l) {
+				matched = true
+				if due[p] == dueFinal {
+					early = append(early, l.String())
+				} else {
+					got[p]++
+				}
+				break
+			}
+		}
+		if !matched {
+			undeclared = append(undeclared, l.String())
+		}
+	}
+	bad := len(undeclared) != 0 || len(early) != 0
+	for p, n := range want {
+		if got[p] != n {
+			bad = true
+		}
+	}
+	if bad {
+		h.t.Errorf("T9: late uses due at T9 equal the dueT9 declarations %v: recorded %v; undeclared %v; early (due final) %v", want, got, undeclared, early)
+	}
+}
+
+// checkReceipts is T9's receipt check (plan v9 §2.2, §2.5): every receipt
+// correlates with an attempt the router delegated (fail closed), and every
+// watch's W1-W4.
+func (h *composedHarness) checkReceipts() {
+	t := h.t
+	atts, led := h.router.Attempts(), h.fx.Ledger()
+	issued := map[int64]bool{}
+	for _, a := range atts {
+		if a.Delegated {
+			issued[a.Seq] = true
+		}
+	}
+	for _, rc := range led {
+		if rc.Seq <= 0 || !issued[rc.Seq] {
+			t.Errorf("T9: an uncorrelated receipt (fail closed): #%d %s%s X-Composed-Seq %q", rc.Pos, rc.Host, rc.Path, rc.SeqText)
+		}
+	}
+	h.mu.Lock()
+	ws := slices.Clone(h.watches)
+	h.mu.Unlock()
+	for _, w := range ws {
+		var n, ended, late, after int
+		for _, a := range atts {
+			if a.Host != composedCDNHost || a.Path != w.Path || a.Seq <= w.Seq0 {
+				continue
+			}
+			n++
+			if a.CtxErr != "" {
+				ended++
+			}
+			if a.State == "closed" {
+				late++
+			}
+			if a.CtxID != w.CtxID {
+				t.Errorf("T9: watch %s: W1: attempt #%d carries another context identity (broken attribution)", w.File, a.Seq)
+			}
+			if a.Seq > w.Seq1 {
+				after++
+				if a.CtxErr == "" {
+					t.Errorf("T9: watch %s: W1: attempt #%d after the subject had a live context at entry", w.File, a.Seq)
+				}
+			}
+		}
+		var ids []int64
+		for _, rc := range led {
+			if rc.Pos >= w.R0 && rc.Host == composedCDNHost && rc.Path == w.Path { // MUTATION-POINT FC14-MID
+				ids = append(ids, rc.Seq)
+			}
+		}
+		t.Logf("COMPOSED-WATCH file=%s attempts=%d ended-at-entry=%d late=%d receipts=%d", w.File, n, ended, late, len(ids))
+		if w.MinAttempts > 0 && after < w.MinAttempts {
+			t.Errorf("T9: watch %s: W1: at least %d attempt(s) after the subject (the surviving work exercised), recorded %d", w.File, w.MinAttempts, after)
+		}
+		if w.Boundary {
+			ok := len(ids) == w.WantReceipts
+			for _, id := range ids {
+				if id > w.Seq0 {
+					ok = false
+				}
+			}
+			if !ok {
+				t.Errorf("T9: watch %s: (2) W2 equals the declared %d: the receipt admitted before the cut and received after it: recorded %d after the cut, attempt IDs %v, seq0 %d", w.File, w.WantReceipts, len(ids), ids, w.Seq0)
+			}
+		} else if len(ids) != w.WantReceipts {
+			t.Errorf("T9: watch %s: no CDN receipt for the watched file after the cut: recorded %d (attempt IDs %v)", w.File, len(ids), ids)
+		}
+		if w.Held >= 0 && (w.Held >= len(led) || led[w.Held].CtxEnded.IsZero()) {
+			t.Errorf("T9: watch %s: W3: the held request's server-side context did not end before its handler returned", w.File)
+		}
+		if !h.t5rDone {
+			t.Errorf("T9: watch %s: W4: T5r did not end", w.File)
+		}
+	}
+}
+
+// branchFRun is branch F (plan v7 §2.5, R25-1, R26-1): nothing a survivor
+// can read is written.
+func (h *composedHarness) branchFRun() {
+	t := h.t
+	h.branchF = true
+	// F1: the router's own state. No global is assigned.
+	h.router.setState(routerPoisoned) // MUTATION-POINT FC12-MT
+	// F1a: the checkpoint (FC12 only).
+	if h.checkpoint != nil {
+		h.checkpoint("after-F1")
+	}
+	// F2: stop the fixtures, without restoring anything; FC13's reader-tail
+	// gate, if T5r has not opened it, opens here (plan v9 §2.5).
+	h.stopFixtures()
+	h.router.openTailGate()
+	// F3: poison; the slot is kept.
+	var names []string
+	h.callNames.Range(func(k, _ any) bool {
+		names = append(names, k.(string))
+		return true
+	})
+	slices.Sort(names)
+	poisonComposed(t.Name(), h.failedStep)
+	// F4: still join and evaluate Q, to report.
+	bound := h.bound()
+	_ = h.ap.JoinWorkers(bound)
+	_ = h.fx.waitHandlersIdle(bound / 4)
+	left := waitQEmpty(h.self, bound/4)
+	h.reported = left
+	// F5: fail, naming the step and the live workers.
+	var live []string
+	for _, g := range left {
+		live = append(live, g.String())
+	}
+	t.Errorf("composed cleanup failed at %s; branch F: router %v, fixtures stopped, nothing restored, slot kept; tracked calls still live: %v; live workers (%d):\n%s",
+		h.failedStep, h.router.State(), names, len(left), strings.Join(live, "\n"))
+}
+
+// ---------------------------------------------------------------------------
+// Small helpers for the tests.
+
+// nonSilent reports whether samples hold a signal.
+func nonSilent(samples [][2]float64) bool {
+	var sum float64
+	for _, s := range samples {
+		sum += s[0]*s[0] + s[1]*s[1]
+	}
+	return len(samples) > 0 && math.Sqrt(sum/float64(2*len(samples))) > 1e-3
+}
+
+// composedWithin waits for ch up to d.
+func composedWithin[T any](ch <-chan T, d time.Duration) (T, bool) {
+	var zero T
+	select {
+	case v := <-ch:
+		return v, true
+	case <-time.After(d):
+		return zero, false
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Shared fixture helpers (M3B2-S3 split): moved byte-identically from the
+// controls and cases overlays, so the stock stage shares them.
+
+// composedMP3Track is the 6.5-chunk MP3 fixture as a track.
+func composedMP3Track(t *testing.T, n byte) *composedTrack {
+	t.Helper()
+	plain, err := composedMP3Object()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return composedTrackFrom(n, metadatapb.AudioFile_MP3_320, plain)
+}
+
+// answerKeys answers every key request with the fixture's key.
+func answerKeys(h *composedHarness, tr *composedTrack) {
+	h.ap.SetAutoKey(func(ap.Packet) []byte { return tr.Key })
+}
+
+type composedOpen struct {
+	s   beep.StreamSeekCloser
+	err error
+	at  time.Time
+}
+
+// readSamples reads n samples from s, in blocks, and returns the last block.
+func readSamples(t *testing.T, s beep.Streamer, n int) [][2]float64 {
+	t.Helper()
+	buf := make([][2]float64, 4096)
+	var last [][2]float64
+	for read := 0; read < n; {
+		k, ok := s.Stream(buf)
+		if k == 0 && !ok {
+			t.Fatalf("the stream ended after %d of %d samples", read, n)
+		}
+		read += k
+		last = append(last[:0], buf[:k]...)
+	}
+	return last
+}
+
+// composedOpenAsync starts an E-outer play through the real provider, tracked.
+func composedOpenAsync(h *composedHarness, name string, p *SpotifyProvider, uri string) <-chan composedOpen {
+	out := make(chan composedOpen, 1)
+	h.Go(name, func() {
+		s, _, _, err := p.NewStreamer(uri)
+		out <- composedOpen{s, err, time.Now()}
+	})
+	return out
+}
+
+// composedKeyWrites is how many key requests the client sent on the i-th
+// authenticated connection, or -1 when there is none.
+func composedKeyWrites(h *composedHarness, i int) int {
+	c := h.ap.Conn(i, 0)
+	if c == nil {
+		return -1
+	}
+	return c.Count(ap.PacketTypeRequestKey)
+}
+
+// composedAPDoneOf reports whether b's access point is Done.
+func composedAPDoneOf(b *playback) bool { return ap.DDSonicComposedAPDone(b.sess.Accesspoint()) }

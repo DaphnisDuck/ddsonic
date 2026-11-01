@@ -107,7 +107,32 @@ type providerSync struct {
 	// running is set from a request starting a sync until that sync
 	// decides not to run again. A request made meanwhile only counts.
 	running bool
+	// owed: one more run is to follow the running one, for an explicit
+	// refresh it would otherwise lose (request). One bit, so any number of
+	// requests owe one run. Never set for a quiet source.
+	owed bool
+	// announced: the running sync's end has been reported, and it has not
+	// given the provider up yet. Whoever saw that end and asks again is
+	// asking for a new sync.
+	announced bool
+	// requiredSeq counts the syncs a sign-in required; serving is its value
+	// when the running sync began, which the UI gets as the run's ticket.
+	requiredSeq, serving uint64
 }
+
+// syncKind is who asks for a sync.
+type syncKind int
+
+const (
+	// syncBackground is a retry timer, the startup sync, a quiet source's
+	// own change: while a sync runs it is that sync.
+	syncBackground syncKind = iota
+	// syncExplicit is "r": while a sync runs it is that sync, unless the
+	// sync's end has been reported already; then it is owed its own.
+	syncExplicit
+	// syncRequired is the sync a successful sign-in needs: always owed.
+	syncRequired
+)
 
 // openCatalog opens the catalog with a sync source for Spotify and YouTube
 // Music, when they are configured, for the music folder, when there is one,
@@ -254,6 +279,7 @@ func (rt *catalogRuntime) configure(m *model.Model) {
 		}
 	}
 	m.SetCatalogSync(status, rt.refresh)
+	m.SetCatalogSyncRequired(rt.refreshRequired)
 }
 
 // status sums up a provider's collections: the oldest success (zero unless
@@ -302,34 +328,59 @@ func (rt *catalogRuntime) start(prog *tea.Program) {
 // "r" in the library calls.
 func (rt *catalogRuntime) refresh(provider string) {
 	if provider != "" {
-		rt.sync(provider)
+		rt.request(provider, syncExplicit)
 		return
 	}
 	for p := range rt.providers {
-		rt.sync(p)
+		rt.request(p, syncExplicit)
 	}
 }
 
-// sync starts a sync of provider in the background. A sync of a provider
+// refreshRequired syncs provider because the user has just signed in to it:
+// that sync runs even when an older one still owns the provider, after it.
+// It returns the ticket the required run will carry (CatalogSyncMsg.Ticket),
+// so the library can tell an older run's end from it; zero when no sync can
+// run.
+func (rt *catalogRuntime) refreshRequired(provider string) uint64 {
+	return rt.request(provider, syncRequired)
+}
+
+// sync starts a background sync of provider (request).
+func (rt *catalogRuntime) sync(provider string) { rt.request(provider, syncBackground) }
+
+// request starts a sync of provider in the background. A sync of a provider
 // with a background worker pauses it while it runs and runs it after, so
 // it covers what the sync brought. A sync already running makes it a
 // no-op, except for a quiet source: its sync is instant and follows a
 // local change (a favorite toggled), so the running sync runs once more
 // to include it. Requests made during one sync share that one more run.
-func (rt *catalogRuntime) sync(provider string) {
+//
+// An explicit request is not lost behind a running sync either: the sync a
+// sign-in requires, and an "r" pressed after the running sync's end was
+// reported, are owed one run, which follows when the running sync gives the
+// provider up. Owed is one bit: there is no queue, and a run cannot owe
+// itself another (its own retry is a background request).
+func (rt *catalogRuntime) request(provider string, kind syncKind) (ticket uint64) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	ps := rt.providers[provider]
 	if rt.engine == nil || rt.closed || ps == nil {
-		return
+		return 0
 	}
 	ps.requests++
+	if kind == syncRequired {
+		ps.requiredSeq++
+		ticket = ps.requiredSeq
+	}
 	if ps.running {
 		// The running sync owns the provider. Starting another here would
 		// race it: arriving after its Sync returned, both would run.
-		return
+		if !ps.quiet && (kind == syncRequired || (kind == syncExplicit && ps.announced)) {
+			ps.owed = true
+		}
+		return ticket
 	}
-	ps.running = true
+	ps.running, ps.owed, ps.announced, ps.serving = true, false, false, ps.requiredSeq
 	rt.wg.Add(1)
 	go func() {
 		defer rt.wg.Done()
@@ -349,6 +400,14 @@ func (rt *catalogRuntime) sync(provider string) {
 			again := ps.quiet && err == nil && ps.requests != seen && !rt.closed
 			// The running sync, or quitting, owns what happens next.
 			owned := errors.Is(err, catalogsync.ErrRunning) || rt.ctx.Err() != nil
+			// An owed run follows this one, in the step that takes the debt,
+			// so one request owes one run. Its own result settles the retry;
+			// this run's does not.
+			if !again && ps.owed && !owned && !rt.closed {
+				again = true
+				ps.announced, ps.serving = false, ps.requiredSeq
+			}
+			ps.owed = false
 			if !again {
 				// The retry is settled before the provider is given up:
 				// settled later, this sync's result could undo the retry
@@ -374,6 +433,7 @@ func (rt *catalogRuntime) sync(provider string) {
 			rt.runWorker(provider, ps.worker)
 		}
 	}()
+	return ticket
 }
 
 // scheduleRetry arranges provider's next sync after one finished with err:
@@ -466,6 +526,11 @@ func (rt *catalogRuntime) notify(ev catalogsync.Event) {
 		return
 	}
 	if ps := rt.providers[ev.Provider]; ps != nil && ps.quiet {
+		// No status, only that the sync, sweep included, changed the rows
+		// (a station starred or unstarred), so search rereads them.
+		if ev.Kind == catalogsync.Finished {
+			rt.send(model.CatalogChangedMsg{Provider: ev.Provider})
+		}
 		return
 	}
 	var phase model.CatalogSyncPhase
@@ -477,7 +542,18 @@ func (rt *catalogRuntime) notify(ev catalogsync.Event) {
 	case catalogsync.Finished:
 		phase = model.CatalogSyncFinished
 	}
-	rt.send(model.CatalogSyncMsg{Provider: ev.Provider, Phase: phase, Collection: ev.Collection, Err: ev.Err})
+	// The end is marked as reported before it is sent, so whoever sees it
+	// and asks again is owed a run (request). Not sent under the lock.
+	var ticket uint64
+	if ps := rt.providers[ev.Provider]; ps != nil {
+		rt.mu.Lock()
+		if ev.Kind == catalogsync.Finished {
+			ps.announced = true
+		}
+		ticket = ps.serving
+		rt.mu.Unlock()
+	}
+	rt.send(model.CatalogSyncMsg{Provider: ev.Provider, Phase: phase, Collection: ev.Collection, Err: ev.Err, Ticket: ticket})
 }
 
 // close stops any sync, waits briefly for it, and closes the catalog.

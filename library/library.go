@@ -31,6 +31,13 @@ type AuthLevel interface {
 	Authenticator() playlist.Authenticator
 }
 
+// SourceMenu is implemented by a synced source's own menu (Spotify's
+// Albums, Artists, Playlists, Liked Songs). The UI offers sign-in there when
+// the source needs it, whatever the catalog holds.
+type SourceMenu interface {
+	SourceProvider() string
+}
+
 // CatalogLevel is implemented by levels read from the catalog. The UI
 // reloads them when a sync of CatalogProvider changes the catalog; an empty
 // CatalogProvider lists every source and reloads after any sync.
@@ -59,6 +66,14 @@ type OrderedLevel interface {
 	NextOrder() string
 }
 
+// NotedLevel is implemented by levels whose title alone could mislead about
+// what their rows are. The UI shows the note above the rows, in a populated
+// list and an empty one alike, each line wrapped to the panel. No lines
+// means no note.
+type NotedLevel interface {
+	Note() []string
+}
+
 // Intent is a UI action an entry requests instead of navigating.
 type Intent int
 
@@ -70,6 +85,14 @@ const (
 	IntentSearch
 	// IntentFolders opens the file browser.
 	IntentFolders
+	// IntentSignIn signs in to the entry's Source, a synced source whose
+	// player can sign in from the library (SourceMenu).
+	IntentSignIn
+	// IntentPending marks the row that stands in for a synced list with
+	// nothing cached yet. Its Source is the list's catalog provider; the UI
+	// says why the list is empty (still syncing, sign-in required, the sync
+	// failed) where it knows.
+	IntentPending
 )
 
 // Entry is one row of a Level. Exactly one action field is set, except that

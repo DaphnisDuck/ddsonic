@@ -845,6 +845,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.provSignIn = true
 			m.err = nil
 			m.status.Warningf(statusTTLLong, "Sign-in required to play %s.", track.DisplayName())
+			m.libPlaybackNeedsAuth(track) // ddsonic: the library offers the sign-in
 		} else if msg.err != nil {
 			m.err = msg.err
 			if track, idx := m.currentPlaybackTrack(); idx >= 0 {
@@ -917,7 +918,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spotSearch.cursor = 0
 		m.spotSearch.scroll = 0
 		if msg.err != nil {
-			m.setSpotSearchError(msg.err.Error())
+			m.spotSearchFailed(msg.err) // ddsonic: asks for sign-in where that is the cause
 			return m, nil
 		}
 		m.spotSearch.results = msg.tracks
@@ -934,7 +935,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cancelSpotRequest()
 		m.spotSearch.albumLoading = false
 		if msg.err != nil {
-			m.setSpotSearchError(msg.err.Error())
+			m.spotSearchFailed(msg.err) // ddsonic: asks for sign-in where that is the cause
 			return m, nil
 		}
 		if len(msg.tracks) == 0 {
@@ -964,7 +965,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spotSearch.cursor = 0
 		m.spotSearch.scroll = 0
 		if msg.err != nil {
-			m.setSpotSearchError(msg.err.Error())
+			m.spotSearchFailed(msg.err) // ddsonic: asks for sign-in where that is the cause
 			return m, nil
 		}
 		m.spotSearch.playlists = msg.playlists
@@ -981,7 +982,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cancelSpotRequest()
 		m.spotSearch.loading = false
 		if msg.err != nil {
-			m.setSpotSearchError("Add failed: " + msg.err.Error())
+			if !m.spotSearchNeedsSignIn(msg.err) { // ddsonic: else the sign-in prompt; nothing is added again
+				m.setSpotSearchError(spotAddOutcome(msg.err) + ": " + msg.err.Error())
+			}
 			return m, nil
 		}
 		m.status.Showf(statusTTLDefault, "Added to %q", msg.name)
@@ -995,7 +998,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cancelSpotRequest()
 		m.spotSearch.loading = false
 		if msg.err != nil {
-			m.setSpotSearchError("Create failed: " + msg.err.Error())
+			// ddsonic: what is known is said, and no more (library_signin.go).
+			m.spotSearchCreateFailed(msg)
 			return m, nil
 		}
 		m.status.Showf(statusTTLDefault, "Created %q & added track", msg.name)

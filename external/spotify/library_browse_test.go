@@ -10,8 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-
-	"golang.org/x/oauth2"
 )
 
 // fakeSpotifyAPI installs a transport that answers with handler's payload, or
@@ -34,7 +32,7 @@ func fakeSpotifyAPI(t *testing.T, handler func(req *http.Request) (any, int)) *S
 		}, nil
 	})
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
-	sess := &Session{tokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "token"})}
+	sess := staticSession()
 	return New(sess, "client", 320)
 }
 

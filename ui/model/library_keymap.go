@@ -7,7 +7,8 @@ package model
 // keymap overlay's entries render the table, so a cliamp key works in a view
 // if and only if it is listed. The library's own keys are handled in
 // handleLibraryKey's switch, except q, which handleKey handles; a new one
-// needs its row here too.
+// needs its row here too. One row follows the selection: f, on a directory
+// station (library_favorite.go).
 
 import (
 	"slices"
@@ -52,11 +53,10 @@ var (
 	libSkipKey = libKeyHelp{[]string{"p", "n"}, "p n", "Prev, next"}
 
 	// In search results, the back keys return to the query instead.
-	libResultKeys = slices.Concat(libMoveKeys, []libKeyHelp{
-		libOpenKey,
+	libResultBackKeys = []libKeyHelp{
 		{[]string{"/", "esc", "h", "left", "backspace"}, "/ Esc h", "Query"},
 		libPauseKey, libSkipKey, libQueueKey, libQuitKey,
-	})
+	}
 	// The search input takes q as text.
 	libSearchInputKeys = []libKeyHelp{
 		{[]string{"enter", "down", "tab"}, "Enter Tab", "Results"},
@@ -120,15 +120,15 @@ func libKeySet(rows []libKeyHelp) map[string]bool {
 // while Tab has handed it the screen, else the top of the stack.
 func (m Model) libraryKeyView() libKeyView {
 	if !m.lib.visible {
-		return libKeyView{title: "Queue", own: libQueueKeys, pass: slices.Concat(libQueuePassKeys, libPlayerKeys)}
+		return libKeyView{title: "Queue", own: slices.Concat(libQueueKeys, m.libFavoriteKeys()), pass: slices.Concat(libQueuePassKeys, libPlayerKeys)}
 	}
+	own := slices.Concat(libMoveKeys, []libKeyHelp{libOpenKey}, m.libFavoriteKeys())
 	if _, searching := m.libSearchLevel(); searching {
 		if m.lib.searchInput { // the input takes every other key as text
 			return libKeyView{title: "Library Search", own: libSearchInputKeys}
 		}
-		return libKeyView{title: "Search Results", own: libResultKeys, pass: libPlayerKeys}
+		return libKeyView{title: "Search Results", own: slices.Concat(own, libResultBackKeys), pass: libPlayerKeys}
 	}
-	own := slices.Concat(libMoveKeys, []libKeyHelp{libOpenKey})
 	if len(m.lib.stack) > 1 {
 		own = append(own, libBackKey)
 	}

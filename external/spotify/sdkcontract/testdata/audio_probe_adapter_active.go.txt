@@ -1,0 +1,16 @@
+package audio
+
+// ddsonic probe adapter for the active tree (patch 0002); the base has
+// audio_probe_adapter_base.go.txt in its place, with the same function.
+//
+// Observation: the patched receiver counts each answer it takes that finds
+// no live request (L5's discard, p.unknown) and logs nothing. Like the base
+// adapter, it counts only answers the receiver has taken.
+
+// bpUnknownAnswers is how many answers the provider took that found no live
+// request.
+func bpUnknownAnswers(p *KeyProvider, _ *bpLogger) uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.unknown
+}

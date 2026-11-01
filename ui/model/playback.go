@@ -472,6 +472,7 @@ func (m *Model) playTrack(track playlist.Track) tea.Cmd {
 		if errors.Is(err, playlist.ErrNeedsAuth) {
 			m.provSignIn = true
 			m.err = nil
+			m.libPlaybackNeedsAuth(track) // ddsonic: the library offers the sign-in
 		} else {
 			m.err = err
 		}

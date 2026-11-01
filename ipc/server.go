@@ -121,6 +121,10 @@ func NewServerWithBroker(sockPath string, broker *Broker) (*Server, error) {
 }
 
 func newServer(sockPath string, broker *Broker, brokerOwned bool) (*Server, error) {
+	// ddsonic: before the probe, so the refusal isn't worded as a failed dial.
+	if err := ValidateSocketPath(sockPath); err != nil {
+		return nil, err
+	}
 	if err := cleanStaleSocket(sockPath); err != nil {
 		return nil, err
 	}

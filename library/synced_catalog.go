@@ -21,15 +21,56 @@ import (
 type catalogLevel struct {
 	funcLevel
 	provider string
+	note     []string // what the list holds, when its title could mislead
 }
 
 func (l *catalogLevel) CatalogProvider() string { return l.provider }
+
+// Note implements NotedLevel; most lists have none.
+func (l *catalogLevel) Note() []string { return l.note }
 
 // catalogAlbumsLevel is a catalog Albums list, sorted by title or by artist. The
 // order is the browser's, so it holds while the list is reopened.
 type catalogAlbumsLevel struct {
 	catalogLevel
 	order *atomic.Int32 // a catalog.AlbumOrder
+}
+
+// The lists of a source with PartialAlbums are not "Albums" and "Artists":
+// its saved albums and followed artists are not synced, and the lists must
+// not read as if they were.
+const (
+	AlbumsFromTracks  = "Albums from tracks"
+	ArtistsFromTracks = "Artists from tracks"
+	// FromTracks labels such a source's album and artist rows where
+	// sources mix (All Music, search), after the source's name.
+	FromTracks = "from tracks"
+)
+
+// tracksList describes a list a PartialAlbums source builds from its
+// tracks: its title, what the account has that it is not, and its row when
+// empty.
+type tracksList struct {
+	title     string
+	notSynced string // has one %s, the source's title
+	caveat    string // ends the note's second sentence, or ""
+	none      string
+}
+
+var (
+	albumsFromTracks = tracksList{AlbumsFromTracks, "Saved %s Library Albums are not synchronized.",
+		"; albums may be incomplete", "No albums found in your tracks yet"}
+	artistsFromTracks = tracksList{ArtistsFromTracks, "Followed %s artists are not synchronized.",
+		"", "No artists found in your tracks yet"}
+)
+
+// note says what the list holds, a sentence a line; the UI wraps them to
+// its panel.
+func (l tracksList) note(source, liked string) []string {
+	return []string{
+		fmt.Sprintf(l.notSynced, source),
+		"Grouped from " + liked + " and synced playlists" + l.caveat + ".",
+	}
 }
 
 var albumOrderNames = map[catalog.AlbumOrder]string{catalog.ByTitle: "by title", catalog.ByArtist: "by artist"}
@@ -63,7 +104,10 @@ type SyncedSource struct {
 	LikedTitle string
 	// PartialAlbums marks a source whose albums hold only the tracks the
 	// catalog has (YouTube's, derived from enriched tracks): an album opens
-	// and plays as it is, never fetched whole.
+	// and plays as it is, never fetched whole. Its artists are derived the
+	// same way. Its lists are titled AlbumsFromTracks and ArtistsFromTracks
+	// and carry a note saying so, and its album and artist rows are
+	// labelled FromTracks where sources mix.
 	PartialAlbums bool
 }
 
@@ -73,12 +117,18 @@ type SyncedSource struct {
 func SyncedMenu(cat catalog.Catalog, src SyncedSource) Level {
 	b := syncedBrowser(cat, src)
 	liked := cmp.Or(src.LikedTitle, "Liked Songs")
+	albums, artists := tracksList{title: "Albums"}, tracksList{title: "Artists"}
+	var albumsNote, artistsNote []string
+	if src.PartialAlbums {
+		albums, artists = albumsFromTracks, artistsFromTracks
+		albumsNote, artistsNote = albums.note(src.Title, liked), artists.note(src.Title, liked)
+	}
 	lists := []struct {
 		collection string
 		entry      Entry
 	}{
-		{catalog.CollectionAlbums, Entry{Title: "Albums", Open: b.albumsList(b.albums)}},
-		{catalog.CollectionArtists, Entry{Title: "Artists", Open: b.list("Artists", b.artists)}},
+		{catalog.CollectionAlbums, Entry{Title: albums.title, Open: b.albumsList(albums.title, albumsNote, b.albums)}},
+		{catalog.CollectionArtists, Entry{Title: artists.title, Open: b.notedList(artists.title, artistsNote, b.artists)}},
 		{catalog.CollectionPlaylists, Entry{Title: "Playlists", Open: b.list("Playlists", b.playlists)}},
 		{catalog.CollectionLiked, Entry{Title: liked, Open: b.list(liked, b.liked)}},
 	}
@@ -88,8 +138,16 @@ func SyncedMenu(cat catalog.Catalog, src SyncedSource) Level {
 			entries = append(entries, l.entry)
 		}
 	}
-	return Menu(src.Title, entries...)
+	return &sourceMenu{Menu(src.Title, entries...), src.Provider}
 }
+
+// sourceMenu is a synced source's menu (SourceMenu).
+type sourceMenu struct {
+	Level
+	provider string
+}
+
+func (m *sourceMenu) SourceProvider() string { return m.provider }
 
 func syncedBrowser(cat catalog.Catalog, src SyncedSource) *catalogBrowser {
 	return &catalogBrowser{cat: cat, prov: src.Player, provider: src.Provider, partialAlbums: src.PartialAlbums,
@@ -110,14 +168,19 @@ type catalogBrowser struct {
 	partialAlbums bool
 }
 
-// albumsList is the Albums list, which the UI can reorder.
-func (b *catalogBrowser) albumsList(load func(ctx context.Context) ([]Entry, error)) Level {
-	return &catalogAlbumsLevel{catalogLevel{funcLevel{"Albums", load}, b.provider}, &b.albumOrder}
+// albumsList is the albums list, which the UI can reorder.
+func (b *catalogBrowser) albumsList(title string, note []string, load func(ctx context.Context) ([]Entry, error)) Level {
+	return &catalogAlbumsLevel{catalogLevel{funcLevel{title, load}, b.provider, note}, &b.albumOrder}
 }
 
 // list is a top-level catalog list, refreshed after syncs.
 func (b *catalogBrowser) list(title string, load func(ctx context.Context) ([]Entry, error)) Level {
-	return &catalogLevel{funcLevel{title, load}, b.provider}
+	return b.notedList(title, nil, load)
+}
+
+// notedList is a list with a note saying what it holds.
+func (b *catalogBrowser) notedList(title string, note []string, load func(ctx context.Context) ([]Entry, error)) Level {
+	return &catalogLevel{funcLevel{title, load}, b.provider, note}
 }
 
 // level is a level beneath the lists. It may fall back to the provider, so
@@ -185,7 +248,7 @@ func (b *catalogBrowser) syncingPlaceholder(ctx context.Context, entries []Entry
 			return entries, nil
 		}
 	}
-	return []Entry{{Title: b.pending}}, nil
+	return []Entry{{Title: b.pending, Intent: IntentPending, Source: b.provider}}, nil
 }
 
 func (b *catalogBrowser) albums(ctx context.Context) ([]Entry, error) {
@@ -197,7 +260,18 @@ func (b *catalogBrowser) albums(ctx context.Context) ([]Entry, error) {
 	for i, a := range albums {
 		entries[i] = b.albumEntry(a, a.Artist)
 	}
-	return b.syncingPlaceholder(ctx, entries)
+	return b.fromTracksPlaceholder(ctx, entries, albumsFromTracks)
+}
+
+// fromTracksPlaceholder is syncingPlaceholder for a list that a
+// PartialAlbums source builds from its tracks: synced and still empty, it
+// says that no track read so far has what the list groups by.
+func (b *catalogBrowser) fromTracksPlaceholder(ctx context.Context, entries []Entry, list tracksList) ([]Entry, error) {
+	entries, err := b.syncingPlaceholder(ctx, entries)
+	if err == nil && len(entries) == 0 && b.partialAlbums {
+		entries = []Entry{{Title: list.none}}
+	}
+	return entries, err
 }
 
 func (b *catalogBrowser) albumEntry(a catalog.Album, detail string) Entry {
@@ -248,7 +322,7 @@ func (b *catalogBrowser) artists(ctx context.Context) ([]Entry, error) {
 	for i, a := range artists {
 		entries[i] = b.artistEntry(a)
 	}
-	return b.syncingPlaceholder(ctx, entries)
+	return b.fromTracksPlaceholder(ctx, entries, artistsFromTracks)
 }
 
 func (b *catalogBrowser) artistEntry(a catalog.Artist) Entry {

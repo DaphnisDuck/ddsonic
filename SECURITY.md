@@ -16,10 +16,15 @@ The latest release. Before 1.0 is released, that is the `main` branch and the la
 
 The only official binaries are the files published on this repository's [Releases](https://github.com/DaphnisDuck/ddsonic/releases) page (release candidates are marked "Pre-release"), and the AUR package `ddsonic-bin`, which installs those files, once it exists. Anything else is someone else's build; ddsonic can always be built from source (see the [README](README.md#install)).
 
-Each release carries `SHA256SUMS` and a build attestation, to check a download with:
+Each release carries `SHA256SUMS`, to check a download with:
 
 ```sh
 sha256sum -c --ignore-missing SHA256SUMS
+```
+
+`v1.0.0` has no build attestation. It was built locally in the project's pinned build image, not by the release workflow, so `gh attestation verify` has nothing to check for it; [SOURCE-PROVENANCE.md](SOURCE-PROVENANCE.md) says which source it was built from. The release candidates `v1.0.0-rc.1` to `v1.0.0-rc.3` were built by the release workflow and carry a build attestation, checked with:
+
+```sh
 gh attestation verify ddsonic-<version>-linux-amd64.tar.gz --repo DaphnisDuck/ddsonic
 ```
 

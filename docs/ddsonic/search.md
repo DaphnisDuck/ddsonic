@@ -20,21 +20,21 @@ Results come in sections, best match first:
 
 | Section | Shown | What |
 |---|---|---|
-| Artists | 5 | Followed Spotify artists, local artists, and artists credited on your albums and tracks |
-| Albums | 8 | Saved Spotify albums and local albums, labelled with their source |
-| Tracks | 20 | Liked, playlist, cached-album and local tracks |
+| Artists | 5 | Followed Spotify artists, local artists, and artists credited on your albums and tracks. YouTube Music artists are always the credited kind, labelled `YouTube · from tracks`: followed YouTube Music artists are not synchronized |
+| Albums | 8 | Saved Spotify albums and local albums, labelled with their source, and albums found in your YouTube Music tracks, labelled `YouTube · from tracks` (not your saved Library Albums, and possibly incomplete) |
+| Tracks | 20 | Liked, playlist, cached-album and local tracks, each labelled with its source after its name (`Local`, `Spotify`, `YouTube`) |
 | Playlists | 5 | Spotify playlists you own or follow |
-| Stations | 5 | Your favorite radio stations first, then the built-in and `radios.toml` stations |
+| Stations | 5 | Your favorite radio stations first, then the built-in and `radios.toml` stations, labelled `Radio` |
 
 A full section ends in **More…**, which lists up to 200 matches of that kind.
 
-Opening a result works exactly as it does while browsing: an album opens its tracks, an artist their albums, a playlist its tracks. **Enter on a track plays its album from that track.** A Spotify album whose tracks aren't cached yet is fetched first. Offline, or for a track with no album, only the track plays. A station plays as a live stream.
+Opening a result works exactly as it does while browsing: an album opens its tracks, an artist their albums, a playlist its tracks. **Enter on a track plays its album from that track.** A Spotify album whose tracks aren't cached yet is fetched first. Offline, or for a track with no album, only the track plays. A station plays as a live stream. On a starred station, and on a station in the radio directory's results, `f` adds it to Radio → Favorites or takes it out; the results follow.
 
 ## Beyond your library
 
 Search reads only the catalog, so it never waits on the network. Two rows at the end reach outside it when you choose them:
 
-- **Search Spotify for "…"** (and the same for any source that can search live, such as YouTube Music signed in with cookies only) opens that service's own search with your query already running. There you can find music you haven't saved, and add it to a playlist. `Enter` on a track or an album replaces the queue and plays it, as the library does; `a` adds it to the end of the queue and `q` plays it next. Stopping playback while an album is still opening cancels it.
+- **Search Spotify for "…"** (and the same for any source that can search live, such as YouTube Music signed in with cookies only) opens that service's own search with your query already running, in place of the library's results. The screen names the service and the query ("Searching Spotify for …", then "Spotify results for …"), since a recording you have locally is often on the service too and its rows carry no source label. There you can find music you haven't saved, and add it to a playlist. `Esc` goes back to the query, and `Esc` again to your library's results, as you left them. `Enter` on a track or an album replaces the queue and plays it, as the library does; `a` adds it to the end of the queue and `q` plays it next. Stopping playback while an album is still opening cancels it.
 - **Search the radio directory for "…"** lists matching stations from the Radio Browser directory (about 58,000 stations).
 
 ## Query language

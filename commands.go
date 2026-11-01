@@ -925,6 +925,8 @@ func visCommand() *cli.Command {
 				var active string
 				if snapshot, err := ipcState(); err == nil {
 					active = snapshot.Visualizer
+				} else if socketPathTooLong(err) { // ddsonic: that is not "not running"
+					return err
 				} else {
 					fmt.Fprintf(os.Stderr, "(%s not running — active marker unavailable)\n", appmeta.ClientName()) // ddsonic
 				}

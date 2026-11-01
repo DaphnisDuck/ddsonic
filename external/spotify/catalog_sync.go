@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/bjarneo/cliamp/catalog"
-	"github.com/bjarneo/cliamp/playlist"
 	"github.com/bjarneo/cliamp/provider"
 )
 
@@ -112,7 +111,7 @@ func (p *SpotifyProvider) LikedTracksHead(ctx context.Context) (catalog.Collecti
 // lists newest first, with its total. An item the sync would skip (a local
 // file, say) leaves NewestID empty, so the head matches nothing stored.
 func (p *SpotifyProvider) collectionHead(ctx context.Context, path string, id func(savedEntry) (string, bool)) (catalog.CollectionHead, error) {
-	if err := p.ensureWebAPI(); err != nil {
+	if err := p.ensureSession(); err != nil {
 		return catalog.CollectionHead{}, err
 	}
 	resp, err := p.webAPI(ctx, "GET", path, url.Values{"limit": {"1"}})
@@ -179,7 +178,7 @@ func (p *SpotifyProvider) PlaylistRecords(ctx context.Context) ([]catalog.Playli
 // depends on it, and a sync must not record them all as followed after a
 // network blip.
 func (p *SpotifyProvider) userIDForSync(ctx context.Context) (string, error) {
-	if err := p.ensureWebAPI(); err != nil {
+	if err := p.ensureSession(); err != nil {
 		return "", err
 	}
 	resp, err := p.webAPI(ctx, "GET", "/v1/me", nil)
@@ -200,7 +199,7 @@ func (p *SpotifyProvider) userIDForSync(ctx context.Context) (string, error) {
 
 // FollowedArtistRecords returns every followed artist (cursor paging).
 func (p *SpotifyProvider) FollowedArtistRecords(ctx context.Context) ([]catalog.ArtistRecord, error) {
-	if err := p.ensureWebAPI(); err != nil {
+	if err := p.ensureSession(); err != nil {
 		return nil, err
 	}
 	var out []catalog.ArtistRecord
@@ -286,13 +285,9 @@ func (p *SpotifyProvider) webAPIOnce(ctx context.Context, method, path string, q
 	if err := p.rateLimited(); err != nil {
 		return nil, err
 	}
-	p.mu.Lock()
-	sess := p.session
-	p.mu.Unlock()
-	if sess == nil {
-		return nil, playlist.ErrNeedsAuth
-	}
-	resp, err := sess.webApiWithBody(ctx, method, path, query, nil, "")
+	// The request and what its answer says about the sign-in are the shared
+	// path's (request); only the rule for rate limits below is this one's.
+	resp, err := p.request(ctx, &apiCall{method: method, path: path, query: query})
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +310,7 @@ func (p *SpotifyProvider) webAPIOnce(ctx context.Context, method, path string, q
 // every item Spotify reported was read and the total held steady across
 // pages.
 func pageRecords[T, R any](ctx context.Context, p *SpotifyProvider, get webGetter, path string, extra url.Values, conv func(T) (R, bool)) ([]R, error) {
-	if err := p.ensureWebAPI(); err != nil {
+	if err := p.ensureSession(); err != nil {
 		return nil, err
 	}
 	var out []R

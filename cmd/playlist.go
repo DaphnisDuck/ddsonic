@@ -15,6 +15,7 @@ import (
 
 	"github.com/bjarneo/cliamp/external/local"
 	"github.com/bjarneo/cliamp/internal/sshurl"
+	"github.com/bjarneo/cliamp/library"
 	"github.com/bjarneo/cliamp/player"
 	"github.com/bjarneo/cliamp/playlist"
 	"github.com/bjarneo/cliamp/resolve"
@@ -38,12 +39,12 @@ func PlaylistList() error {
 
 	maxName := 0
 	for _, pl := range lists {
-		if len(pl.Name) > maxName {
-			maxName = len(pl.Name)
+		if n := len(library.CleanText(pl.Name)); n > maxName {
+			maxName = n
 		}
 	}
 	for _, pl := range lists {
-		fmt.Printf("  %-*s  %d tracks\n", maxName, pl.Name, pl.TrackCount)
+		fmt.Printf("  %-*s  %d tracks\n", maxName, library.CleanText(pl.Name), pl.TrackCount)
 	}
 	return nil
 }
@@ -229,7 +230,7 @@ func PlaylistDirs(name string) error {
 		if !src.Recursive {
 			mode = "non-recursive"
 		}
-		fmt.Printf("  %d. %s (%s)\n", i+1, src.Path, mode)
+		fmt.Printf("  %d. %s (%s)\n", i+1, library.CleanText(src.Path), mode)
 	}
 	return nil
 }
@@ -302,13 +303,15 @@ func PlaylistShow(name string, jsonOutput bool) error {
 		return enc.Encode(out)
 	}
 
-	fmt.Printf("Playlist: %s (%d tracks)\n\n", name, len(tracks))
+	// Titles come from imported playlists and tags, so control characters are
+	// dropped before they reach the terminal. The JSON form above keeps them.
+	fmt.Printf("Playlist: %s (%d tracks)\n\n", library.CleanText(name), len(tracks))
 	for i, t := range tracks {
 		display := t.Title
 		if t.Artist != "" {
 			display = t.Artist + " - " + t.Title
 		}
-		fmt.Printf("  %3d. %s\n", i+1, display)
+		fmt.Printf("  %3d. %s\n", i+1, library.CleanText(display))
 	}
 	return nil
 }
@@ -378,7 +381,7 @@ func PlaylistDedupe(name string) error {
 	for _, t := range tracks {
 		if _, ok := seen[t.Path]; ok {
 			removed++
-			fmt.Printf("  removed duplicate: %s\n", t.Path)
+			fmt.Printf("  removed duplicate: %s\n", library.CleanText(t.Path))
 			continue
 		}
 		seen[t.Path] = struct{}{}
@@ -450,7 +453,7 @@ func PlaylistDoctor(name string, fix bool) error {
 			if missingLocalFile(t) {
 				missing++
 				totalMissing++
-				fmt.Printf("  [%s] missing: %s\n", plName, t.Path)
+				fmt.Printf("  [%s] missing: %s\n", library.CleanText(plName), library.CleanText(t.Path))
 				if fix {
 					continue
 				}
@@ -567,9 +570,9 @@ func PlaylistBookmark(name string, index int) error {
 	for _, t := range tracks {
 		if t.Path == original.Path {
 			if t.Bookmark {
-				fmt.Printf("★ %s\n", t.DisplayName())
+				fmt.Printf("★ %s\n", library.CleanText(t.DisplayName()))
 			} else {
-				fmt.Printf("☆ %s\n", t.DisplayName())
+				fmt.Printf("☆ %s\n", library.CleanText(t.DisplayName()))
 			}
 			return nil
 		}
@@ -597,7 +600,7 @@ func PlaylistBookmarks() error {
 		}
 		for i, t := range tracks {
 			if t.Bookmark {
-				fmt.Printf("  ★ [%s] %d. %s\n", pl.Name, i+1, t.DisplayName())
+				fmt.Printf("  ★ [%s] %d. %s\n", library.CleanText(pl.Name), i+1, library.CleanText(t.DisplayName()))
 				total++
 			}
 		}
@@ -644,7 +647,7 @@ func PlaylistEnrich(name string, source string) error {
 			if dur > 0 {
 				tracks[i].DurationSecs = dur
 				changed = true
-				fmt.Fprintf(os.Stderr, "  %s: %ds\n", t.DisplayName(), dur)
+				fmt.Fprintf(os.Stderr, "  %s: %ds\n", library.CleanText(t.DisplayName()), dur)
 			}
 		}
 
@@ -665,7 +668,7 @@ func PlaylistEnrich(name string, source string) error {
 			if year := probeYear(t.Path); year != 0 {
 				tracks[i].Year = year
 				changed = true
-				fmt.Fprintf(os.Stderr, "  %s: %d\n", t.DisplayName(), year)
+				fmt.Fprintf(os.Stderr, "  %s: %d\n", library.CleanText(t.DisplayName()), year)
 			}
 		}
 

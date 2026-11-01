@@ -1428,7 +1428,9 @@ func (m *Model) handlePaste(content string) tea.Cmd {
 	if m.spotSearch.visible {
 		switch m.spotSearch.screen {
 		case spotSearchInput:
+			before := m.spotSearch.query // ddsonic: a paste ends the search in flight
 			m.insertText("spot-search", &m.spotSearch.query, content)
+			m.spotSearchQueryEdited(before)
 		case spotSearchNewName:
 			m.insertText("spot-playlist-name", &m.spotSearch.newName, content)
 		}

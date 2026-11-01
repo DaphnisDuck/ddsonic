@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bjarneo/cliamp/internal/ytdlcookies"
+	"github.com/bjarneo/cliamp/internal/ytdlp"
 	"github.com/bjarneo/cliamp/playlist"
 )
 
@@ -93,7 +94,7 @@ func parseYTDLPlaylistFeed(r io.Reader) ([]playlist.PlaylistInfo, error) {
 // FetchUserPlaylists invokes yt-dlp to scrape user playlists from
 // https://www.youtube.com/feed/playlists using the specified browser session.
 // If browser is empty, the cookie source configured for YouTube is used.
-func FetchUserPlaylists(browser string) ([]playlist.PlaylistInfo, error) {
+func FetchUserPlaylists(browser string) (_ []playlist.PlaylistInfo, err error) {
 	if _, err := exec.LookPath("yt-dlp"); err != nil {
 		return nil, fmt.Errorf("yt-dlp not found in PATH — see https://github.com/yt-dlp/yt-dlp#installation")
 	}
@@ -111,7 +112,11 @@ func FetchUserPlaylists(browser string) ([]playlist.PlaylistInfo, error) {
 	}
 	args = append(args, "--", "https://www.youtube.com/feed/playlists")
 
-	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
+	cmd, release, err := ytdlp.Command(ctx, args...) // ddsonic: no ambient configuration, no cookie copy left behind
+	if err != nil {
+		return nil, err
+	}
+	defer ytdlp.Finish(release, &err)
 	cmd.WaitDelay = 3 * time.Second
 	var stderr strings.Builder
 	cmd.Stderr = &stderr

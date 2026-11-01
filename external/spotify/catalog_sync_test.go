@@ -15,8 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/oauth2"
-
 	"github.com/bjarneo/cliamp/catalog"
 	"github.com/bjarneo/cliamp/catalogsync/spotifysrc"
 	"github.com/bjarneo/cliamp/playlist"
@@ -238,7 +236,7 @@ func rateLimitedAPI(t *testing.T, status *int, retryAfter *string) (*SpotifyProv
 			Header: h, Body: io.NopCloser(strings.NewReader(`{}`)), Request: req}, nil
 	})
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
-	return New(&Session{tokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "token"})}, "client", 320), &calls
+	return New(staticSession(), "client", 320), &calls
 }
 
 // The background fetch reports a rate limit at once, with Spotify's

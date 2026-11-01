@@ -15,8 +15,8 @@ const emptyLibrary = "Your library is empty. Press r to sync."
 // side by side. Its lists reload after any source syncs.
 func (s *catalogView) libraryMenu() Level {
 	return Menu("All Music",
-		Entry{Title: "Albums", Open: &catalogAlbumsLevel{catalogLevel{funcLevel{"Albums", s.allAlbums}, anyProvider}, &s.albumOrder}},
-		Entry{Title: "Artists", Open: &catalogLevel{funcLevel{"Artists", s.allArtists}, anyProvider}},
+		Entry{Title: "Albums", Open: &catalogAlbumsLevel{catalogLevel{funcLevel{"Albums", s.allAlbums}, anyProvider, nil}, &s.albumOrder}},
+		Entry{Title: "Artists", Open: &catalogLevel{funcLevel{"Artists", s.allArtists}, anyProvider, nil}},
 	)
 }
 

@@ -60,6 +60,110 @@ Radio may reasonably remain a somewhat separate concept because its semantics di
 
 ---
 
+## Provider Foundations
+
+Decided on 2026-10-09, after the `v1.0.0-rc.3` report that albums saved in YouTube Music never appeared in ddsonic. The triage found no sync defect: ddsonic had never read saved Library Albums or followed artists, and listed albums and artists derived from synced tracks under the same names, "Albums" and "Artists", that Spotify uses for saved albums and followed artists. 1.0 corrects the wording only ("Albums from tracks", "Artists from tracks"; see [youtube.md](youtube.md#albums-from-tracks-and-artists-from-tracks-enrichment)). The work below is what the triage showed to be missing underneath.
+
+All of it is post-1.0. None of it is required for v1.0.0, and nothing here is built before 1.0.
+
+### Order of provider work
+
+Unlike the ideas further down, this order is an owner decision, recorded in [plan.md](../../plan.md#post-10-backlog):
+
+1. [YouTube Music Provider v2](#youtube-music-provider-v2), together with the provider-contract work it informs. It is the first major post-1.0 provider initiative.
+2. The [Provider Admission Contract](#provider-admission-contract) is established and applied before any additional provider is integrated.
+3. Further providers ([Additional Providers](#additional-providers), [Apple Music](#apple-music-provider)) come only after each has been evaluated against that contract.
+
+Providers are not added first and normalized later. This order is among provider work only: the full upstream merge remains the first 1.1 work (see [Existing Deferred Work](#existing-deferred-work)).
+
+### YouTube Music Provider v2
+
+The goal is broader than adding saved albums. Re-evaluate the YouTube Music integration as a first-class ddsonic provider whose library semantics are explicit, trustworthy and complete enough for the "all your music in one place" model.
+
+**Where it stands at 1.0.** Playlists and Liked Music sync, through the youtube.com playlists feed with browser cookies (yt-dlp) or the YouTube Data API with OAuth. Albums and artists are derived from those tracks by enrichment, keyed by name, not by a YouTube ID. Neither current ddsonic integration enumerates saved Library Albums, followed artists or playlists saved from others; `youtube_playlists` is the manual workaround, also for a whole album through its `OLAK5uy_` playlist. The cookie playlists feed carries no count to check a short read against.
+
+**Approaches to compare**, at least:
+
+- keep the current stack and fill the missing capabilities with a thin direct YouTube Music library layer;
+- adopt a stronger existing YouTube Music client or library;
+- implement a narrow ddsonic-owned YouTube Music interface for the capabilities ddsonic actually needs.
+
+One promising architecture to evaluate, not a decision: ddsonic owns the authoritative YouTube Music library semantics and identity, while yt-dlp stays responsible for media and track extraction, where it is strong.
+
+**The design should consider:**
+
+- saved Library Albums;
+- followed or saved artists;
+- liked tracks;
+- playlists and playlist contents;
+- complete album contents;
+- stable provider IDs for tracks, albums and playlists;
+- additions and removals;
+- refresh semantics;
+- pagination;
+- authentication and reauthentication;
+- reconciliation;
+- authoritative versus derived provenance;
+- cache safety;
+- failure behavior;
+- interaction with yt-dlp.
+
+**Follow-ups gathered here.** These were separate backlog entries; they are now parts of this initiative, and their recorded conditions stand:
+
+- True saved Library Albums: reading the user's YouTube Music library albums, in place of or beside "Albums from tracks". Open questions from the triage: album identity against the name-keyed derived albums, and how the two reconcile.
+- Followed artists, in place of or beside "Artists from tracks".
+- InnerTube (YouTube Music's private API) investigation: cookie-authenticated and unofficial; authentication, continuation tokens, response parsing and maintenance risk are open. Originally recorded for discovering saved playlists the Data API does not list (2026-09-29), and extended to saved albums and followed artists on 2026-10-09.
+- The cookie playlists feed's missing count: guard against a short read reconciling playlists away.
+- Known limits recorded in [plan.md's M4 notes](../../plan.md#m4-implementation-plan-youtube-music-v04): the Data API lists few or none of some accounts' playlists; a Testing-status OAuth client loses its sign-in about weekly; the feed does not reliably tell own playlists from saved ones.
+
+A legitimate result for any capability is that it cannot be provided reliably. The [admission contract](#provider-admission-contract) then decides how YouTube Music is presented.
+
+### Provider Admission Contract
+
+Before any music provider is added after 1.0, define a formal minimum baseline of capabilities a provider needs in order to take part honestly in "all your music in one place". The capability lists below are candidates for evaluation, not a settled contract.
+
+**Candidate minimum capabilities:**
+
+- reliable and recoverable authentication;
+- saved or liked tracks;
+- saved albums;
+- playlists, and playlist contents;
+- complete album contents;
+- stable track, album and playlist IDs;
+- additions detected, and removals detected;
+- manual refresh, and startup or background refresh;
+- complete pagination;
+- enough metadata for a unified catalog identity;
+- playback;
+- safe failure behavior that does not destroy valid cached state.
+
+Followed artists are to be evaluated deliberately, not assumed mandatory.
+
+**Authoritative and derived collections.** The contract must distinguish a collection the provider's library actually holds (authoritative: Spotify's saved albums) from one ddsonic derives from other data (derived: YouTube Music's albums from tracks). The rc.3 YouTube Music Albums and Artists issue is the example: a derived collection was shown under an authoritative collection's name, the sync reported success, and nothing told the user why a saved album was missing. The two kinds have to be modeled separately so that the UI cannot present one as the other.
+
+**How each capability is available.** For every provider, record for each capability which of these supplies it:
+
+- official documented API;
+- unofficial or private API;
+- maintained third-party library;
+- browser or session integration;
+- extraction tool;
+- unsupported or unknown.
+
+**When a provider cannot satisfy the contract**, the acceptable outcomes are:
+
+- A. ddsonic implements and owns the missing integration;
+- B. the provider is presented explicitly as a limited, non-library source, with accurate UI semantics;
+- C. the provider is removed from, or deferred on, the roadmap.
+
+Partial provider semantics are never shipped silently under the same UI contract as first-class providers.
+
+**Later investigation.** Express the contract in Go provider capabilities, not only in documentation, so UI behavior follows from it; see [Capability-Based Provider Architecture](#capability-based-provider-architecture). A small related cleanup: the internal flag `library.SyncedSource.PartialAlbums` now governs both "Albums from tracks" and "Artists from tracks", so its name misleads. Rename it, or replace it with whatever models derived collections, as part of this work. It was left as it is in the 1.0 fix on purpose: no correctness reason to touch reviewed code.
+
+Spotify and Local are to be recorded against the contract too, once it exists, so that the baseline describes what ships and not only what is added.
+
+---
+
 ## Ideas
 
 ### Track Info / Metadata Redesign
@@ -82,7 +186,7 @@ Radio may reasonably remain a somewhat separate concept because its semantics di
 **Architectural relationships (reuse these workstreams rather than duplicate them):**
 
 - Provider capability modeling and source abstraction: [Capability-Based Provider Architecture](#capability-based-provider-architecture), building on [M4](../../plan.md#m4-multi-provider-expansion), [capability-driven menus](../../plan.md#capability-driven-menus-m41) and the [architecture invariants](../../plan.md#architecture-invariants). Capability decisions belong in the adapters, not provider-specific view branches; the metadata inventory should inform the shared model.
-- Metadata enrichment: [Metadata Enrichment](#metadata-enrichment), building on [M4's YouTube Music plan](../../plan.md#m4-implementation-plan-youtube-music-v04), [YouTube enrichment](youtube.md#albums-and-artists-enrichment) and the [catalog](catalog.md). Reuse enrichment results; this item does not independently authorize enrichment or metadata correction.
+- Metadata enrichment: [Metadata Enrichment](#metadata-enrichment), building on [M4's YouTube Music plan](../../plan.md#m4-implementation-plan-youtube-music-v04), [YouTube enrichment](youtube.md#albums-from-tracks-and-artists-from-tracks-enrichment) and the [catalog](catalog.md). Reuse enrichment results; this item does not independently authorize enrichment or metadata correction.
 - Full provider/library unification and source abstraction: [music should belong to the user, not the provider](#music-should-belong-to-the-user-not-the-provider). Keep the Track Info presentation aligned with that shared music model without defining a parallel one.
 - Classical music modeling: [Classical Music Metadata](#classical-music-metadata); use its work/movement and performer relationships when available, without deciding the underlying schema in this UI investigation.
 - Responsive terminal UI and artwork: [M9](../../plan.md#m9-implementation-plan-responsive-layout-v09), [layout notes](layout.md), [M10](../../plan.md#m10-implementation-plan-album-artwork-in-track-info-v010) and [artwork layout](artwork.md#layout). Investigate changes to field/artwork geometry within this item; protocol and library coverage belongs to [Album Artwork Across More Terminals](#album-artwork-across-more-terminals).
@@ -113,7 +217,7 @@ Produce a tested terminal/protocol compatibility matrix and a recommendation com
 
 ### Metadata Enrichment
 
-Existing foundation: [YouTube enrichment](youtube.md#albums-and-artists-enrichment) already supplies catalog metadata. Investigate broader coverage and provenance without replacing that work by default. Track Info presentation is covered [separately](#track-info--metadata-redesign).
+Existing foundation: [YouTube enrichment](youtube.md#albums-from-tracks-and-artists-from-tracks-enrichment) already supplies catalog metadata. Investigate broader coverage and provenance without replacing that work by default. Track Info presentation is covered [separately](#track-info--metadata-redesign).
 
 Investigate automatically enriching incomplete metadata supplied by local files or providers.
 
@@ -340,6 +444,8 @@ Avoid introducing licensing uncertainty or maintaining a large bundled audio col
 
 ### Additional Providers
 
+No provider is added before the [Provider Admission Contract](#provider-admission-contract) exists and the candidate has been evaluated against it; see the [order of provider work](#order-of-provider-work).
+
 Preserve the existing selection constraint: only providers the owner uses and can test; inherited providers hidden for 1.0 are candidates, not promised restorations. Include metadata capabilities in the [Track Info inventory](#track-info--metadata-redesign).
 
 Continue evaluating providers that make sense within ddsonic's architecture.
@@ -360,7 +466,7 @@ The usefulness of a provider should be weighed against:
 
 Investigate whether Apple Music can realistically be supported as a provider.
 
-This is specifically a **feasibility investigation**, not a promised provider.
+This is specifically a **feasibility investigation**, not a promised provider. It comes after the [Provider Admission Contract](#provider-admission-contract), and its questions include whether Apple Music can meet that contract.
 
 Questions include:
 
@@ -425,6 +531,60 @@ Radio station lists currently appear in an unintuitive or effectively arbitrary 
 
 ---
 
+### Audio Bounce on Track Switch and Resume
+
+**Status:** LOW; post-1.0, as the owner deferred it earlier. Recorded only: no investigation or engineering now, and it does not reopen `v1.0.0-rc.4`.
+
+Owner-reported: after a manual switch to a new track, playback starts, drops briefly (under a second), then resumes. The owner has since seen the same on Spotify pause and resume, including after a pause of 10-15 seconds, and on local-file pause and resume. YouTube Music and radio have not been tested.
+
+A shared cause in the playback pipeline is suspected, not established.
+
+---
+
+### Raw Radio Metadata in the Now-Playing Text
+
+**Status:** LOW; 1.0 triage, not a mandatory fix. Triage whether a small, isolated fix before 1.0 is appropriate; otherwise it moves to post-1.0. Not investigated; no new release gate is expected.
+
+On some stations the scrolling now-playing text shows the station's raw metadata, space-delimited `key=value` pairs such as `text`, `song_spot`, `cartcutId` and `amgArtworkURL`, instead of a title. Seen on 102.5 KZDK and Q104.3 New York Classic Rock; other stations show normally. It appears inherited rather than an `rc.4` regression, based on the owner's reproduction in original cliamp.
+
+---
+
+### Sign In from a Spotify Play Request
+
+**Status:** LOW; post-1.0 UX enhancement. Not a defect and not a release blocker.
+
+Playing a Spotify track while signed out shows a warning that directs the user to sign in, and the existing **Sign in to Spotify** entry works; per the owner, browser sign-in passed on the `v1.0.0-rc.4` candidate. The enhancement: offer to open the browser sign-in from the play request itself, and optionally resume the requested track once sign-in completes.
+
+This does not resolve LIVE-SPOT-003: its aged-session case stays unresolved.
+
+---
+
+### Local Audio Format Compatibility Audit and Documentation
+
+**Status:** post-1.0 investigation; unscheduled, not a committed feature. Not a product blocker and no new release gate. Recorded only: no investigation, code, dependency or release change.
+
+**Objective:** audit which local-file formats ddsonic supports intentionally and reliably, document them accurately, and identify genuine gaps. It does not assume that formats need adding.
+
+**Owner observations:** in human playback on the private `v1.0.0-rc.4` candidate, sample files with the extensions `.wav`, `.flac`, `.aac`, `.m4a`, `.mp3`, `.opus`, `.ogg` and `.wma` worked, and one `.aiff` sample failed. These are single samples, not universal support for any codec, profile or platform. The codec in the `.m4a` sample (AAC or ALAC) and the codec variant of the `.ogg` sample are unknown and not verified.
+
+The addition priorities proposed earlier (WAV, AAC and M4A high, AIFF medium, WMA low) are withdrawn; none is active or a feature commitment.
+
+**Future investigation:**
+
+1. Scanner extensions: which are recognized explicitly and which only by a fallback.
+2. The playback backend for each format: containers as distinct from codecs and profiles, and the dependencies each requires.
+3. Artist, album, title, duration and artwork: the limitations of each format.
+4. Start, seek, pause and resume, skip, and the natural transition to the next track.
+5. Portability of the packaged release on the supported operating systems, as distinct from dependencies present only by accident on a development workstation. This adds no operating-system commitment.
+6. The cause of the AIFF failure: extension recognition, the file's encoding, or the decoder. Add support only if that is reasonable.
+7. Small, representative regression tests for the formats intended as officially supported, without excessive test infrastructure.
+
+**Outcome:** an accurate list of supported formats, with meaningful container and codec limits. No universal claim rests on one file.
+
+**Constraint:** weigh maintenance, packaging, licensing and dependencies before any change; FFmpeg or any other large dependency needs a justification of its benefit against those costs. This entry makes no claim about whether ddsonic uses FFmpeg today.
+
+---
+
 ## Architectural Investigations
 
 ### Capability-Based Provider Architecture
@@ -447,6 +607,8 @@ Rather than assuming every provider supports every operation, providers could ad
 The UI and command layer could then expose functionality based on capabilities rather than provider-specific conditionals.
 
 This could substantially simplify future provider additions.
+
+The [Provider Admission Contract](#provider-admission-contract) is the first consumer: its capabilities, and its split between authoritative and derived collections, are candidates for what a provider advertises.
 
 ---
 
@@ -555,9 +717,8 @@ The goal is ddsonic architectural ownership, not independence for symbolic reaso
 
 These items already have a home in [plan.md's post-1.0 backlog](../../plan.md#post-10-backlog); this index preserves visibility without creating parallel specifications. Their recorded decisions and conditions remain in force. In particular, the full upstream merge is already designated the first 1.1 work; the brainstorming status of new ideas here does not unschedule it.
 
-- InnerTube discovery of saved YouTube Music playlists.
+- YouTube Music follow-ups (InnerTube discovery of saved playlists, saved Library Albums and followed artists; the cookie playlist count check) are now parts of [YouTube Music Provider v2](#youtube-music-provider-v2).
 - Clear the whole queue with `X`, with Ctrl+Z undo; related to [Smarter Queue](#smarter-queue).
-- YouTube cookie playlist count/completeness check.
 - Broad-prefix search speed, only if it becomes a complaint.
 - Linux arm64, macOS, Homebrew and `.deb`/`.rpm`, once someone can test them.
 - Module naming and `go install`; related to [Long-Term cliamp Independence](#long-term-cliamp-independence).
@@ -590,7 +751,8 @@ In particular, this document does not commit ddsonic to:
 - automatic recommendations;
 - synchronized playback;
 - severing all cliamp-derived architecture;
-- any particular post-1.0 release schedule.
+- any particular post-1.0 release schedule;
+- any particular YouTube Music architecture, or that every capability in the [Provider Admission Contract](#provider-admission-contract)'s candidate list ends up mandatory.
 
 Some investigations should end with a deliberate decision **not to build the feature**.
 
@@ -628,6 +790,8 @@ After 1.0:
 5. Prototype when uncertainty is high.
 6. Promote only validated ideas into the roadmap.
 7. Continue aggressively rejecting unnecessary complexity.
+
+Provider work has an order already decided, which this approach does not reopen: see [Provider Foundations](#provider-foundations).
 
 The best post-1.0 ddsonic is not necessarily the version with the most features.
 

@@ -15,6 +15,9 @@ import (
 var ErrNotRunning = errors.New("no listener on socket")
 
 func dialSocket(sockPath string, timeout time.Duration) (net.Conn, error) {
+	if err := ValidateSocketPath(sockPath); err != nil { // ddsonic: sockpath_ddsonic.go
+		return nil, err
+	}
 	return net.DialTimeout("unix", sockPath, timeout)
 }
 
@@ -28,6 +31,11 @@ const wsaeConnRefused = syscall.Errno(10061)
 
 func isSocketUnavailable(err error) bool {
 	if err == nil {
+		return false
+	}
+	// ddsonic: an overlong path is not "nobody listening", and its text holds
+	// the path, which the string match below must not read.
+	if tooLong := (*SocketPathError)(nil); errors.As(err, &tooLong) {
 		return false
 	}
 	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOTSOCK) || errors.Is(err, wsaeConnRefused) {

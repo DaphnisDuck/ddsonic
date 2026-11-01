@@ -18,6 +18,8 @@ import (
 	"github.com/bjarneo/cliamp/catalog/sqlite"
 	"github.com/bjarneo/cliamp/catalogsync"
 	"github.com/bjarneo/cliamp/config"
+	"github.com/bjarneo/cliamp/external/radio"
+	"github.com/bjarneo/cliamp/library"
 	"github.com/bjarneo/cliamp/playlist"
 	"github.com/bjarneo/cliamp/ui/model"
 )
@@ -207,8 +209,9 @@ func (*namedSource) Fetch(context.Context, string, catalogsync.Known) (catalog.S
 	return catalog.Snapshot{}, catalogsync.ErrUnchanged
 }
 
-// A quiet source (radio) syncs without reporting status to the UI.
-func TestQuietSourceReportsNothing(t *testing.T) {
+// A quiet source (radio) syncs without reporting status to the UI: it says
+// once per sync that its rows changed, so lists reading them are reread.
+func TestQuietSourceReportsOnlyItsChange(t *testing.T) {
 	store, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "library.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -225,13 +228,76 @@ func TestQuietSourceReportsNothing(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	changes, status := 0, 0
 	for _, m := range sent {
-		if msg, ok := m.(model.CatalogSyncMsg); !ok || msg.Provider != catalog.Spotify {
-			t.Errorf("sent %+v, want only Spotify's events", m)
+		switch msg := m.(type) {
+		case model.CatalogChangedMsg:
+			if msg.Provider != catalog.Radio {
+				t.Errorf("sent %+v, want only radio's change", m)
+			}
+			changes++
+		case model.CatalogSyncMsg:
+			if msg.Provider != catalog.Spotify {
+				t.Errorf("sent %+v, want only Spotify's status", m)
+			}
+			status++
+		default:
+			t.Errorf("sent %+v", m)
 		}
 	}
-	if len(sent) == 0 {
+	if changes != 1 {
+		t.Errorf("radio's sync reported %d changes, want 1", changes)
+	}
+	if status == 0 {
 		t.Error("Spotify's events were not sent")
+	}
+}
+
+// A station starred or unstarred through the favorites store, as the
+// library's f does it, is in or out of the catalog search finds it in by
+// the time the UI is told the catalog changed.
+func TestStarredStationReachesSearchAndTheUI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_MUSIC_DIR", filepath.Join(home, "none"))
+	t.Setenv("CLIAMP_CONFIG_DIR", filepath.Join(home, "config"))
+	favs := radio.LoadFavorites()
+	rp := radio.New(radio.Options{Favorites: favs, Country: radio.CountryDeclined})
+	rt := openCatalog(nil, rp, config.Config{})
+	t.Cleanup(rt.close)
+	if rt.engine == nil {
+		t.Fatal("the catalog did not open")
+	}
+	sent := make(chan tea.Msg, 16)
+	rt.send = func(m tea.Msg) { sent <- m }
+
+	station := radio.CatalogStation{Name: "Zebra Jazz 88.3", URL: "https://zebra.example/stream", Country: "Norway"}
+	found := func() []string {
+		res, err := rt.store.Search(context.Background(), catalog.ParseQuery("zebra"), 5)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, r := range res[catalog.SearchStation] {
+			names = append(names, r.Track.Title+" "+r.Track.PlayableURI)
+		}
+		return names
+	}
+	for _, want := range [][]string{{"Zebra Jazz 88.3 https://zebra.example/stream"}, nil} {
+		if _, err := favs.Toggle(station); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case m := <-sent:
+			if msg, ok := m.(model.CatalogChangedMsg); !ok || msg.Provider != catalog.Radio {
+				t.Fatalf("sent %+v, want radio's change", m)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the UI was not told the catalog changed")
+		}
+		if got := found(); !slices.Equal(got, want) {
+			t.Fatalf("search finds %v, want %v", got, want)
+		}
 	}
 }
 
@@ -462,6 +528,48 @@ func TestLibrarySourcesSyncedMenus(t *testing.T) {
 	}
 	if src := librarySources(providers, "", &catalogRuntime{providers: map[string]*providerSync{}}); len(src.Synced) != 0 || src.Catalog != nil {
 		t.Errorf("without a catalog: synced %+v, catalog %v", src.Synced, src.Catalog)
+	}
+}
+
+// YouTube Music's saved albums and followed artists are not synced, so its
+// lists must not be titled "Albums" and "Artists" as Spotify's are: they are
+// "Albums from tracks" and "Artists from tracks".
+func TestYouTubeListsAreFromTracks(t *testing.T) {
+	store, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	rt := &catalogRuntime{store: store, providers: map[string]*providerSync{}}
+	rt.ctx, rt.cancel = context.WithCancel(context.Background())
+	defer rt.cancel()
+	rt.setSources(source{Source: &namedSource{catalog.Spotify}, lists: []string{catalog.CollectionArtists}},
+		source{Source: &namedSource{catalog.YouTube}, lists: []string{catalog.CollectionArtists}})
+	src := librarySources([]model.ProviderEntry{
+		{Key: "spotify", Provider: fakePlayer{"Spotify"}}, {Key: "ytmusic", Provider: fakePlayer{"YouTube Music"}}}, "", rt)
+	want := map[string][]string{
+		catalog.Spotify: {"Albums", "Artists"},
+		catalog.YouTube: {library.AlbumsFromTracks, library.ArtistsFromTracks},
+	}
+	if len(src.Synced) != len(want) {
+		t.Fatalf("synced = %+v", src.Synced)
+	}
+	for _, s := range src.Synced {
+		entries, err := library.SyncedMenu(src.Catalog, s).Load(context.Background())
+		if err != nil || len(entries) != 2 {
+			t.Errorf("%s menu = %+v (err %v)", s.Provider, entries, err)
+			continue
+		}
+		if s.PartialAlbums != (s.Provider == catalog.YouTube) {
+			t.Errorf("%s: partial albums %v", s.Provider, s.PartialAlbums)
+		}
+		for i, e := range entries {
+			note, _ := e.Open.(library.NotedLevel)
+			hasNote := note != nil && len(note.Note()) > 0
+			if e.Title != want[s.Provider][i] || hasNote != s.PartialAlbums {
+				t.Errorf("%s list %d is %q with note %v, want %q with note %v", s.Provider, i, e.Title, hasNote, want[s.Provider][i], s.PartialAlbums)
+			}
+		}
 	}
 }
 

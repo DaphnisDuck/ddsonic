@@ -17,6 +17,9 @@ func (m *Model) handleSpotSearchKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.closeSpotSearch()
 		return m.quit()
 	}
+	if cmd, ok := m.spotSearchSignInKey(msg); ok { // ddsonic: library_signin.go
+		return cmd
+	}
 
 	switch m.spotSearch.screen {
 	case spotSearchInput:
@@ -51,9 +54,11 @@ func (m *Model) handleSpotSearchInputKey(msg tea.KeyPressMsg) tea.Cmd {
 			return fetchSpotSearchCmd(m.newSpotRequestContext(30*time.Second), s, m.spotSearch.prov.Name(), m.spotSearch.query, nextRequest(&m.requests.spotSearch))
 		}
 	default:
+		before := m.spotSearch.query // ddsonic: an edit ends the search in flight
 		if m.editText("spot-search", &m.spotSearch.query, msg) {
 			m.spotSearch.err = ""
 		}
+		m.spotSearchQueryEdited(before)
 	}
 	return nil
 }
@@ -177,6 +182,7 @@ func (m *Model) spotSearchBusy() bool {
 
 func (m *Model) setSpotSearchError(message string) {
 	m.spotSearch.err = message
+	m.spotSearch.notice = "" // ddsonic: a new message stands alone
 	if m.spotSearch.screen == spotSearchResults {
 		m.spotSearchResultsMaybeAdjustScroll(m.spotSearchResultsVisible())
 	}

@@ -12,13 +12,13 @@ ddsonic is a fork of [cliamp](https://github.com/bjarneo/cliamp), the Winamp-ins
 Music
 ├── All Music      Albums · Artists (Spotify, YouTube Music and Local together)
 ├── Spotify        Albums · Artists · Playlists · Liked Songs
-├── YouTube Music  Albums · Artists · Playlists · Liked Music
+├── YouTube Music  Albums from tracks · Artists from tracks · Playlists · Liked Music
 ├── Local          Albums · Artists · Genres · Folders · Playlists
 ├── Radio          Favorites · Browse Stations
 └── Search
 ```
 
-Each source has its own entry. All Music lists the albums and artists of Spotify, YouTube Music and Local together, each row labelled with its source.
+Each source has its own entry. All Music lists the albums and artists of Spotify, YouTube Music and Local together, each row labelled with its source. YouTube Music's rows read `YouTube · from tracks`: they are the albums and artists found in your Liked Music and synced playlists, not your saved Library Albums or the artists you follow, which ddsonic does not sync.
 
 ## Why ddsonic
 
@@ -35,7 +35,7 @@ Each source has its own entry. All Music lists the albums and artists of Spotify
 | Source | What you get | What it needs |
 | --- | --- | --- |
 | **Spotify** | Saved albums, followed artists, playlists, Liked Songs, and Spotify's own search | A Spotify Premium account |
-| **YouTube Music** | Your playlists and Liked Music, with albums and artists read from their tracks | [yt-dlp](https://github.com/yt-dlp/yt-dlp), and a browser you are signed in to or your own Google OAuth client |
+| **YouTube Music** | Your playlists and Liked Music, and **Albums from tracks** and **Artists from tracks**: the albums and artists read from those tracks (albums may be incomplete). Saved Library Albums and followed artists are not synchronized ([details](docs/ddsonic/youtube.md#albums-from-tracks-and-artists-from-tracks-enrichment)) | [yt-dlp](https://github.com/yt-dlp/yt-dlp), and a browser you are signed in to or your own Google OAuth client |
 | **Local files** | Albums, artists and genres from the tags in your music folder, a folder browser, and saved playlists | Nothing; [ffmpeg](https://ffmpeg.org/) for AAC, ALAC, Opus and WMA files |
 | **Internet radio** | Your favorite stations, the [Radio Browser](https://www.radio-browser.info/) directory by country or tag, cliamp's radio channels, and stations you add yourself | Nothing |
 
@@ -52,7 +52,7 @@ Local files and radio need no account at all. cliamp's other sources (Navidrome,
 
 **From source**
 
-You need [Go](https://go.dev/dl/) 1.26.6 or later (ddsonic is built and tested with 1.27.1), a C compiler, `pkg-config`, and the ALSA and codec headers:
+You need [Go](https://go.dev/dl/) 1.26.6 or later (ddsonic is built and tested with 1.27.3), a C compiler, `pkg-config`, and the ALSA and codec headers:
 
 ```sh
 # Debian/Ubuntu
@@ -103,7 +103,7 @@ ddsonic setup             # Spotify, YouTube Music and your music folder; each i
 ddsonic                   # open the library
 ```
 
-With nothing set up, ddsonic still opens with Local (your `~/Music` folder) and Radio. Opening Spotify for the first time asks you to press `Enter` and sign in in your browser.
+With nothing set up, ddsonic still opens with Local (your `~/Music` folder) and Radio. With Spotify set up and not signed in yet, the library's heading reads `Spotify sign-in required`: open **Spotify**, press `Enter` on **Sign in to Spotify**, and finish in your browser. Your library syncs as soon as you have signed in.
 
 In the library:
 

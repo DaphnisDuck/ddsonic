@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bjarneo/cliamp/internal/ytdlp"
 	"github.com/bjarneo/cliamp/playlist"
 	"github.com/bjarneo/cliamp/provider"
 	"github.com/bjarneo/cliamp/resolve"
@@ -433,7 +434,7 @@ func (p *Provider) ensureCookieHeader(ctx context.Context) (string, error) {
 	return header, nil
 }
 
-func extractBrowserCookieHeader(ctx context.Context, browser string) (string, error) {
+func extractBrowserCookieHeader(ctx context.Context, browser string) (_ string, err error) {
 	if _, err := exec.LookPath("yt-dlp"); err != nil {
 		return "", fmt.Errorf("yt-dlp not found. Install with: %s", ytDLPInstallHint())
 	}
@@ -448,7 +449,7 @@ func extractBrowserCookieHeader(ctx context.Context, browser string) (string, er
 
 	cmdCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(cmdCtx, "yt-dlp",
+	cmd, release, err := ytdlp.Command(cmdCtx, // ddsonic: no ambient configuration, no cookie copy left behind
 		"--cookies-from-browser", browser,
 		"--cookies", path,
 		"--flat-playlist",
@@ -458,6 +459,10 @@ func extractBrowserCookieHeader(ctx context.Context, browser string) (string, er
 		"--",
 		probeURL,
 	)
+	if err != nil {
+		return "", err
+	}
+	defer ytdlp.Finish(release, &err)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

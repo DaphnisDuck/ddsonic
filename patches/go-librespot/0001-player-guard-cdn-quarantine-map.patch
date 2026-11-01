@@ -1,0 +1,56 @@
+--- a/player/player.go
++++ b/player/player.go
+@@ -1,3 +1,7 @@
++// Modified by ddsonic on 2026-10-14: the CDN quarantine map is guarded by
++// cdnMu for each access, never across network work
++// (patches/go-librespot/0001-player-guard-cdn-quarantine-map.patch).
++
+ package player
+ 
+ import (
+@@ -8,6 +12,7 @@
+ 	"math"
+ 	"net/http"
+ 	"net/url"
++	"sync"
+ 	"time"
+ 
+ 	librespot "github.com/devgianlu/go-librespot"
+@@ -59,6 +64,9 @@
+ 	cache *cache.Cache
+ 
+ 	cdnQuarantine map[string]time.Time
++	// ddsonic: concurrent NewStream calls share cdnQuarantine; cdnMu guards
++	// each access alone and is never held across network work.
++	cdnMu sync.Mutex
+ 
+ 	newOutput func(source librespot.Float32Reader, volume float32, device string) (output.Output, error)
+ 
+@@ -618,7 +626,10 @@
+ 				continue
+ 			}
+ 
+-			if lastFailed, found := p.cdnQuarantine[cdnUrl.Host]; found {
++			p.cdnMu.Lock() // ddsonic
++			lastFailed, found := p.cdnQuarantine[cdnUrl.Host]
++			p.cdnMu.Unlock()
++			if found {
+ 				if i == len(storageResolve.Cdnurl)-1 {
+ 					log.WithField("host", cdnUrl.Host).Warnf("cannot skip cdn url because it is the last one")
+ 				} else if time.Since(lastFailed) < CdnUrlQuarantineDuration {
+@@ -631,11 +642,15 @@
+ 			rawStream, err = audio.NewHttpChunkedReader(log, client, cdnUrl.String())
+ 			if err != nil {
+ 				log.WithError(err).WithField("host", cdnUrl.Host).Warnf("failed creating chunked reader, trying next url")
++				p.cdnMu.Lock() // ddsonic
+ 				p.cdnQuarantine[cdnUrl.Host] = time.Now()
++				p.cdnMu.Unlock()
+ 				continue
+ 			}
+ 
++			p.cdnMu.Lock() // ddsonic
+ 			delete(p.cdnQuarantine, cdnUrl.Host)
++			p.cdnMu.Unlock()
+ 			return rawStream, nil
+ 		}
+ 

@@ -24,6 +24,7 @@ import (
 
 	"github.com/bjarneo/cliamp/internal/appmeta" // ddsonic
 	"github.com/bjarneo/cliamp/internal/ytdlcookies"
+	"github.com/bjarneo/cliamp/internal/ytdlp"
 	"github.com/bjarneo/cliamp/player"
 	"github.com/bjarneo/cliamp/playlist"
 
@@ -444,7 +445,8 @@ func resolveM3U(m3uURL string) ([]playlist.Track, error) {
 	if err != nil {
 		return nil, err
 	}
-	return filterRemoteEntries(entriesToTracks(entries)), nil
+	entries = filterRemoteEntries(responseURL(resp), entries, func(e *m3uEntry) *string { return &e.Path })
+	return entriesToTracks(entries), nil
 }
 
 // resolvePLS fetches a PLS playlist URL and returns tracks.
@@ -474,7 +476,8 @@ func resolvePLS(plsURL string) ([]playlist.Track, error) {
 	if err != nil {
 		return nil, err
 	}
-	return filterRemoteEntries(plsEntriesToTracks(entries)), nil
+	entries = filterRemoteEntries(responseURL(resp), entries, func(e *plsEntry) *string { return &e.File })
+	return plsEntriesToTracks(entries), nil
 }
 
 // isHLSPlaylist reports whether an M3U body is an HLS playlist (master or media)
@@ -631,7 +634,7 @@ func resolveYTDLRangeContext(ctx context.Context, pageURL string, start, end int
 	return tracks, err
 }
 
-func resolveYTDLRangePageContext(ctx context.Context, pageURL string, start, end int, browser ...string) ([]playlist.Track, int, error) {
+func resolveYTDLRangePageContext(ctx context.Context, pageURL string, start, end int, browser ...string) (_ []playlist.Track, _ int, err error) {
 	if _, err := exec.LookPath("yt-dlp"); err != nil {
 		return nil, 0, fmt.Errorf("yt-dlp not found in PATH — see https://github.com/yt-dlp/yt-dlp#installation")
 	}
@@ -654,7 +657,11 @@ func resolveYTDLRangePageContext(ctx context.Context, pageURL string, start, end
 		args = append(args, "--playlist-end", strconv.Itoa(end))
 	}
 	args = append(args, "--", pageURL)
-	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
+	cmd, release, err := ytdlp.Command(ctx, args...) // ddsonic: no ambient configuration, no cookie copy left behind
+	if err != nil {
+		return nil, 0, err
+	}
+	defer ytdlp.Finish(release, &err)
 	cmd.WaitDelay = 3 * time.Second
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -721,7 +728,7 @@ func parseYTDLTracks(r io.Reader) ([]playlist.Track, int, error) {
 
 // DownloadYTDL downloads a single track via yt-dlp to the given directory
 // and returns the output file path. Uses yt-dlp's default naming template.
-func DownloadYTDL(pageURL, saveDir string) (string, error) {
+func DownloadYTDL(pageURL, saveDir string) (_ string, err error) {
 	if _, err := exec.LookPath("yt-dlp"); err != nil {
 		return "", fmt.Errorf("yt-dlp not found in PATH")
 	}
@@ -737,7 +744,11 @@ func DownloadYTDL(pageURL, saveDir string) (string, error) {
 		args = append(args, "--cookies-from-browser", browser)
 	}
 	args = append(args, "--", pageURL)
-	cmd := exec.Command("yt-dlp", args...)
+	cmd, release, err := ytdlp.Command(context.Background(), args...) // ddsonic: no ambient configuration, no cookie copy left behind
+	if err != nil {
+		return "", err
+	}
+	defer ytdlp.Finish(release, &err)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	stdout, err := cmd.Output()

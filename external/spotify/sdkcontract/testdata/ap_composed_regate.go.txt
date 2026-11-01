@@ -1,0 +1,170 @@
+package ap
+
+// ddsonic composed-stage reconnect gate (M3B2-S4 fixture bundle, RB-1; plan
+// v9 §8 I8, I13/I14). ACTIVE STAGE ONLY: it uses the patched SDK's
+// per-access-point key-provider announcer and connection generation (patch
+// 0002), which the authenticated base v0.9.1 of the stock stage does not
+// have. It is mapped only in the composed stage's composedFiles and is never
+// part of the stock O. Like the other composed helpers it exists only in the
+// overlay built over a staged copy of go-librespot: no shipped SDK byte
+// changes, and ap_fake_helper.go.txt (H/) is not edited.
+//
+// H/'s DDSonicContractGateWrites gates only a connection whose receive loop
+// has not started: in the composed stage, an access point's first
+// (generation 1) connection. DDSonicComposedGateGeneration puts H/'s same
+// DDSonicWriteGate (open; its Fail, Arm and Release work as in H/) on the
+// connection that becomes generation gen of one access point a, inside that
+// very publication:
+//   - connect publishes a generation with a.connMu.Lock held: it calls
+//     announceLocked, which calls a's OWN announcer (a field of a), before
+//     the generation is stored and its channel closed (ap.go :138-147,
+//     :302-329);
+//   - on a reconnect, the receive loop for the new connection starts only
+//     after connect returns (ap.go :527-545), and every write selects its
+//     connection under a.connMu.RLock (SendStamped, :352-363), so a write on
+//     the new connection, and its reader, both follow the gate's
+//     installation;
+//   - the old connection was closed by init when the new one was dialled
+//     (:180-190); it is not touched.
+// Attribution is by construction: only a's own publications call a's
+// announcer. The package's global testHookStageAfterAnnounce, which has no
+// access point argument, is not used.
+//
+// The original announcer is called first, with the same generation, and is
+// restored the moment the gate is applied (or the arming found disarmed), so
+// the key provider's announcement, the generation's storage and its channel
+// are unchanged. Nothing is armed by default: an access point nobody armed
+// is never touched. No goroutine is started, and no package global is
+// written.
+
+import (
+	"errors"
+	"sync"
+	"sync/atomic"
+)
+
+// DDSonicComposedRegate is one armed generation of one access point.
+type DDSonicComposedRegate struct {
+	// Gate is H/'s write gate, applied at the armed generation's
+	// publication. Fail and Arm may be called before then.
+	Gate *DDSonicWriteGate
+
+	gen      uint64
+	applied  chan struct{}
+	once     sync.Once
+	disarmed atomic.Bool
+}
+
+// Applied is closed once the gate is on the armed generation's connection.
+func (r *DDSonicComposedRegate) Applied() <-chan struct{} { return r.applied }
+
+// Disarm makes an arming that has not been applied inert. It is idempotent
+// and takes no lock (T1).
+func (r *DDSonicComposedRegate) Disarm() { r.disarmed.Store(true) }
+
+// DDSonicComposedGateGeneration arms H/'s write gate for the connection that
+// becomes generation gen of a. gen must be after a's current generation, and
+// a must already have its key provider's announcer (an owner provider): an
+// arming that would change either is refused. It takes a.connMu.Lock, so it
+// must never be called from a callback that runs under it.
+func DDSonicComposedGateGeneration(a *Accesspoint, gen uint64) (*DDSonicComposedRegate, error) {
+	a.connMu.Lock()
+	defer a.connMu.Unlock()
+	if cur := a.gen.Load().gen; gen <= cur {
+		return nil, errors.New("ddsonic composed: the generation to gate is not after the access point's current one")
+	}
+	orig := a.announcer
+	if orig == nil {
+		return nil, errors.New("ddsonic composed: the access point has no key-provider announcer to compose with")
+	}
+	r := &DDSonicComposedRegate{Gate: &DDSonicWriteGate{}, gen: gen, applied: make(chan struct{})}
+	a.announcer = func(next uint64) {
+		orig(next) // the product's announcement, unchanged
+		if r.disarmed.Load() {
+			a.announcer = orig
+			return
+		}
+		if next != r.gen {
+			return
+		}
+		r.once.Do(func() {
+			// a.connMu.Lock is held by this publication (announceLocked's
+			// caller); nothing here takes a lock of a's or waits.
+			r.Gate.Conn = a.conn
+			a.conn = r.Gate
+			a.encConn.conn = r.Gate
+			a.announcer = orig
+			close(r.applied)
+		})
+	}
+	return r, nil
+}
+
+// DDSonicComposedAnnounceHold is one armed hold of one access point's
+// publication of one generation (M3B2-S5, G2; plan v9 §8 I30): held after
+// that generation's announcement to the key provider and before its store,
+// the point the SDK contract's S37 holds with the package-global
+// testHookStageAfterAnnounce, which names no access point. Here, as for
+// DDSonicComposedRegate, only a's own publications call a's announcer, so
+// the hold is attributed to a by construction.
+type DDSonicComposedAnnounceHold struct {
+	gen      uint64
+	reached  chan struct{}
+	release  chan struct{}
+	relOnce  sync.Once
+	disarmed atomic.Bool
+}
+
+// Reached is closed when the armed generation's publication has announced
+// it and is held before its store.
+func (x *DDSonicComposedAnnounceHold) Reached() <-chan struct{} { return x.reached }
+
+// Release lets the held publication store its generation and close the old
+// channel; it is idempotent and takes no lock (T1).
+func (x *DDSonicComposedAnnounceHold) Release() { x.relOnce.Do(func() { close(x.release) }) }
+
+// Disarm makes an arming that has not been reached inert. It is idempotent
+// and takes no lock (T1).
+func (x *DDSonicComposedAnnounceHold) Disarm() { x.disarmed.Store(true) }
+
+// DDSonicComposedHoldAnnouncement arms a hold of a's publication of
+// generation gen, after the key provider's announcement (the original
+// announcer runs first, with the same generation, unchanged) and before the
+// store (ap.go :138-147). While it is held, a.connMu.Lock stays held by
+// that publication, exactly as under S37's hook: a write's selection
+// (SendStamped's RLock) waits for the release; Generation stays lock-free
+// and reports the previous generation. The original announcer is restored
+// before the hold waits, or as soon as an arming is found disarmed. gen
+// must be after a's current generation, and a must already have its key
+// provider's announcer; one arming (this or DDSonicComposedGateGeneration)
+// per access point at a time. It takes a.connMu.Lock, so it must never be
+// called from a callback that runs under it. It starts no goroutine and
+// writes no package global.
+func DDSonicComposedHoldAnnouncement(a *Accesspoint, gen uint64) (*DDSonicComposedAnnounceHold, error) {
+	a.connMu.Lock()
+	defer a.connMu.Unlock()
+	if cur := a.gen.Load().gen; gen <= cur {
+		return nil, errors.New("ddsonic composed: the generation to hold is not after the access point's current one")
+	}
+	orig := a.announcer
+	if orig == nil {
+		return nil, errors.New("ddsonic composed: the access point has no key-provider announcer to compose with")
+	}
+	x := &DDSonicComposedAnnounceHold{gen: gen, reached: make(chan struct{}), release: make(chan struct{})}
+	a.announcer = func(next uint64) {
+		orig(next) // the product's announcement, unchanged
+		if x.disarmed.Load() {
+			a.announcer = orig
+			return
+		}
+		if next != x.gen {
+			return
+		}
+		// a.connMu.Lock is held by this publication (announceLocked's
+		// caller); the store waits for the release, as under S37's hook.
+		a.announcer = orig
+		close(x.reached)
+		<-x.release
+	}
+	return x, nil
+}

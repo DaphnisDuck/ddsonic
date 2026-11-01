@@ -6,6 +6,10 @@
 # else has a default. Copy the lines you want to change. A comment needs a
 # line of its own: ddsonic does not read one that follows a value.
 #
+# The file must be valid TOML: text goes in quotes ("Tokyo Night"), and a key
+# appears once. ddsonic does not start with a file it cannot parse, and says
+# which line is wrong.
+#
 # ddsonic is a fork of cliamp and reads the same file format. The sections of
 # cliamp's other providers ([navidrome], [plex], [jellyfin], …) and of its
 # plugins may stay in the file; ddsonic ignores them.
@@ -110,7 +114,8 @@ eq = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 # The section's presence turns Spotify on. `ddsonic setup` writes it. Your own
 # Spotify Developer app's client_id is recommended; without one, ddsonic uses a
 # shared client that Spotify rate-limits more often. See docs/spotify.md.
-# The first time you open Spotify in the library, press Enter to sign in.
+# Until you have signed in, the library says "Spotify sign-in required": open
+# Spotify there and press Enter on "Sign in to Spotify".
 #
 # [spotify]
 # client_id = "your-spotify-app-client-id"

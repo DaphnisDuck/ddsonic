@@ -56,6 +56,19 @@ func librarySources(providers []model.ProviderEntry, initialDir string, rt *cata
 	return src
 }
 
+// librarySignIn lets the library sign in to Spotify when its synced library
+// asks for it: with the lists read from the catalog, no list fails with
+// "sign-in required" for the library to answer, so a Spotify that was never
+// signed in, or whose sign-in was revoked, could not be signed in at all.
+// YouTube Music signs in outside ddsonic (ddsonic youtube signin, or the
+// browser's cookies) and is not offered here.
+//
+// It is the only provider registered, and only a registered provider is ever
+// signed in to from the library, with or without a catalog.
+func librarySignIn(m *model.Model, spotify playlist.Authenticator) {
+	m.SetLibrarySignIn(catalog.Spotify, spotify)
+}
+
 // artworkLoader loads album artwork for the track info view, or is nil when
 // artwork is off or the terminal cannot draw images (ui/kittyimg).
 func artworkLoader(enabled bool) func(context.Context, artwork.Ref) (image.Image, error) {

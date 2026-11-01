@@ -9,6 +9,8 @@ import (
 	"time"
 
 	librespot "github.com/devgianlu/go-librespot"
+	"github.com/devgianlu/go-librespot/flac"
+	"github.com/devgianlu/go-librespot/mp3"
 	librespotPlayer "github.com/devgianlu/go-librespot/player"
 	"github.com/gopxl/beep/v2"
 )
@@ -134,6 +136,8 @@ func (s *spotifyStreamer) Seek(p int) error {
 // Close cancels stream I/O and releases cliamp's references. AudioSource does
 // not expose Close intentionally; calling the concrete C-backed decoder Close
 // methods during a track handoff can crash go-librespot.
+//
+// ddsonic: except the MP3 and FLAC decoders, which nothing else frees (RC4-S3).
 func (s *spotifyStreamer) Close() error {
 	if s.closing.CompareAndSwap(false, true) {
 		// A decoder read may be waiting on a chunk request while holding mu.
@@ -148,10 +152,26 @@ func (s *spotifyStreamer) Close() error {
 	}
 	s.closed = true
 
+	// ddsonic: an accepted MP3 or FLAC decoder holds native memory (for MP3
+	// a cgo.Handle and the mpg123 handle) and the downloaded chunks until it
+	// is closed. It is closed here, once, after its read was cancelled and
+	// under mu, so no Stream, Seek or Position is using it. Other decoders
+	// are left as before: Vorbis's Close is not safe here (playback_ddsonic.go,
+	// releaseDecoder).
+	switch d := s.source.(type) {
+	case *mp3.Decoder:
+		closeAcceptedDecoder(d)
+	case *flac.Decoder:
+		closeAcceptedDecoder(d)
+	}
 	s.source = nil
 	s.buf = nil
 	return nil
 }
+
+// closeAcceptedDecoder closes the decoder of an accepted stream (Close). A
+// test replaces it to count the closes it cannot observe otherwise.
+var closeAcceptedDecoder = func(d io.Closer) { _ = d.Close() }
 
 // Format returns the Beep audio format for Spotify streams.
 func (s *spotifyStreamer) Format() beep.Format {

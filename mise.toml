@@ -1,2 +1,2 @@
 [tools]
-go = "1.27.1" # ddsonic: pinned; bump deliberately
+go = "1.27.3" # ddsonic: pinned; bump deliberately

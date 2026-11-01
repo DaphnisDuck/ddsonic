@@ -588,13 +588,14 @@ func (m Model) renderNetSearchBody() string {
 func (m Model) spotSearchHeaderLine() string {
 	switch m.spotSearch.screen {
 	case spotSearchResults:
-		return sepHeaderN("Results", m.spotSearch.cursor+1, len(m.spotSearch.results))
+		// ddsonic: the results name their provider and query (library_search.go).
+		return sepHeaderN(m.spotSearchResultsLabel(), m.spotSearch.cursor+1, len(m.spotSearch.results))
 	case spotSearchPlaylist:
 		return sepHeaderN("Add to Playlist", m.spotSearch.cursor+1, len(m.spotSearch.playlists)+1)
 	case spotSearchNewName:
 		return m.promptHeader("spot-playlist-name", "New Playlist", m.spotSearch.newName)
 	default:
-		return m.promptHeader("spot-search", "Search", m.spotSearch.query)
+		return m.promptHeader("spot-search", m.spotSearchPromptLabel(), m.spotSearch.query) // ddsonic: names the provider
 	}
 }
 
@@ -613,10 +614,23 @@ func (m Model) spotSearchHelpLine() string {
 
 func (m Model) renderSpotSearchBody() string {
 	budget := m.effectivePlaylistVisible()
-	showError := m.spotSearch.err != "" && m.spotSearch.screen != spotSearchPlaylist
+	// ddsonic: the picker shows no errors, but the sign-in prompt asks for a key.
+	showError := m.spotSearch.err != "" && (m.spotSearch.screen != spotSearchPlaylist || m.spotSearchAsksSignIn())
+	if m.spotSearch.screen == spotSearchNewName && m.spotSearch.err != "" {
+		showError = true
+	}
+	// ddsonic: a sign-in in flight shows as it does in the library, with the
+	// address to open by hand (library_signin.go).
+	errLines := []string{errorStyle.Render("  " + m.spotSearch.err)}
+	if m.spotSearch.err == libSigningIn {
+		errLines = m.libSigningInLines(budget)
+	}
+	if m.spotSearch.notice != "" && len(errLines) < budget {
+		errLines = append([]string{dimStyle.Render("  " + m.spotSearch.notice)}, errLines...)
+	}
 	bodyBudget := budget
 	if showError {
-		bodyBudget = max(0, bodyBudget-1)
+		bodyBudget = max(0, bodyBudget-len(errLines))
 	}
 	var body string
 	switch m.spotSearch.screen {
@@ -631,7 +645,7 @@ func (m Model) renderSpotSearchBody() string {
 		}
 	case spotSearchPlaylist:
 		if m.spotSearch.loading {
-			body = bodyLines([]string{loadingLine("Loading playlists…")}, budget)
+			body = bodyLines([]string{loadingLine("Loading playlists…")}, bodyBudget)
 			break
 		}
 		track := m.spotSearch.selTrack
@@ -645,21 +659,27 @@ func (m Model) renderSpotSearchBody() string {
 				items[i] = "+ New Playlist..."
 			}
 		}
-		list := windowList(items, m.spotSearch.cursor, m.spotSearch.scroll, max(0, budget-1))
+		list := windowList(items, m.spotSearch.cursor, m.spotSearch.scroll, max(0, bodyBudget-1))
 		body = strings.Join([]string{head, list}, "\n")
+		if bodyBudget < 2 { // ddsonic: one row, or none, is the track's line alone
+			body = head
+		}
 	case spotSearchNewName:
 		body = bodyMessage("Enter a name for the new playlist above.", bodyBudget)
 	default:
 		var lines []string
 		if m.spotSearch.loading {
-			lines = append(lines, dimStyle.Render("  Searching..."))
+			lines = append(lines, dimStyle.Render("  "+m.spotSearchLoadingLabel())) // ddsonic: names the provider and query
 		} else {
 			lines = append(lines, dimStyle.Render("  Type a query and press Enter to search."))
 		}
 		body = bodyLines(lines, bodyBudget)
 	}
 	if showError {
-		errLine := errorStyle.Render("  " + m.spotSearch.err)
+		if bodyBudget == 0 {
+			body = "" // ddsonic: the sign-in's rows have every row; nothing else pushes one out
+		}
+		errLine := strings.Join(errLines, "\n")
 		if body == "" {
 			return errLine
 		}

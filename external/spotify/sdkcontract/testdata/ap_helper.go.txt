@@ -1,0 +1,23 @@
+package ap
+
+// ddsonic contract helper. This file exists only in the overlay the contract
+// runner builds over a staged copy of go-librespot; it is in no real copy of
+// the SDK and in no ddsonic build. It makes an access point over a connection
+// a test supplies, by setting the package's own fields, so that tests in
+// this package and in package audio can stall it deterministically.
+
+import (
+	"net"
+
+	librespot "github.com/devgianlu/go-librespot"
+)
+
+// DDSonicContractAP is an access point over conn that has not started its
+// receive loop.
+func DDSonicContractAP(conn net.Conn) *Accesspoint {
+	a := NewAccesspoint(&librespot.NullLogger{}, nil, "")
+	a.conn = conn
+	a.encConn = newShannonConn(conn, make([]byte, 32), make([]byte, 32))
+	a.recvLoopOnce.Do(func() {})
+	return a
+}

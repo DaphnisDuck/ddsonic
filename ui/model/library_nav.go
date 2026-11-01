@@ -14,6 +14,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/bjarneo/cliamp/catalog"
 	"github.com/bjarneo/cliamp/library"
 	"github.com/bjarneo/cliamp/playlist"
 )
@@ -44,10 +45,18 @@ type libraryState struct {
 	authGen   uint64
 	signingIn bool
 	authURL   string
+	// signInProvider is the source signing in (library_signin.go).
+	signInProvider string
 
 	// Catalog sync status per provider, and the action behind "r".
 	sync    map[string]*libSync
 	refresh func(provider string)
+	// refreshRequired is refresh for the sync a sign-in requires
+	// (SetCatalogSyncRequired); nil without a catalog runtime.
+	refreshRequired func(provider string) uint64
+	// auth is who signs in for each synced source that can be signed in to
+	// from the library (library_signin.go).
+	auth map[string]playlist.Authenticator
 
 	// Search: whether the search frame's input has focus (else its
 	// results), the last query (kept when search reopens), and the
@@ -59,6 +68,10 @@ type libraryState struct {
 
 	// barRows is how many rows the layout gave the key bar (0 before any).
 	barRows int
+
+	// favSaving holds the stream URLs of the stations whose f is still
+	// being saved (library_favorite.go).
+	favSaving map[string]bool
 }
 
 // libSync is one provider's catalog sync status as the library shows it.
@@ -66,6 +79,13 @@ type libSync struct {
 	running     bool
 	lastSuccess time.Time
 	lastErr     string
+	// needsAuth: the source asked for sign-in, in a sync, in playback or in
+	// its own search (library_signin.go).
+	needsAuth bool
+	// authTicket is the ticket of the sync a sign-in required, until that
+	// sync has ended: a sync that ends with an older ticket began before the
+	// sign-in, and says nothing about it (librarySignedIn).
+	authTicket uint64
 }
 
 // CatalogSyncPhase is the stage a CatalogSyncMsg reports.
@@ -84,6 +104,16 @@ type CatalogSyncMsg struct {
 	Phase      CatalogSyncPhase
 	Collection string // CatalogSyncCollectionDone only
 	Err        error
+	// Ticket is the latest sync a sign-in required that this run was started
+	// to serve (SetCatalogSyncRequired); zero when none.
+	Ticket uint64
+}
+
+// CatalogChangedMsg reports that a sync changed provider's catalog rows, for
+// a source that shows no sync status (radio, whose sync follows a station
+// starred or unstarred). main sends it when such a sync finishes.
+type CatalogChangedMsg struct {
+	Provider string
 }
 
 // CatalogStatus is a provider's last sync outcome, read at startup.
@@ -101,6 +131,13 @@ func (m *Model) SetCatalogSync(status map[string]CatalogStatus, refresh func(pro
 		m.lib.sync[provider] = &libSync{lastSuccess: st.LastSuccess, lastErr: st.LastError}
 	}
 	m.lib.refresh = refresh
+}
+
+// SetCatalogSyncRequired gives the library the function a successful sign-in
+// calls: it syncs provider even when an older sync still runs, after it, and
+// returns the ticket that sync's messages will carry. It must not block.
+func (m *Model) SetCatalogSyncRequired(required func(provider string) uint64) {
+	m.lib.refreshRequired = required
 }
 
 // libCatalogProvider is the provider of the nearest catalog level on the
@@ -181,6 +218,8 @@ type libraryPlayMsg struct {
 type libraryAuthDoneMsg struct {
 	gen uint64
 	err error
+	// provider is the source that signed in (library_signin.go).
+	provider string
 }
 
 // SetLibrary makes the library the main screen, starting at root. root must
@@ -262,7 +301,6 @@ func (m *Model) libraryPop() tea.Cmd {
 		f.cancel()
 	}
 	m.lib.stack = m.lib.stack[:len(m.lib.stack)-1]
-	m.libEndSignIn()
 	if f := m.libTop(); f.stale {
 		return m.libraryRefreshTop()
 	}
@@ -331,7 +369,8 @@ func (m *Model) libraryRefresh() tea.Cmd {
 }
 
 // libraryCatalogChanged refreshes the visible level if a sync of provider
-// changed it, and marks the catalog levels beneath it stale.
+// changed it, and marks the catalog levels beneath it stale. The starred
+// stations change with radio's (library_favorite.go).
 func (m *Model) libraryCatalogChanged(provider string) tea.Cmd {
 	if !m.libraryEnabled() {
 		return nil
@@ -340,6 +379,9 @@ func (m *Model) libraryCatalogChanged(provider string) tea.Cmd {
 	isCatalog := func(f *libFrame) bool {
 		if cl, ok := f.level.(library.CachedLevel); ok {
 			return cl.CachedProvider() == provider
+		}
+		if _, ok := f.level.(library.StarredStationsLevel); ok {
+			return provider == catalog.Radio
 		}
 		cl, ok := f.level.(library.CatalogLevel)
 		return ok && (cl.CatalogProvider() == provider || cl.CatalogProvider() == "")
@@ -388,6 +430,7 @@ func (m *Model) handleLibraryMsg(msg tea.Msg) (tea.Cmd, bool) {
 					}
 				}
 			}
+			m.libApplySignInRow(f)
 			if f == m.libTop() {
 				m.libAdjustScroll()
 			}
@@ -405,6 +448,13 @@ func (m *Model) handleLibraryMsg(msg tea.Msg) (tea.Cmd, bool) {
 				return m.libraryCatalogChanged(msg.Provider), true
 			}
 		case CatalogSyncFinished:
+			if st.authTicket != 0 && msg.Ticket < st.authTicket {
+				// A sync that began before the sign-in: the one the sign-in
+				// required follows it. Its rows are reread; its verdict on
+				// the sign-in, and its error, are about the old sign-in.
+				return m.libraryCatalogChanged(msg.Provider), true
+			}
+			st.authTicket = 0
 			st.running = false
 			switch {
 			case msg.Err == nil:
@@ -412,12 +462,19 @@ func (m *Model) handleLibraryMsg(msg tea.Msg) (tea.Cmd, bool) {
 			case !errors.Is(msg.Err, context.Canceled):
 				st.lastErr = msg.Err.Error()
 			}
+			m.libSyncEndedAuth(msg.Provider, msg.Err)
 			// The sync's final sweep may have deleted rows the collections'
 			// rereads still found; reread after it (failed collections
 			// included: the sweep runs after those too).
 			return m.libraryCatalogChanged(msg.Provider), true
 		}
 		return nil, true
+
+	case CatalogChangedMsg:
+		return m.libraryCatalogChanged(msg.Provider), true
+
+	case libFavoriteSavedMsg:
+		return m.libFavoriteSaved(msg), true
 
 	case libraryPlayMsg:
 		if msg.gen != m.lib.playGen {
@@ -440,12 +497,7 @@ func (m *Model) handleLibraryMsg(msg tea.Msg) (tea.Cmd, bool) {
 		if msg.gen != m.lib.authGen || !m.libraryEnabled() {
 			return nil, true
 		}
-		m.libEndSignIn()
-		if msg.err != nil {
-			m.libTop().err = msg.err
-			return nil, true
-		}
-		return m.libraryLoad(), true
+		return m.librarySignedIn(msg), true
 
 	case ProvAuthURLMsg:
 		if m.lib.signingIn {
@@ -479,6 +531,8 @@ func (m *Model) handleLibraryKey(msg tea.KeyPressMsg) (cmd tea.Cmd, handled bool
 			return nil, true
 		case "p", "n":
 			return m.librarySkip(key == "n"), true
+		case "f":
+			return m.libToggleFavorite(), true
 		}
 		return nil, !queuePassthroughKeys[key] && !libraryPassthroughKeys[key]
 	}
@@ -546,6 +600,8 @@ func (m *Model) handleLibraryKey(msg tea.KeyPressMsg) (cmd tea.Cmd, handled bool
 		return m.librarySearch(), true
 	case "space":
 		return m.togglePlayPause(), true
+	case "f":
+		return m.libToggleFavorite(), true
 	default:
 		return nil, !libraryPassthroughKeys[key]
 	}
@@ -557,12 +613,20 @@ func (m *Model) handleLibraryKey(msg tea.KeyPressMsg) (cmd tea.Cmd, handled bool
 // On an error screen it signs in or retries instead.
 func (m *Model) libraryActivate() tea.Cmd {
 	f := m.libTop()
-	if f.loading() || m.lib.signingIn {
+	if f.loading() || m.libSigningInHere(f) {
+		return nil
+	}
+	if provider, ok := m.libPending(f); ok {
+		if m.libSyncState(provider).needsAuth {
+			return m.librarySignInProvider(provider)
+		}
 		return nil
 	}
 	if f.err != nil {
-		if errors.Is(f.err, playlist.ErrNeedsAuth) {
-			return m.librarySignIn()
+		// Only a source that signs in from the library does: any other
+		// provider's "sign-in required" is retried, never signed in to.
+		if provider, ok := m.libFrameSignIn(f); ok && errors.Is(f.err, playlist.ErrNeedsAuth) {
+			return m.librarySignInProvider(provider)
 		}
 		return m.libraryLoad()
 	}
@@ -593,6 +657,8 @@ func (m *Model) libraryActivate() tea.Cmd {
 			tracks, err := play(ctx)
 			return libraryPlayMsg{gen: gen, title: title, source: source, tracks: tracks, err: err}
 		}
+	case e.Intent == library.IntentSignIn:
+		return m.librarySignInProvider(e.Source)
 	case e.Intent == library.IntentFolders:
 		m.openFileBrowser()
 	case e.Intent == library.IntentSearch:
@@ -625,21 +691,7 @@ func (m *Model) skipByUser(next bool) tea.Cmd {
 func (m *Model) libEndSignIn() {
 	m.lib.signingIn = false
 	m.lib.authURL = ""
-}
-
-func (m *Model) librarySignIn() tea.Cmd {
-	al, ok := m.libTop().level.(library.AuthLevel)
-	if !ok || al.Authenticator() == nil {
-		return nil
-	}
-	auth := al.Authenticator()
-	gen := nextRequest(&m.lib.gen)
-	m.lib.authGen = gen
-	m.lib.signingIn = true
-	m.lib.authURL = ""
-	return func() tea.Msg {
-		return libraryAuthDoneMsg{gen: gen, err: auth.Authenticate()}
-	}
+	m.lib.signInProvider = ""
 }
 
 // libraryPlayTracks replaces the queue with tracks and plays tracks[index],

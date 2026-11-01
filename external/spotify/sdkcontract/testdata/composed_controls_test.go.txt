@@ -1,0 +1,1436 @@
+package spotify
+
+// ddsonic composed stage (M3b2, plan v7): the smoke and the harness's
+// executed controls FC1-FC12 (§2.8). Overlaid as
+// external/spotify/zz_ddsonic_composed_controls_test.go; go test ./... never
+// compiles it. Tests named TestDDSonicChild... run only in the child
+// processes the runner starts for the controls that fail on purpose.
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/printer"
+	"go/token"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/devgianlu/go-librespot/ap"
+	"github.com/devgianlu/go-librespot/audio"
+	metadatapb "github.com/devgianlu/go-librespot/proto/spotify/metadata"
+)
+
+// ---------------------------------------------------------------------------
+// ACTIVE adapter (M3B2-S3 split, plan v9 §4.3): the active stage's seams and
+// observations that rc.4 or the base SDK lacks, moved verbatim from
+// composed_harness_test.go.txt. The stock stage compiles the stock adapter
+// instead.
+
+// composedKeyState is D7 on a bundle's key provider: its record table size, writer
+// queue length and unknown-answer count.
+func composedKeyState(b *playback) (records, queue int, unknown uint64) {
+	return audio.DDSonicComposedKeyState(b.sess.AudioKey())
+}
+
+// composedGeneration is a bundle's access point connection generation.
+func composedGeneration(b *playback) uint64 {
+	g, _ := b.sess.Accesspoint().Generation()
+	return g
+}
+
+// OnService sets the test's call at bundle servicing (before the real
+// receive loop starts).
+func (h *composedHarness) OnService(f func(b *playback)) {
+	h.mu.Lock()
+	h.onService = f
+	h.mu.Unlock()
+}
+
+// OnDecision and OnDetach set the test's barriers at the active D6 points
+// (nil clears them).
+func (h *composedHarness) OnDecision(f func(point string)) {
+	h.mu.Lock()
+	h.onDecision = f
+	h.mu.Unlock()
+}
+
+func (h *composedHarness) OnDetach(f func(point string)) {
+	h.mu.Lock()
+	h.onDetach = f
+	h.mu.Unlock()
+}
+
+// Decisions is how many times decisionHook ran at point.
+func (h *composedHarness) Decisions(point string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.decisions[point]
+}
+
+// Detaches is how many times detachHook ran at point.
+func (h *composedHarness) Detaches(point string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.detaches[point]
+}
+
+// installStageRecoveryHooks is the ACTIVE adapter's part of installSeams
+// (M3B2-S3 split): D6's decisionHook and detachHook, counted and dispatched,
+// and recoveryTimeout saved and restored, moved verbatim from
+// composed_harness_test.go.txt's installSeams. The stock adapter has none:
+// rc.4 has no such seams.
+func (h *composedHarness) installStageRecoveryHooks() {
+	origDecision, origDetach, origRecovery := decisionHook, detachHook, recoveryTimeout
+	h.restoreSeams = append(h.restoreSeams, func() {
+		decisionHook, detachHook, recoveryTimeout = origDecision, origDetach, origRecovery
+	})
+	h.decisions, h.detaches = map[string]int{}, map[string]int{}
+	// D6: the named recovery, detach and accept points, counted, and
+	// dispatched to the test's barrier when it sets one.
+	decisionHook = func(point string) {
+		h.Event("decision:" + point)
+		h.mu.Lock()
+		h.decisions[point]++
+		f := h.onDecision
+		h.mu.Unlock()
+		if f != nil {
+			f(point)
+		}
+	}
+	detachHook = func(point string) {
+		h.Event("detach:" + point)
+		h.mu.Lock()
+		h.detaches[point]++
+		f := h.onDetach
+		h.mu.Unlock()
+		if f != nil {
+			f(point)
+		}
+	}
+}
+
+// installStageService is the ACTIVE adapter's servicing seam (M3B2-S3
+// split), moved verbatim from installSeams. The stock adapter has none.
+func (h *composedHarness) installStageService() {
+	origService := serviceAccessPoint
+	h.restoreSeams = append(h.restoreSeams, func() {
+		serviceAccessPoint = origService
+	})
+	// Servicing: a call-through; a test's call runs first, before the real
+	// servicing starts the receive loop (the I26(b) feasibility check gates
+	// the connection's writes there, as H/ requires).
+	serviceAccessPoint = func(b *playback) {
+		h.mu.Lock()
+		f := h.onService
+		h.mu.Unlock()
+		if f != nil {
+			f(b)
+		}
+		origService(b) // MUTATION-POINT M10
+	}
+}
+
+// p0 is the stored startup, with its source-derived counts (plan v7 §3.2).
+func p0(t *testing.T, h *composedHarness, p *SpotifyProvider) {
+	t.Helper()
+	h.Phase("P0")
+	if err := p.ensureSession(); err != nil {
+		t.Fatalf("P0: the stored startup failed: %v", err)
+	}
+	// R60-1: F-AP counts a login only after its handshake has sent the
+	// welcome, so the stored startup can return first. The exact counts
+	// below are read only after D10 has published the first authenticated
+	// connection, which it registers after that count: the row's
+	// first-connection observation (5 s); a later h.ap.Conn(0, …) in the row
+	// finds it registered at once.
+	if h.ap.Conn(0, 5*time.Second) == nil {
+		t.Fatal("P0: the first authenticated connection was not published by D10 within 5 s")
+	}
+	r := h.router
+	got := fmt.Sprintf("A1=%d A2=%d A3=%d A7=%d A8=%d", r.Count("P0", "A1"), r.Count("P0", "A2"), r.Count("P0", "A3"), r.Count("P0", "A7"), r.Count("P0", "A8"))
+	if want := "A1=1 A2=3 A3=1 A7=1 A8=0"; got != want {
+		t.Errorf("P0 counts: %s, want %s (plan v7 §3.2)", got, want)
+	}
+	d1, _, _, d5, _, _ := h.Counts()
+	if d1 != 1 || d5 != 0 {
+		t.Errorf("P0: D1=%d D5=%d, want 1 and 0", d1, d5)
+	}
+	if acc, logins := h.ap.Accepted(), h.ap.Logins(); acc != 1 || logins != 1 {
+		t.Errorf("P0: F-AP accepted %d, logins %d, want 1 and 1", acc, logins)
+	}
+	if v := r.Violations(); len(v) != 0 {
+		t.Errorf("P0: violations %v", v)
+	}
+	// A marker, not the assertion's text: an allowed child log can never
+	// admit the count assertion above (R30-1).
+	t.Logf("P0-COUNTS-OBSERVED %s D1=%d D5=%d accepted=%d logins=%d", got, d1, d5, h.ap.Accepted(), h.ap.Logins())
+}
+
+// TestDDSonicComposedSmokeP0 is plan v7 §12 step 1's smoke: P0's counts,
+// then an L1a play on the 6.5-chunk MP3 fixture.
+func TestDDSonicComposedSmokeP0(t *testing.T) {
+	tr := composedMP3Track(t, 1)
+	withComposed(t, composedOptions{}, func(h *composedHarness) {
+		h.fx.Add(tr)
+		answerKeys(h, tr)
+		p := h.Provider()
+		p0(t, h, p)
+		if t.Failed() {
+			return
+		}
+
+		// L1a: chunk 1's prefetch, started during setup, is held across the
+		// end of setup.
+		h.Phase("P1")
+		key := fmt.Sprintf("cdn/%s/1", tr.FileHex())
+		arrived, release := h.fx.Hold(key)
+		h.OnRelease(release)
+		// The open is held at openHook("caller-before-accept"), after its real
+		// ready result and before acceptance, until chunk 1's request has
+		// arrived: positive evidence that the request is in flight before the
+		// setup ends. It is not a delay.
+		var arrivedBeforeAccept bool
+		h.OnOpen(func(point string) {
+			if point != "caller-before-accept" {
+				return
+			}
+			select {
+			case <-arrived:
+				arrivedBeforeAccept = true
+			case <-time.After(10 * time.Second):
+			}
+		})
+		out := make(chan composedOpen, 1)
+		h.Go("NewStreamer", func() {
+			s, _, _, err := p.NewStreamer(tr.URI())
+			out <- composedOpen{s, err, time.Now()}
+		})
+		res, ok := composedWithin(out, 45*time.Second)
+		if !ok {
+			t.Fatal("L1a: NewStreamer did not return within 45 s")
+		}
+		if res.err != nil {
+			t.Fatalf("L1a: NewStreamer: %v", res.err)
+		}
+		h.KeepCloser(res.s)
+		h.OnOpen(nil)
+		select {
+		case <-arrived:
+		default:
+			t.Fatal("L1a precondition: chunk 1's request had not arrived when NewStreamer returned (a failure, never a pass)")
+		}
+		if !arrivedBeforeAccept {
+			t.Fatal("L1a precondition: chunk 1's request had not arrived while the open was held before acceptance (a failure, never a pass)")
+		}
+		time.Sleep(500 * time.Millisecond)
+		if at, ended := h.fx.HoldCtxEnded(key, 0); ended {
+			t.Fatalf("L1a: the held chunk-1 request's context ended at %v, after setup", at)
+		}
+		release()
+		// Decoded samples beyond chunk 0's byte span: chunk 0 holds about
+		// 65.7 s of the 64 kbps fixture; read 70 s.
+		last := readSamples(t, res.s, 70*44100)
+		if !nonSilent(last) {
+			t.Error("L1a: the samples decoded beyond chunk 0 are silent")
+		}
+		var c1 *composedCDNRecord
+		for _, rec := range h.fx.CDN() {
+			if rec.Chunk == 1 {
+				rec := rec
+				c1 = &rec
+				break
+			}
+		}
+		if c1 == nil || c1.Status != 206 || c1.Completed.IsZero() || !c1.CtxEnded.IsZero() {
+			t.Errorf("L1a: chunk 1's held request did not complete 206 on its live context: %+v", c1)
+		}
+		_, d2, d3, d5, _, d4 := h.Counts()
+		conn := h.ap.Conn(0, time.Second)
+		writes := -1
+		if conn != nil {
+			writes = conn.Count(ap.PacketTypeRequestKey)
+		}
+		if d2 != 1 || d3 != 1 || d5 != 0 || len(d4) != 0 || writes != 1 {
+			t.Errorf("L1a counts: D2=%d D3=%d D5=%d D4=%v key writes on c1=%d; want 1 1 0 [] 1", d2, d3, d5, d4, writes)
+		}
+		if v := h.router.Violations(); len(v) != 0 {
+			t.Errorf("L1a: violations %v", v)
+		}
+		t.Logf("L1a: CDN log %+v", h.fx.CDN())
+	})
+}
+
+// ---------------------------------------------------------------------------
+// The executed controls (plan v7 §2.8; outcomes §9).
+
+// cnew is a C-new client: a nil Transport, so every request looks
+// http.DefaultTransport up afresh.
+func cnew() *http.Client { return &http.Client{Timeout: 10 * time.Second} }
+
+func composedGet(c *http.Client, url string) error {
+	resp, err := c.Get(url)
+	if err == nil {
+		_ = resp.Body.Close()
+	}
+	return err
+}
+
+// TestDDSonicComposedFC1UnknownHost: an unknown host is a violation, gets an
+// error, and never reaches the previous transport.
+func TestDDSonicComposedFC1UnknownHost(t *testing.T) {
+	h := withComposed(t, composedOptions{tripwire: true}, func(h *composedHarness) {
+		h.ExpectViolation(composedPattern{"GET", "example.invalid", "/"}, 1)
+		err := composedGet(cnew(), "https://example.invalid/")
+		// Mutation-independent: the request gets an error. Which error is
+		// reported, not asserted (plan v7 §2.8 per-variant rule).
+		if err == nil {
+			t.Error("FC1: the unknown host's request did not fail")
+		}
+		t.Logf("FC1-OBSERVED err=%v unroutable=%t", err, errors.Is(err, errComposedUnroutable))
+		// The named assertion.
+		if n := h.trip.calls.Load(); n != 0 {
+			t.Errorf("FC1: tripwire calls = %d, want 0", n)
+		}
+	})
+	h.RestoreOriginal()
+}
+
+// TestDDSonicComposedFC2UnknownPath: a known host with an unknown path is a
+// violation.
+func TestDDSonicComposedFC2UnknownPath(t *testing.T) {
+	withComposed(t, composedOptions{}, func(h *composedHarness) {
+		pat := composedPattern{"GET", "spclient.composed.invalid", "/net-fortune/v2/fortune"}
+		h.ExpectViolation(pat, 1)
+		_ = composedGet(cnew(), "https://spclient.composed.invalid/net-fortune/v2/fortune")
+		n := 0
+		for _, v := range h.router.Violations() {
+			if pat.matches(v) {
+				n++
+			}
+		}
+		// The named assertion.
+		if n != 1 {
+			t.Errorf("FC2: violation = %d, want 1", n)
+		}
+	})
+}
+
+// TestDDSonicComposedFC3Redirect: a 3xx is a violation, and its follow-up
+// meets the allowlist again; the previous transport is never reached.
+func TestDDSonicComposedFC3Redirect(t *testing.T) {
+	h := withComposed(t, composedOptions{tripwire: true, allowControl: true}, func(h *composedHarness) {
+		h.ExpectViolation(composedPattern{"GET", "control.composed.invalid", "/followup/redirect"}, 1)
+		h.ExpectViolation(composedPattern{"GET", "elsewhere.invalid", "/"}, 1)
+		_ = composedGet(cnew(), "https://control.composed.invalid/followup/redirect")
+		// The named assertion.
+		if n := len(h.router.Violations()); n != 2 {
+			t.Errorf("FC3: violations = %d, want 2: %v", n, h.router.Violations())
+		}
+		if n := h.trip.calls.Load(); n != 0 {
+			t.Errorf("FC3: tripwire calls = %d, want 0", n)
+		}
+	})
+	h.RestoreOriginal()
+}
+
+// TestDDSonicComposedFC4Dial: only the fixture's own address is dialled.
+func TestDDSonicComposedFC4Dial(t *testing.T) {
+	withComposed(t, composedOptions{allowControl: true}, func(h *composedHarness) {
+		err := composedGet(cnew(), "https://control.composed.invalid/followup/dial")
+		dials := h.router.Dials()
+		only := len(dials) > 0
+		for _, d := range dials {
+			only = only && d == h.router.fixtureAddr
+		}
+		// The named assertion; the request's own result is reported.
+		if !only {
+			t.Errorf("FC4: only the fixture address dialled: dials %v, fixture %s", dials, h.router.fixtureAddr)
+		}
+		t.Logf("FC4: dials %v; the allowlisted request: %v", dials, err)
+	})
+}
+
+// TestDDSonicComposedFC9DealerObserved: across a full play, no request to
+// the dealer and no dial but the fixture's. Observational only (plan v7 §2.8).
+func TestDDSonicComposedFC9DealerObserved(t *testing.T) {
+	tr := composedMP3Track(t, 2)
+	withComposed(t, composedOptions{}, func(h *composedHarness) {
+		h.fx.Add(tr)
+		answerKeys(h, tr)
+		p := h.Provider()
+		p0(t, h, p)
+		h.Phase("P1")
+		s, _, _, err := p.NewStreamer(tr.URI())
+		if err != nil {
+			t.Fatalf("FC9: NewStreamer: %v", err)
+		}
+		h.KeepCloser(s)
+		_ = readSamples(t, s, 5*44100)
+		dealer := h.router.CountHost("dealer.composed.invalid")
+		dials := h.router.Dials()
+		other := 0
+		for _, d := range dials {
+			if d != h.router.fixtureAddr {
+				other++
+			}
+		}
+		t.Logf("FC9-OBSERVED dealer-requests=%d other-dials=%d", dealer, other)
+		if dealer != 0 || other != 0 {
+			t.Errorf("FC9: dealer requests %d, other dials %d", dealer, other)
+		}
+	})
+}
+
+// TestDDSonicComposedFC10LateUse: a captured (C-cap) client's request after
+// teardown is refused by its closed router and recorded as a late use.
+func TestDDSonicComposedFC10LateUse(t *testing.T) {
+	var client *http.Client
+	var r *composedRouter
+	pat := composedPattern{"GET", "control.composed.invalid", "/followup/late"}
+	h := withComposed(t, composedOptions{tripwire: true, allowControl: true}, func(h *composedHarness) {
+		r = h.router
+		h.ExpectLateUse(pat, 1, dueFinal) // provoked after T10: T9 has nothing due; ZZ checks it (plan v9 §2.2)
+		client = newSpotifyStreamHTTPClient(context.Background(), http.DefaultTransport)
+		st, ok := client.Transport.(streamContextTransport)
+		if !ok || st.base != h.router || http.DefaultTransport != h.router {
+			t.Fatal("FC10 precondition: the captured client's base is not the open router")
+		}
+	})
+	defer h.RestoreOriginal()
+	if http.DefaultTransport != h.trip {
+		t.Fatal("FC10 precondition: http.DefaultTransport is not the restored tripwire")
+	}
+	err := composedGet(client, "https://control.composed.invalid/followup/late")
+	late := r.LateUses()
+	// The named assertion: refused as a late use, recorded once, and the
+	// restored transport not reached.
+	if !errors.Is(err, errComposedLateUse) || len(late) != 1 || h.trip.calls.Load() != 0 {
+		t.Errorf("FC10: the captured request was refused as a late use: err %v, late uses %d, tripwire %d", err, len(late), h.trip.calls.Load())
+	}
+}
+
+// composedCheckLateUses is ZZNoLateUse's check: every router's late uses
+// equal its declared late uses exactly.
+func composedCheckLateUses(t *testing.T) {
+	t.Helper()
+	composedRoutersMu.Lock()
+	routers := append([]*composedRouter(nil), composedRouters...)
+	composedRoutersMu.Unlock()
+	for _, r := range routers {
+		r.mu.Lock()
+		declared := map[composedPattern]int{}
+		for k, v := range r.declaredLate {
+			declared[k] = v
+		}
+		late := append([]composedRecord(nil), r.lateUses...)
+		r.mu.Unlock()
+		got := map[composedPattern]int{}
+		for _, l := range late {
+			found := false
+			for p := range declared {
+				if p.matches(l) {
+					got[p]++
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("ZZ: router %s: an undeclared late use: %v", r.name, l)
+			}
+		}
+		for p, n := range declared {
+			if got[p] != n {
+				t.Errorf("ZZ: router %s: declared %d late use(s) of %v, recorded %d", r.name, n, p, got[p])
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Step-1 feasibility of I26(b) (plan v7 §8 I26, §10 STOP 9; R29-3): a
+// physical key write held on the old connection, then the receive loop's
+// EOF and a completed new connection and generation, with the write still
+// held, no Ping sent and nothing released.
+
+// heldWriter reports whether a goroutine is the key provider's writer held
+// inside the write gate.
+func heldWriter() bool {
+	for _, g := range composedGoroutines() {
+		if strings.Contains(g.Text, "(*DDSonicWriteGate).Write(") && strings.Contains(g.Text, "(*KeyProvider).writer(") {
+			return true
+		}
+	}
+	return false
+}
+
+// prefetching reports whether any goroutine is one of the SDK reader's
+// prefetches (T/audio/chunked-reader.go:273).
+func prefetching() bool {
+	for _, g := range composedGoroutines() {
+		if strings.Contains(g.Text, "(*HttpChunkedReader).startPrefetch") {
+			return true
+		}
+	}
+	return false
+}
+
+func TestDDSonicComposedI26bFeasibility(t *testing.T) {
+	tr := composedMP3Track(t, 4)
+	withComposed(t, composedOptions{}, func(h *composedHarness) {
+		h.fx.Add(tr)
+		var gate *ap.DDSonicWriteGate
+		var gated *ap.Accesspoint
+		// H/'s write gate is put on the bundle's access point as it is
+		// serviced, before the real receive loop starts, as H/ requires (H/:460-469).
+		h.OnService(func(b *playback) {
+			if gate == nil && b.sess != nil {
+				gated = b.sess.Accesspoint()
+				gate = ap.DDSonicContractGateWrites(gated)
+			}
+		})
+		p := h.Provider()
+		p0(t, h, p)
+		h.OnService(nil)
+		if gate == nil {
+			t.Fatal("I26(b) precondition: no write gate on the bundle's access point")
+		}
+		c1 := h.ap.Conn(0, 5*time.Second)
+		if c1 == nil {
+			t.Fatal("I26(b) precondition: no first connection")
+		}
+		gen1, _ := gated.Generation()
+		entered := gate.Arm()
+		h.OnRelease(gate.Release)
+		h.Phase("P1")
+		out := make(chan composedOpen, 1)
+		h.Go("NewStreamer", func() {
+			s, _, _, err := p.NewStreamer(tr.URI())
+			out <- composedOpen{s, err, time.Now()}
+		})
+		// The physical write, held: positively observed.
+		if _, ok := composedWithin(entered, 15*time.Second); !ok {
+			t.Fatal("I26(b) precondition: the key write did not enter the gate")
+		}
+		if !heldWriter() {
+			t.Fatal("I26(b) precondition: the gated write is not the key provider's writer")
+		}
+		if n := c1.Count(ap.PacketTypeRequestKey); n != 0 {
+			t.Fatalf("I26(b) precondition: the key request reached the server (%d) although its write is held", n)
+		}
+		t.Logf("I26B-WRITE-HELD generation=%d", gen1)
+		// EOF on the old connection: the peer closes it. No Ping is sent, and
+		// nothing is released.
+		if err := c1.C.PeerClose(); err != nil {
+			t.Fatalf("I26(b): peer close: %v", err)
+		}
+		c2 := h.ap.Conn(1, 15*time.Second)
+		deadline := time.Now().Add(15 * time.Second)
+		for g, _ := gated.Generation(); g == gen1 && time.Now().Before(deadline); g, _ = gated.Generation() {
+			time.Sleep(10 * time.Millisecond)
+		}
+		gen2, _ := gated.Generation()
+		// Two separate facts (R30-3): the physical writer, observed blocked in
+		// the gate; and whether the open is still pending. The open returning
+		// releases nothing: H/'s gate holds its write until Release
+		// (H/:412-436), whatever the caller's outcome.
+		held := heldWriter()
+		var early *composedOpen
+		select {
+		case r := <-out:
+			early = &r
+		default:
+		}
+		pending, openNote := early == nil, ""
+		if early != nil {
+			openNote = fmt.Sprintf(" (it returned: %v)", early.err)
+		}
+		// The feasibility assertion (STOP 9 if it fails).
+		if c2 == nil || gen2 != gen1+1 || h.ap.Logins() != 2 || !held || c1.Count(ap.PacketTypeRequestKey) != 0 {
+			t.Fatalf("I26(b) feasibility: the reconnect did not complete with the write held: second connection %t, generation %d -> %d, logins %d, physical write held in the gate %t, open pending %t%s, key packets on c1 %d",
+				c2 != nil, gen1, gen2, h.ap.Logins(), held, pending, openNote, c1.Count(ap.PacketTypeRequestKey))
+		}
+		t.Logf("I26B-RECONNECT-WITH-WRITE-HELD generation %d -> %d, logins %d, no Ping sent, nothing released; physical write held in the gate true, open pending %t%s", gen1, gen2, h.ap.Logins(), pending, openNote)
+		// Then release. The rest of I26 is a later row; the outcome here is
+		// recorded, not credited.
+		answerKeys(h, tr)
+		gate.Release()
+		var res composedOpen
+		if early != nil {
+			res = *early
+		} else {
+			r, ok := composedWithin(out, 60*time.Second)
+			if !ok {
+				t.Fatal("I26(b): the open did not return within 60 s of the release")
+			}
+			res = r
+		}
+		if res.s != nil {
+			h.KeepCloser(res.s)
+		}
+		// Disposal is L2's row, not this one: the accepted stream's own
+		// prefetches are joined, bounded, while the fixtures are live, so T3
+		// closes a stream with no request in flight. Closing it with
+		// prefetches queued makes the reader retry after T6 (recorded).
+		deadline = time.Now().Add(30 * time.Second)
+		for prefetching() && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if prefetching() {
+			t.Fatal("I26(b): the accepted stream's prefetches did not end within 30 s")
+		}
+		_, d2, d3, _, _, d4 := h.Counts()
+		t.Logf("I26B-AFTER-RELEASE observation (not credited): err=%v setups=%d opens=%d rebuilds=%v key writes c1=%d c2=%d", res.err, d3, d2, d4, c1.Count(ap.PacketTypeRequestKey), c2.Count(ap.PacketTypeRequestKey))
+	})
+}
+
+// ---------------------------------------------------------------------------
+// The fixture's shared hold (R29-2): two real concurrent requests reach one
+// hold; its arrival is announced once, both are held, both complete after
+// one release, and no handler panics.
+
+func TestDDSonicComposedFixtureSharedHold(t *testing.T) {
+	withComposed(t, composedOptions{allowControl: true}, func(h *composedHarness) {
+		const key = "control/shared"
+		arrived, release := h.fx.Hold(key)
+		h.OnRelease(release)
+		// Inside the first arrival announcement, wait (bounded) for the second
+		// request to reach the hold too: with a once, the second waits for the
+		// announcement instead of announcing again.
+		h.fx.mu.Lock()
+		h.fx.arriveHook = func() {
+			deadline := time.Now().Add(time.Second)
+			for time.Now().Before(deadline) {
+				if reached, _ := h.fx.HoldCounts(key); reached >= 2 {
+					return
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
+		h.fx.mu.Unlock()
+		results := make(chan error, 2)
+		for i := range 2 {
+			h.Go(fmt.Sprintf("shared request %d", i), func() {
+				results <- composedGet(cnew(), "https://control.composed.invalid/followup/shared")
+			})
+		}
+		if _, ok := composedWithin(arrived, 10*time.Second); !ok {
+			t.Fatal("shared hold precondition: no arrival")
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		reached, waiting := h.fx.HoldCounts(key)
+		for waiting < 2 && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+			reached, waiting = h.fx.HoldCounts(key)
+		}
+		release()
+		var errs []error
+		for range 2 {
+			err, ok := composedWithin(results, 10*time.Second)
+			if !ok {
+				err = errors.New("did not return")
+			}
+			errs = append(errs, err)
+		}
+		panics := h.fx.Panics()
+		// The named assertion.
+		if reached != 2 || waiting != 2 || errs[0] != nil || errs[1] != nil || len(panics) != 0 {
+			t.Errorf("shared hold: both requests held and completed, one arrival, no handler panic: reached %d, held together %d, results %v, handler panics %v", reached, waiting, errs, panics)
+			return
+		}
+		t.Logf("SHARED-HOLD-OK reached=%d held=%d", reached, waiting)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// D10's drain (R29-4): every authenticated connection is taken from the
+// fake's conns channel and registered; the channel's observed occupancy is
+// within its capacity. Observations, not a proof that no producer waited.
+
+func TestDDSonicComposedD10DrainObserved(t *testing.T) {
+	withComposed(t, composedOptions{}, func(h *composedHarness) {
+		var aps []*ap.Accesspoint
+		for i := range 3 {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			a, err := h.ap.F.Connect(ctx)
+			cancel()
+			if err != nil {
+				t.Fatalf("D10 precondition: connection %d: %v", i, err)
+			}
+			aps = append(aps, a)
+		}
+		for _, a := range aps {
+			a.Close()
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for h.ap.Drained() < 3 && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		occ, capacity := h.ap.Occupancy()
+		// The named assertion.
+		if h.ap.Drained() != 3 || h.ap.Logins() != 3 || occ > capacity {
+			t.Errorf("D10: every authenticated connection drained: drained %d, logins %d, observed occupancy %d of capacity %d", h.ap.Drained(), h.ap.Logins(), occ, capacity)
+			return
+		}
+		t.Logf("D10-DRAIN-OK drained=%d logins=%d observed-occupancy=%d capacity=%d", h.ap.Drained(), h.ap.Logins(), occ, capacity)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// FC8 and the bypass binding (plan v7 §2.6; runner step 13).
+
+// errBypassBinding marks a refusal by the binding check, as distinct from a
+// failure to read or parse (which is never a successful refusal).
+var errBypassBinding = errors.New("bypass binding refused")
+
+const composedRefusal = `if testing.Testing() {
+	return nil, fmt.Errorf("session: %w", errNoStandIn)
+}`
+
+func printNode(fset *token.FileSet, n any) (string, error) {
+	var b bytes.Buffer
+	if err := printer.Fprint(&b, fset, n); err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+func findFunc(path, name string) (*token.FileSet, *ast.FuncDecl, error) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil && fd.Name.Name == name {
+			return fset, fd, nil
+		}
+	}
+	return nil, nil, fmt.Errorf("%w: %s declares no func %s", errBypassBinding, path, name)
+}
+
+// composedBypassBinding checks that the shipped productionLibrespotSession
+// has the bypass's signature, that its first statement is exactly the
+// go-test refusal, and that the rest of its body is exactly the bypass's
+// body.
+func composedBypassBinding(shipped, overlay string) error {
+	sf, sfn, err := findFunc(shipped, "productionLibrespotSession")
+	if err != nil {
+		return err
+	}
+	of, ofn, err := findFunc(overlay, "composedLibrespotSession")
+	if err != nil {
+		return err
+	}
+	ssig, err1 := printNode(sf, sfn.Type)
+	osig, err2 := printNode(of, ofn.Type)
+	if err := errors.Join(err1, err2); err != nil {
+		return err
+	}
+	if ssig != osig {
+		return fmt.Errorf("%w: signatures differ: %s / %s", errBypassBinding, ssig, osig)
+	}
+	if len(sfn.Body.List) < 1 {
+		return fmt.Errorf("%w: the shipped body is empty", errBypassBinding)
+	}
+	first, err := printNode(sf, sfn.Body.List[0])
+	if err != nil {
+		return err
+	}
+	if first != composedRefusal {
+		return fmt.Errorf("%w: the shipped body's first statement is not the go-test refusal:\n%s", errBypassBinding, first)
+	}
+	rest := func(fset *token.FileSet, stmts []ast.Stmt) (string, error) {
+		var parts []string
+		for _, st := range stmts {
+			p, err := printNode(fset, st)
+			if err != nil {
+				return "", err
+			}
+			parts = append(parts, p)
+		}
+		return strings.Join(parts, "\n"), nil
+	}
+	sr, err1 := rest(sf, sfn.Body.List[1:])
+	or, err2 := rest(of, ofn.Body.List)
+	if err := errors.Join(err1, err2); err != nil {
+		return err
+	}
+	if sr != or {
+		return fmt.Errorf("%w: the shipped body, past the refusal, differs from the bypass:\n%s\n---\n%s", errBypassBinding, sr, or)
+	}
+	return nil
+}
+
+// TestDDSonicComposedFC8BypassBinding: the binding holds for the shipped
+// file and the overlay, and refuses an overlay with an extra statement and a
+// shipped body altered in a scratch copy. A read or parse failure is never
+// counted as a refusal. Verifier evidence, not a behavioural mutant.
+func TestDDSonicComposedFC8BypassBinding(t *testing.T) {
+	shipped := "session_auth_ddsonic.go"
+	overlay := filepath.Join("sdkcontract", "testdata", "composed_bypass_test.go.txt")
+	if err := composedBypassBinding(shipped, overlay); err != nil {
+		t.Fatalf("FC8: the binding does not hold: %v", err)
+	}
+	read := func(p string) string {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	dir := t.TempDir()
+	extra := filepath.Join(dir, "extra.go")
+	ov := read(overlay)
+	if !strings.Contains(ov, "\treturn session.NewSessionFromOptions(ctx, opts)\n") {
+		t.Fatal("FC8: the overlay's body is not where expected")
+	}
+	if err := os.WriteFile(extra, []byte(strings.Replace(ov, "\treturn session.NewSessionFromOptions(ctx, opts)\n", "\topts.DeviceId = \"\"\n\treturn session.NewSessionFromOptions(ctx, opts)\n", 1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := composedBypassBinding(shipped, extra); !errors.Is(err, errBypassBinding) {
+		t.Errorf("FC8: an overlay with an extra statement was not refused by the binding: %v", err)
+	}
+	altered := filepath.Join(dir, "altered.go")
+	sh := read(shipped)
+	if !strings.Contains(sh, "\treturn session.NewSessionFromOptions(ctx, opts)\n}\n") {
+		t.Fatal("FC8: the shipped body is not where expected")
+	}
+	if err := os.WriteFile(altered, []byte(strings.Replace(sh, "\treturn session.NewSessionFromOptions(ctx, opts)\n}\n", "\topts.Log = nil\n\treturn session.NewSessionFromOptions(ctx, opts)\n}\n", 1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := composedBypassBinding(altered, overlay); !errors.Is(err, errBypassBinding) {
+		t.Errorf("FC8: a shipped body altered in a scratch copy was not refused by the binding: %v", err)
+	}
+	if err := composedBypassBinding(filepath.Join(dir, "missing.go"), overlay); err == nil || errors.Is(err, errBypassBinding) {
+		t.Errorf("FC8: a read failure was counted as a refusal: %v", err)
+	}
+	t.Log("FC8-BINDING-OK FC8-REFUSED-EXTRA FC8-REFUSED-ALTERED")
+}
+
+// ---------------------------------------------------------------------------
+// The child controls: run only by -run '^TestDDSonicChild<name>$' in a
+// child process. Their deliberate failures are asserted by the runner.
+
+// fc5Worker is W of FC5 and FC7: request 1 held at hb; after it returns, a
+// new C-new follow-up, whose destination the event log records.
+func fc5Worker(h *composedHarness, name string, followup chan<- error) {
+	_ = composedGet(cnew(), "https://control.composed.invalid/followup/"+name)
+	h.Event("followup-issued")
+	followup <- composedGet(cnew(), "https://control.composed.invalid/followup/"+name+"-followup")
+}
+
+// fc5Destination reads the follow-up's destination from the event log.
+func fc5Destination(h *composedHarness, name string) string {
+	for _, e := range h.Events() {
+		_, ev, _ := strings.Cut(e, ":")
+		switch {
+		case strings.HasPrefix(ev, "router:control.composed.invalid/followup/"+name+"-followup"):
+			return "router"
+		case strings.HasPrefix(ev, "tripwire:control.composed.invalid/followup/"+name+"-followup"):
+			return "tripwire"
+		}
+	}
+	return "none"
+}
+
+func fc5Order(h *composedHarness) string {
+	return fmt.Sprintf("restore=%d release(hb)=%d followup-issued=%d", h.EventSeq("restore"), h.EventSeq("release(hb)"), h.EventSeq("followup-issued"))
+}
+
+func TestDDSonicChildFC5(t *testing.T) {
+	followup := make(chan error, 1)
+	h := withComposed(t, composedOptions{tripwire: true, allowControl: true}, func(h *composedHarness) {
+		arrived, release := h.fx.Hold("control/fc5")
+		h.OnRelease(func() { h.Event("release(hb)"); release() })
+		h.Go("W", func() { fc5Worker(h, "fc5", followup) })
+		if _, ok := composedWithin(arrived, 10*time.Second); !ok {
+			t.Fatal("FC5 precondition: request 1 did not reach its barrier")
+		}
+	})
+	defer h.RestoreOriginal()
+	if h.EventSeq("followup-issued") != 0 {
+		t.Log("FC5-FOLLOWUP-ISSUED")
+	}
+	dest := fc5Destination(h, "fc5")
+	t.Logf("FC5-ORDER %s dest=%s", fc5Order(h), dest)
+	// The named assertion.
+	if dest != "router" || h.router.Count("P-H", "A9") != 2 || h.trip.calls.Load() != 0 {
+		t.Errorf("FC5: follow-up destination = router (A9 count 2, tripwire 0): dest %s, A9 %d, tripwire %d", dest, h.router.Count("P-H", "A9"), h.trip.calls.Load())
+	}
+	// Mutation-independent.
+	if v := h.router.Violations(); len(v) != 0 || composedPoison.Load() != nil {
+		t.Errorf("FC5: violations %v, poisoned %v", v, composedPoison.Load())
+	}
+}
+
+// fc6Holder poisons through a failed T5e: a handler that ignores its
+// release keeps a request inside the router.
+func fc6Holder(t *testing.T, beforeTeardown func(h *composedHarness)) {
+	withComposed(t, composedOptions{allowControl: true, joinBound: 2 * time.Second}, func(h *composedHarness) {
+		arrived, _ := h.fx.Hold("control/stuck")
+		h.fx.IgnoreRelease("control/stuck")
+		go func() { _ = composedGet(cnew(), "https://control.composed.invalid/followup/stuck") }()
+		if _, ok := composedWithin(arrived, 10*time.Second); !ok {
+			t.Fatal("FC6 precondition: the stuck request did not arrive")
+		}
+		if beforeTeardown != nil {
+			beforeTeardown(h)
+		}
+	})
+}
+
+type acquireResult struct {
+	err error
+	at  time.Time
+}
+
+func TestDDSonicChildFC6Wake(t *testing.T) {
+	waiter := make(chan acquireResult, 1)
+	t.Run("holder", func(t *testing.T) {
+		fc6Holder(t, func(h *composedHarness) {
+			go func() {
+				err := tryAcquireComposed("waiter", 30*time.Second)
+				waiter <- acquireResult{err, time.Now()}
+			}()
+			time.Sleep(200 * time.Millisecond)
+			select {
+			case r := <-waiter:
+				t.Fatalf("FC6 precondition: the waiter returned before the poisoning: %v", r.err)
+			default:
+			}
+			// The waiter is blocked inside tryAcquireComposed (asserted). How it
+			// waits is emitted, not asserted: a select in the control and the
+			// wake-up mutant, a mutex in the plain-lock mutant (plan v7 §2.8
+			// per-variant rule); the runner checks it per variant.
+			state := ""
+			for _, g := range composedGoroutines() {
+				if strings.Contains(g.Text, ".tryAcquireComposed(") {
+					state = g.Header
+				}
+			}
+			if state == "" {
+				t.Fatal("FC6 precondition: the waiter is not blocked inside tryAcquireComposed")
+			}
+			t.Logf("FC6-WAITER-STATE %s", state)
+			t.Log("FC6-WAITER-BLOCKED-BEFORE-POISON")
+		})
+	})
+	t.Run("waiter", func(t *testing.T) {
+		p := composedPoison.Load()
+		if p == nil {
+			t.Fatal("FC6: the holder did not poison")
+		}
+		var r acquireResult
+		var ok bool
+		if wait := time.Until(p.At.Add(time.Second)); wait > 0 {
+			r, ok = composedWithin(waiter, wait)
+		} else {
+			select {
+			case r = <-waiter:
+				ok = true
+			default:
+			}
+		}
+		elapsed := r.at.Sub(p.At)
+		// The named assertion.
+		if !ok || elapsed >= time.Second || r.err == nil || !strings.Contains(r.err.Error(), "TestDDSonicChildFC6Wake/holder") {
+			if !ok {
+				t.Errorf("FC6: acquisition returned within 1 s of poisoning, naming the holder: it had not returned 1 s after the poisoning")
+				t.Log("FC6-WAKE-BLOCKED")
+			} else {
+				t.Errorf("FC6: acquisition returned within 1 s of poisoning, naming the holder: returned after %v, err %v", elapsed, r.err)
+			}
+			return
+		}
+		t.Logf("FC6-WAKE-OK %v", elapsed)
+	})
+}
+
+func TestDDSonicChildFC6Arrival(t *testing.T) {
+	t.Run("holder", func(t *testing.T) { fc6Holder(t, nil) })
+	t.Run("arrival", func(t *testing.T) {
+		start := time.Now()
+		out := make(chan acquireResult, 1)
+		go func() {
+			err := tryAcquireComposed("arrival", 30*time.Second)
+			out <- acquireResult{err, time.Now()}
+		}()
+		r, ok := composedWithin(out, time.Second)
+		// The named assertion.
+		if !ok || r.err == nil || !strings.Contains(r.err.Error(), "TestDDSonicChildFC6Arrival/holder") {
+			t.Errorf("FC6: returned within 1 s, naming the holder: returned %t, err %v", ok, r.err)
+			if !ok {
+				t.Log("FC6-ARRIVAL-BLOCKED")
+			}
+			return
+		}
+		t.Logf("FC6-ARRIVAL-OK %v", r.at.Sub(start))
+	})
+}
+
+func TestDDSonicChildFC7(t *testing.T) {
+	followup := make(chan error, 1)
+	var h0 *composedHarness
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("FC7: the body's panic was not re-raised")
+			} else {
+				t.Logf("FC7-REPANIC-RECOVERED %v", r)
+			}
+		}()
+		withComposed(t, composedOptions{tripwire: true, allowControl: true}, func(h *composedHarness) {
+			h0 = h
+			arrived, release := h.fx.Hold("control/fc7")
+			h.OnRelease(func() { h.Event("release(hb)"); release() })
+			h.Go("W", func() { fc5Worker(h, "fc7", followup) })
+			if _, ok := composedWithin(arrived, 10*time.Second); !ok {
+				t.Fatal("FC7 precondition: request 1 did not reach its barrier")
+			}
+			panic("FC7: a deliberate panic with a held request")
+		})
+	}()
+	h := h0
+	if h == nil {
+		t.Fatal("FC7: no harness")
+	}
+	defer h.RestoreOriginal()
+	if h.EventSeq("followup-issued") != 0 {
+		t.Log("FC7-FOLLOWUP-ISSUED")
+	}
+	dest := fc5Destination(h, "fc7")
+	t.Logf("FC7-ORDER %s dest=%s", fc5Order(h), dest)
+	// The named assertion.
+	if dest != "router" || h.trip.calls.Load() != 0 {
+		t.Errorf("FC7: follow-up destination = router (tripwire 0): dest %s, tripwire %d", dest, h.trip.calls.Load())
+	}
+	// Mutation-independent.
+	h.router.mu.Lock()
+	inFlight := h.router.inFlight
+	h.router.mu.Unlock()
+	if inFlight != 0 || composedPoison.Load() != nil || h.failedStep != "" {
+		t.Errorf("FC7: in-flight %d, poisoned %v, failed step %q", inFlight, composedPoison.Load(), h.failedStep)
+	}
+}
+
+func TestDDSonicChildFC11(t *testing.T) {
+	var client *http.Client
+	h := withComposed(t, composedOptions{tripwire: true, allowControl: true}, func(h *composedHarness) {
+		client = newSpotifyStreamHTTPClient(context.Background(), http.DefaultTransport)
+	})
+	defer h.RestoreOriginal()
+	_ = composedGet(client, "https://control.composed.invalid/followup/undeclared")
+	composedCheckLateUses(t) // expected to fail, naming that router and request
+}
+
+// TestDDSonicChildFC12 is the failed-user-join control (plan v7 §2.8, §9;
+// R25-1, R26-1, R27-1). DDSONIC_FC12_VARIANT names which of its three exact
+// outcomes applies: control (default), MR or MT.
+func TestDDSonicChildFC12(t *testing.T) {
+	variant := os.Getenv("DDSONIC_FC12_VARIANT")
+	if variant == "" {
+		variant = "control"
+	}
+	tr := composedMP3Track(t, 3)
+	var h0 *composedHarness
+	var call *composedD1Call
+	ctrlDone := make(chan error, 1)
+	wRelease := make(chan struct{})
+	wResult := make(chan error, 1)
+	t.Run("holder", func(t *testing.T) {
+		withComposed(t, composedOptions{tripwire: true, allowControl: true, childControl: true, joinBound: 3 * time.Second}, func(h *composedHarness) {
+			h0 = h
+			h.fx.Add(tr)
+			answerKeys(h, tr)
+			p := h.Provider()
+			p0(t, h, p)
+			sess := p.sessionNow()
+			if sess == nil {
+				t.Fatal("FC12: no session after P0")
+			}
+			// The control-only hold: never released, not registered with T1.
+			_ = h.ap.F.Hold()
+			accepted, logins, d1Before := h.ap.Accepted(), h.ap.Logins(), len(h.D1Calls())
+			ctx, _ := h.Context() // no deadline; T2 cancels it
+			h.Phase("P-H")
+			gen := sess.generation()
+			h.Go("rebuild controller", func() { ctrlDone <- sessionReconnect(sess, ctx, gen) })
+			h.GoSurvivor("W", func() {
+				<-wRelease
+				wResult <- composedGet(cnew(), "https://control.composed.invalid/followup/w")
+			})
+			// P1-P6.
+			deadline := time.Now().Add(15 * time.Second)
+			for (len(h.D1Calls()) == d1Before || h.ap.Accepted() == accepted) && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			calls := h.D1Calls()
+			if len(calls) != d1Before+1 || h.ap.Accepted() != accepted+1 {
+				t.Fatalf("FC12 precondition: the rebuild's constructor did not reach F-AP (D1 %d, accepted %d)", len(calls), h.ap.Accepted())
+			}
+			call = calls[d1Before]
+			if _, ok := ctx.Deadline(); ok || ctx.Err() != nil {
+				t.Fatal("FC12 precondition P1: the context has a deadline or has ended")
+			}
+			if h.router.Count("P-H", "A1") < 1 || h.router.Count("P-H", "A2") < 1 {
+				t.Fatal("FC12 precondition P2: the build's A1 and A2 are not in the router's log")
+			}
+			if h.ap.Logins() != logins {
+				t.Fatal("FC12 precondition P3: the held connection logged in")
+			}
+			if call.Returned() {
+				t.Fatal("FC12 precondition P4: the raw constructor has returned")
+			}
+			inConnect := false
+			for _, g := range composedGoroutines() {
+				if strings.HasSuffix(g.CreatorFile, "build_ddsonic.go") && strings.Contains(g.Text, "ap.(*Accesspoint).connect(") {
+					inConnect = true
+				}
+			}
+			if !inConnect {
+				t.Fatal("FC12 precondition P5: no build worker in (*Accesspoint).connect")
+			}
+			if h.router.CountHost("control.composed.invalid") != 0 || h.survLive.Load() != 1 {
+				t.Fatal("FC12 precondition P6: W is not parked")
+			}
+			t.Log("FC12-PRE-OK")
+			h.checkpoint = func(stage string) {
+				ctrlReturned := false
+				select {
+				case err := <-ctrlDone:
+					ctrlReturned = true
+					ctrlDone <- err
+				default:
+				}
+				if call.Returned() || !ctrlReturned {
+					t.Errorf("FC12 C1: raw constructor returned %t, controller returned %t", call.Returned(), ctrlReturned)
+				} else {
+					t.Log("FC12-C1-OK")
+				}
+				c2 := h.ap.SigIsFixtures()
+				c3free := ap.DDSonicComposedFakeOpenTryLock() // released at once if it was free
+				c4 := http.DefaultTransport == h.router && h.router.State() == routerPoisoned
+				if !c2 {
+					t.Errorf("FC12 C2: serverSigPubKey is not the fixture's key")
+				}
+				if c3free {
+					t.Errorf("FC12 C3: ddsonicFakeOpen TryLock succeeded (recorded; released at once)")
+				}
+				if !c4 {
+					t.Errorf("FC12 C4: http.DefaultTransport is not the router, or the router is not poisoned (state %v)", h.router.State())
+				}
+				key := map[bool]string{true: "fixture", false: "other"}[c2]
+				if h.ap.SigIsSDKs() {
+					key = "sdk"
+				}
+				lock := map[bool]string{true: "free", false: "held"}[c3free]
+				transport := "other"
+				switch http.DefaultTransport {
+				case h.router:
+					transport = "router"
+				case h.x:
+					transport = "X"
+				}
+				t.Logf("FC12-CHECKPOINT-OBSERVED key=%s lock=%s transport=%s router=%v", key, lock, transport, h.router.State())
+				if key == "sdk" && lock == "free" && h.router.State() == routerPoisoned {
+					t.Log("FC12-MR-OBSERVED key=sdk lock=free router=poisoned")
+				}
+				if transport == "X" && h.router.State() == routerOpen {
+					t.Log("FC12-MT-OBSERVED transport=X router=open")
+				}
+				if call != nil && !call.Returned() && ctrlReturned && c2 && !c3free && c4 {
+					t.Log("FC12-CHECKPOINT-OK")
+				}
+			}
+		})
+	})
+	t.Run("after", func(t *testing.T) {
+		h := h0
+		if h == nil || call == nil {
+			t.Fatal("FC12: the holder did not establish its preconditions")
+		}
+		keyFixture, keySDK := h.ap.SigIsFixtures(), h.ap.SigIsSDKs()
+		lockFree := ap.DDSonicComposedFakeOpenTryLock()
+		switch variant {
+		case "control":
+			// A1: nothing restored after F2.
+			if !keyFixture || lockFree || http.DefaultTransport != h.router || h.router.State() != routerPoisoned {
+				t.Errorf("FC12 A1: key fixture %t, lock free %t, transport is router %t, router %v", keyFixture, lockFree, http.DefaultTransport == h.router, h.router.State())
+			}
+		case "MR":
+			// A1-MR: the restored state persists, unrepaired; C4 still holds.
+			if !keySDK || !lockFree || http.DefaultTransport != h.router || h.router.State() != routerPoisoned {
+				t.Errorf("FC12 A1-MR: key sdk %t, lock free %t, transport is router %t, router %v", keySDK, lockFree, http.DefaultTransport == h.router, h.router.State())
+			} else {
+				t.Log("FC12-MR-RETAINED key=sdk lock=free")
+			}
+		case "MT":
+			// A1-MT: C2 and C3 hold; the transport is still X and the router open.
+			if !keyFixture || lockFree || h.x == nil || http.DefaultTransport != h.x || h.router.State() != routerOpen {
+				t.Errorf("FC12 A1-MT: key fixture %t, lock free %t, transport is X %t, router %v", keyFixture, lockFree, h.x != nil && http.DefaultTransport == h.x, h.router.State())
+			} else {
+				t.Log("FC12-MT-RETAINED transport=X router=open")
+			}
+		}
+		// A2: release W; its new lookup.
+		close(wRelease)
+		err, ok := composedWithin(wResult, 10*time.Second)
+		switch {
+		case !ok:
+			t.Error("FC12 A2: W's request did not return")
+		case variant == "MT":
+			if !errors.Is(err, errComposedRefusedByX) || h.x.calls.Load() != 1 || h.router.CountHost("control.composed.invalid") != 0 || len(h.router.PoisonUses()) != 0 || h.trip.calls.Load() != 0 {
+				t.Errorf("FC12 A2-MT: err %v, X calls %d, router saw W %d, poison uses %d, tripwire %d", err, h.x.calls.Load(), h.router.CountHost("control.composed.invalid"), len(h.router.PoisonUses()), h.trip.calls.Load())
+			} else {
+				t.Log("FC12-MT-REFUSED-BY-X")
+			}
+		default:
+			if !errors.Is(err, errComposedPoisoned) || len(h.router.PoisonUses()) != 1 || h.trip.calls.Load() != 0 {
+				t.Errorf("FC12 A2: err %v, poison uses %d, tripwire %d", err, len(h.router.PoisonUses()), h.trip.calls.Load())
+			} else {
+				t.Log("FC12-REFUSED-OK")
+			}
+		}
+		// A3: the raw worker returns, with an error, and builds drains, both
+		// "within 60 s" (plan v9, FC12 A3). R107-1: ONE absolute deadline,
+		// declared before the first wait; each wait gets only its remainder;
+		// both facts are observed independently (no short circuit), then
+		// accepted only if both were observed before that same deadline. A late
+		// observation fails A3; it is not proof that the worker returned late.
+		// call.Err is read only after D1's channel is observed closed (H writes
+		// it before close(call.done)); otherwise no error value is read.
+		a3By := time.Now().Add(60 * time.Second)
+		returned := call.WaitReturned(time.Until(a3By)) || call.Returned()
+		drained := waitGroupWithin(&builds, time.Until(a3By))
+		onTime := time.Now().Before(a3By)
+		withErr, a3Err := false, "unavailable: D1's channel was not observed closed"
+		if returned {
+			withErr, a3Err = call.Err != nil, fmt.Sprint(call.Err)
+		}
+		if !returned || !withErr || !drained || !onTime {
+			t.Errorf("FC12 A3: raw constructor returned %t (err %s), builds drained %t, observed before the deadline %t", returned, a3Err, drained, onTime)
+		} else {
+			t.Logf("FC12-WORKER-ENDED %v", call.Err)
+		}
+		// A4: the survivor joins; the slot stays poisoned.
+		if !h.JoinSurvivors(10*time.Second) || composedPoison.Load() == nil {
+			t.Errorf("FC12 A4: survivor joined %t, poisoned %v", h.JoinSurvivors(0), composedPoison.Load())
+			return
+		}
+		switch variant {
+		case "control":
+			t.Log("FC12-RETAINED-OK")
+		case "MR":
+			t.Log("FC12-MR-SLOT-POISONED")
+		case "MT":
+			t.Log("FC12-MT-SLOT-POISONED")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// FC13 and FC14 (plan v9 §2.8; R30-2, R31-1, R31-2).
+
+// prefetchersFor counts the SDK reader's prefetch workers inside
+// prefetchWorker for chunk. Patch 0003: the reserved owner runs
+// prefetchWorker, never fetchChunk.
+func prefetchersFor(chunk int) int {
+	n := 0
+	arg := fmt.Sprintf(", 0x%x)", chunk)
+	for _, g := range composedGoroutines() {
+		if strings.Contains(g.CreatorFunc, "(*HttpChunkedReader).startPrefetch") {
+			for _, line := range strings.Split(g.Text, "\n") {
+				if strings.Contains(line, "(*HttpChunkedReader).prefetchWorker(") && strings.HasSuffix(strings.TrimSpace(line), arg) {
+					n++
+					break
+				}
+			}
+		}
+	}
+	return n
+}
+
+// TestDDSonicComposedFC13ReaderTail: a closed stream's surviving reader work
+// is drained at T5r with the fixtures live; its attempts carry the ended
+// stream context, and none becomes a CDN receipt (plan v9 §2.8). Since the
+// RC4 responsiveness fix (SP-R2) it makes no further attempt at all: the
+// worker is observed to end, with the reader-tail gate closed and nothing
+// parked at it. This no longer shows that ended-context retries are inert at
+// the CDN; it shows they no longer happen. No receipt after the cut is still
+// asserted (T9).
+func TestDDSonicComposedFC13ReaderTail(t *testing.T) {
+	tr := composedMP3Track(t, 13)
+	withComposed(t, composedOptions{}, func(h *composedHarness) {
+		h.fx.Add(tr)
+		answerKeys(h, tr)
+		p := h.Provider()
+		p0(t, h, p)
+		h.Phase("P1")
+		file := tr.FileHex()
+		gate := h.ArmReaderTailGate(file)
+		key := fmt.Sprintf("cdn/%s/4", file)
+		arrived, release := h.fx.Hold(key)
+		h.OnRelease(release)
+		s, _, _, err := p.NewStreamer(tr.URI())
+		if err != nil {
+			t.Fatalf("FC13: NewStreamer: %v", err)
+		}
+		h.KeepCloser(s)
+		// Read, on this goroutine, until chunk 4's prefetch (started by a
+		// ReadAt in chunk 1) has arrived; then stop reading.
+		buf := make([][2]float64, 4096)
+		deadline := time.Now().Add(90 * time.Second)
+	read:
+		for {
+			select {
+			case <-arrived:
+				break read
+			default:
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("FC13 precondition P1: chunk 4's request did not arrive within 90 s of reading")
+			}
+			if k, ok := s.Stream(buf); k == 0 && !ok {
+				t.Fatal("FC13 precondition P1: the stream ended before chunk 4's request arrived")
+			}
+		}
+		// P1: the receipt is in the ledger, waiting at the barrier.
+		pos, ok := -1, false
+		for end := time.Now().Add(5 * time.Second); !ok && time.Now().Before(end); {
+			if pos, ok = h.fx.WaitingReceipt(key); !ok {
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
+		if !ok {
+			t.Fatal("FC13 precondition P1: chunk 4's receipt is not waiting at its barrier")
+		}
+		// P2: at least one prefetch worker is inside prefetchWorker for chunk 4.
+		if n := prefetchersFor(4); n < 1 {
+			t.Fatalf("FC13 precondition P2: %d prefetch workers inside prefetchWorker for chunk 4", n)
+		}
+		// P3: the checked cut, naming the held receipt.
+		cut, err := h.Cut(file, pos, 5*time.Second)
+		if err != nil {
+			t.Fatalf("FC13 precondition P3: the checked cut: %v", err)
+		}
+		t.Log("FC13-PRE-OK")
+		// The subject.
+		_ = s.Close()
+		// ddsonic (RC4 responsiveness, SP-R2): a cancelled stream's requests
+		// now fail with net.ErrClosed above the router (session.go), which
+		// librespot's reader does not retry. The surviving work makes no
+		// further attempt, so none is required (MinAttempts stays 0): W1
+		// still checks that any attempt after the subject had an ended
+		// context, and T9 that no receipt follows the cut.
+		_ = h.Watch(cut)
+		// P4: the held request's server-side context ended, before T1 can
+		// release its barrier.
+		if !h.fx.AwaitCtxEnded(pos, 5*time.Second) {
+			t.Fatal("FC13 precondition P4: the held request's server-side context did not end within 5 s of Close")
+		}
+		t.Log("FC13-HELD-ENDED")
+		// P5': the surviving worker is observed to end (no prefetchWorker
+		// for chunk 4 left in the stacks) while the reader-tail gate is
+		// still closed, and the gate parked nothing: no ended-context retry
+		// reached the router. A retry would be parked at the closed gate, and
+		// its worker could not end before T5r opens it.
+		ended := false
+		for end := time.Now().Add(10 * time.Second); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+			if prefetchersFor(4) == 0 {
+				ended = true
+				break
+			}
+		}
+		if !ended {
+			t.Fatalf("FC13 P5': chunk 4's prefetch worker was still running 10 s after Close (gate parked %d)", gate.parked.Load())
+		}
+		t.Log("FC13-WORKER-ENDED-OBSERVED")
+		select {
+		case <-gate.FirstParked():
+			t.Fatalf("FC13 P5': an ended-context attempt reached the router after Close and was parked (%d): the closed stream's request was retried", gate.parked.Load())
+		default:
+		}
+		if n := gate.parked.Load(); n != 0 {
+			t.Fatalf("FC13 P5': the reader-tail gate parked %d attempt(s) after Close", n)
+		}
+		t.Log("FC13-NO-RETRY")
+	})
+}
+
+// TestDDSonicComposedFC14CutBoundary: an attempt admitted before the cut and
+// received after it; the checked cut refuses while it has no receipt, and a
+// forced cut counts it in W2 (plan v9 §2.8, R31-1).
+func TestDDSonicComposedFC14CutBoundary(t *testing.T) {
+	tr := composedTrackFrom(14, metadatapb.AudioFile_MP3_320, bytes.Repeat([]byte{0x14}, 2*composedChunk))
+	withComposed(t, composedOptions{}, func(h *composedHarness) {
+		h.fx.Add(tr)
+		file, rng := tr.FileHex(), fmt.Sprintf("bytes=0-%d", composedChunk-1)
+		ctx, _ := h.Context()
+		client := newSpotifyStreamHTTPClient(ctx, http.DefaultTransport)
+		hold := h.HoldDelegation(file, rng)
+		type result struct {
+			status int
+			err    error
+		}
+		done := make(chan result, 1)
+		h.Go("FC14-get", func() {
+			req, err := http.NewRequest("GET", "https://cdn.composed.invalid/audio/"+file, nil)
+			if err != nil {
+				done <- result{0, err}
+				return
+			}
+			req.Header.Set("Range", rng)
+			resp, err := client.Do(req)
+			if err != nil {
+				done <- result{0, err}
+				return
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			done <- result{resp.StatusCode, nil}
+		})
+		select {
+		case <-hold.Parked():
+		case <-time.After(10 * time.Second):
+			t.Fatal("FC14 precondition: the attempt was not parked before delegation")
+		}
+		for _, rc := range h.fx.Ledger() {
+			if rc.Path == "/audio/"+file {
+				t.Fatalf("FC14 precondition: a receipt for the file already exists: #%d", rc.Pos)
+			}
+		}
+		t.Log("FC14-PRE-OK")
+		// (1) The checked cut refuses an admitted attempt with no receipt.
+		if _, err := h.TryCut(file, -1); err == nil {
+			t.Error("FC14 (1): the checked cut is refused while an admitted attempt for the file has no receipt: it was accepted")
+		} else {
+			t.Logf("FC14-CUT-REFUSED %v", err)
+		}
+		// (2) A forced cut, then the receipt arrives after it.
+		w := h.Watch(h.CutUnchecked(file))
+		w.WantReceipts, w.Boundary = 1, true
+		hold.Release()
+		select {
+		case r := <-done:
+			if r.err != nil || r.status != http.StatusPartialContent {
+				t.Fatalf("FC14 precondition: the GET did not complete 206: status %d, %v", r.status, r.err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("FC14 precondition: the GET did not complete within 10 s of the release")
+		}
+	})
+}
+
+// TestDDSonicComposedZZNoLateUse is last in source order: every router's
+// late uses equal its declared late uses exactly.
+func TestDDSonicComposedZZNoLateUse(t *testing.T) {
+	composedCheckLateUses(t)
+}
