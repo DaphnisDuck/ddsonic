@@ -4,17 +4,17 @@ Notable changes to ddsonic (DaphnisDuck's Music Player). The format follows [Kee
 
 ddsonic is a fork of [cliamp](https://github.com/bjarneo/cliamp). Versions before 0.6 were released as omatunes, and 0.6 up to the candidate 1.0.0-rc.1 as ddmus; their entries below keep the name they were released under.
 
-## [1.0.0] - not yet released
+## [1.0.0] - 2026-10-31
 
 The first release for people who don't build from source. 1.0 adds no features to 0.10: it settles the command line, removes what ddsonic doesn't support, and ships a tested Linux build.
 
 ### Added
-- A release build for Linux x86-64 with checksums, third-party notices, an SBOM and the complete corresponding source. It has no build attestation: `v1.0.0` was built locally in the pinned build image, not by the release workflow ([SECURITY.md](SECURITY.md#official-builds)). An AUR package, `ddsonic-bin`, follows with the stable release.
+- A release build for Linux x86-64 with checksums, third-party notices, an SBOM and the complete corresponding source. It has no build attestation: `v1.0.0` was built locally in the pinned build image, not by the release workflow ([SECURITY.md](SECURITY.md#official-builds)). An AUR package, `ddsonic-bin`, is planned; it is not in the AUR yet.
 - `ddsonic setup` sets up Spotify, YouTube Music and the Local music folder, and keeps every other line of an existing `config.toml`.
 - `--version` answers in every build.
 - The release archive holds `RELEASE-MANIFEST.json`: the version, the exact source commit and the binary's SHA-256, for a machine to read. A release build's `ddsonic --version` names that commit too (`ddsonic version v1.0.0 (commit …)`); a build from source prints the version alone, as before.
-- A logo and an icon for ddsonic: a duck at a terminal. The release archive (in `share/`), the AUR package and `make install` carry a launcher entry, `ddsonic.desktop`, and the icon in eight sizes from 16 to 512 pixels, so ddsonic appears in application menus and opens in a terminal. The artwork is raster (PNG); its masters and layered sources are in `assets/branding`.
-- The release archive and the AUR package carry the logo and the screenshot the README shows, beside it, so their copy of the README displays them.
+- A logo and an icon for ddsonic: a duck at a terminal. The release archive (in `share/`) and `make install` carry a launcher entry, `ddsonic.desktop`, and the icon in eight sizes from 16 to 512 pixels, so ddsonic appears in application menus and opens in a terminal; the planned AUR package, which is not published yet, is prepared to carry them too. The artwork is raster (PNG); its masters and layered sources are in `assets/branding`.
+- The release archive carries the logo and the screenshot the README shows, beside it, so its copy of the README displays them; the planned AUR package, which is not published yet, is prepared to do the same.
 - Desktop media controls can show ddsonic's icon: ddsonic names its launcher entry to them (the MPRIS `DesktopEntry`).
 
 ### Changed
@@ -26,7 +26,7 @@ The first release for people who don't build from source. 1.0 adds no features t
 - The README says how the ddsonic name, logo and icon may be used: the code's licenses don't cover them, the artwork may be redistributed with ddsonic and its packages (resized or converted as packaging needs), and neither may identify a modified or unrelated project.
 - ddsonic 1.0 supports Spotify, YouTube Music, local files and internet radio. cliamp's other providers (Navidrome, Plex, Jellyfin, SoundCloud and the rest) are not offered: `--provider` and `setup` no longer list them, and their sections in `config.toml` are left untouched but have no effect.
 - The log and the IPC socket are named `ddsonic.log` and `ddsonic.sock` (they kept cliamp's names before, and were `ddmus.log` and `ddmus.sock` in 1.0.0-rc.1). A script that opens the socket by path needs the new name.
-- In "Search Spotify for …" and its YouTube Music twin, Enter replaces the queue, as playing from the library does.
+- In "Search Spotify for …" and its YouTube Music twin, Enter replaces the queue, as playing from the library does. The YouTube Music twin exists only when YouTube Music signs in with browser cookies alone; with an OAuth client configured, YouTube Music has no live search.
 - YouTube Music's "Albums" and "Artists" lists are now "Albums from tracks" and "Artists from tracks", and each says above its rows, when space permits, what it holds: the albums and artists found in your Liked Music and synced playlists (albums may be incomplete). Saved YouTube Music Library Albums and followed artists are not synchronized, and never were; the old names read as if they were. In All Music and search, these rows are labelled `YouTube · from tracks`. Nothing about what syncs has changed.
 - By default, Spotify syncs at startup when its last successful sync is more than two hours old (it was 30 minutes).
 - A `config.toml` that is not valid TOML now stops ddsonic from starting, with the file, the line and column and the parser's message, and the file left as it was. Before, ddsonic skipped what it could not read and started on defaults for it, without a word. A missing config file still means the defaults, and a valid file is read as before; unknown keys and sections are still ignored. Values that are not TOML are now errors too, such as a string without quotes (`theme = Tokyo Night`) or a key given twice. One line is still accepted as older versions wrote it: `audio_device = <name>` without quotes, which choosing an output device used to save; ddsonic now writes it in quotes. See [ddsonic files and names](docs/ddsonic/files.md).
@@ -39,7 +39,7 @@ The first release for people who don't build from source. 1.0 adds no features t
 - Lua plugins: none is loaded, and the `plugins` command and its IPC operations are gone. Plugin files and `[plugins.*]` config stay where they are, unused.
 - `--daemon` (headless mode), `--mono`, `--expanded`, `--simplified`, and the `mono`, `open`, `protocol`, `qobuz`, `radio` and `tidal` commands. `cliamp://` links are neither registered nor handled; see [docs/ddsonic/files.md](https://github.com/DaphnisDuck/ddsonic/blob/main/docs/ddsonic/files.md#still-shared) if an earlier version (as ddmus or omatunes) registered them.
 - The Logo visualizer, which draws cliamp's name. A config that names it starts with the default visualizer.
-- cliamp's Nix flake, desktop entry, icons, website and install script, which built or installed cliamp. ddsonic installs from the release archive, the AUR package or source, and has a launcher entry and an icon of its own.
+- cliamp's Nix flake, desktop entry, icons, website and install script, which built or installed cliamp. ddsonic installs from the release archive or source (an AUR package is planned but not available yet), and has a launcher entry and an icon of its own.
 
 ### Known limitations
 - Spotify sign-in: if ddsonic quits, or the work is cancelled, in the moment between Spotify issuing a new refresh token and ddsonic accepting it, the stored sign-in is left as it was, and the next start may ask you to sign in again. The stored sign-in is never left half-written.
@@ -70,7 +70,7 @@ The first release for people who don't build from source. 1.0 adds no features t
 - A stalled Spotify request could hold a library sync until quit.
 - A Spotify connection that stalled while starting up held every Spotify action behind it: a track stayed on "Buffering" and the sync never finished. Setting up the session now gives up after 30 seconds, and the next action tries again.
 - Stop now cancels an album that is still opening from search.
-- "Search Spotify for …" and its YouTube Music twin now say whose results they show and for what ("Searching Spotify for …", "Spotify results for …"). The screen read "Search" and "Results", so its rows could be taken for the library's own.
+- "Search Spotify for …" and its YouTube Music twin (present only when YouTube Music signs in with browser cookies alone) now say whose results they show and for what ("Searching Spotify for …", "Spotify results for …"). The screen read "Search" and "Results", so its rows could be taken for the library's own.
 - Editing the query of such a search while it was still running left it on "Searching..." with Enter doing nothing, until Esc. Editing a live provider search now cancels the pending request, clears the loading state and allows a new search to start.
 - A sync requested while another ran could run twice, and a sync that had just finished could cancel the retry of a newer one that failed, leaving that source unsynced until the next refresh.
 - With a long config directory (a `DDSONIC_CONFIG_DIR`, `XDG_CONFIG_HOME` or `HOME` that puts the IPC socket's path over 107 bytes on Linux, 103 on macOS), ddsonic started normally but without its socket, so `ddsonic pause`, `ddsonic status` and the rest failed with "connect: invalid argument", and the only notice appeared after quitting. ddsonic now refuses to start with such a path and says which path is too long and by how many bytes; the commands print the same message. See [ddsonic files and names](docs/ddsonic/files.md).
@@ -167,7 +167,7 @@ Released as omatunes. The first release of the fork, based on cliamp just after 
 ### Removed
 - cliamp's self-updater: `upgrade` refuses to run, because it would install cliamp over the fork.
 
-[1.0.0]: https://github.com/DaphnisDuck/ddsonic/compare/v0.10.0...main
+[1.0.0]: https://github.com/DaphnisDuck/ddsonic/releases/tag/v1.0.0
 [0.10.0]: https://github.com/DaphnisDuck/ddsonic/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/DaphnisDuck/ddsonic/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/DaphnisDuck/ddsonic/compare/v0.7.0...v0.8.0

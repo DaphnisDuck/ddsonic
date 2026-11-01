@@ -10,7 +10,7 @@ Say what you found, the ddsonic version (`ddsonic --version`), and how to reprod
 
 ## What is supported
 
-The latest release. Before 1.0 is released, that is the `main` branch and the latest release candidate. Fixes are not ported to older versions.
+The latest release. Fixes are not ported to older versions.
 
 ## Official builds
 
@@ -22,7 +22,7 @@ Each release carries `SHA256SUMS`, to check a download with:
 sha256sum -c --ignore-missing SHA256SUMS
 ```
 
-`v1.0.0` has no build attestation. It was built locally in the project's pinned build image, not by the release workflow, so `gh attestation verify` has nothing to check for it; [SOURCE-PROVENANCE.md](SOURCE-PROVENANCE.md) says which source it was built from. The release candidates `v1.0.0-rc.1` to `v1.0.0-rc.3` were built by the release workflow and carry a build attestation, checked with:
+`v1.0.0` has no build attestation. It was built locally in the project's pinned build image, not by the release workflow, so `gh attestation verify` has nothing to check for it; [SOURCE-PROVENANCE.md](https://github.com/DaphnisDuck/ddsonic/blob/v1.0.0/SOURCE-PROVENANCE.md) at the `v1.0.0` tag says which source it was built from. The release candidates `v1.0.0-rc.1` to `v1.0.0-rc.3` were built by the release workflow and carry a build attestation, checked with:
 
 ```sh
 gh attestation verify ddsonic-<version>-linux-amd64.tar.gz --repo DaphnisDuck/ddsonic
