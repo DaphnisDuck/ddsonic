@@ -45,8 +45,8 @@ Local files and radio need no account at all. cliamp's other sources (Navidrome,
 
 ## Requirements
 
-- **Linux on x86-64.** ddsonic is developed and used on Arch. The project's CI builds and tests it on Ubuntu; the 1.0.0 release itself was built locally in the project's pinned build image, not in CI.
-- **macOS** is provisional: building from source is configured in CI (a macOS build-and-test job), but it has not been verified for the 1.0.0 release, ddsonic has not been tested in use on macOS, and there is no macOS release build.
+- **Linux on x86-64** is the supported platform, and the only one with a release build. ddsonic is developed and used on Arch. The project's CI builds and tests it on Ubuntu; the 1.0.0 release itself was built locally in the project's pinned build image, not in CI.
+- **macOS** is provisional and unverified: it has not been verified for the 1.0.0 release, ddsonic has not been tested in use on macOS, and there is no macOS release build. Its CI job is disabled for now, pending open issues its tests found in how ddsonic runs yt-dlp there: process lifecycle, temporary-file cleanup and possible cookie privacy. Two player cleanup tests fail on macOS, and one leaves behind a temporary folder where yt-dlp may copy a browser's cookie database; whether that happens in real use on macOS is unverified. Resolving these is a prerequisite for future macOS testing and distribution.
 - **Windows** is not supported.
 - **Sound** through ALSA. On PipeWire or PulseAudio, install `pipewire-alsa` or `pulseaudio-alsa` (`libasound2-plugins` on Debian).
 - **Optional:** `ffmpeg` and `yt-dlp`, as in the table above.
