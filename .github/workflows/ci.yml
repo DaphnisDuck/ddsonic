@@ -14,7 +14,7 @@ concurrency:
 jobs:
   go:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -26,6 +26,28 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libflac-dev libvorbis-dev libogg-dev libmpg123-dev shellcheck
       - run: go install honnef.co/go/tools/cmd/staticcheck@v0.7.0-0.dev.0.20261009221906-f1838cc308e5 # ddsonic: upstream commit f1838cc308e5cfbb38d91cfc973355611845997e (its move to x/tools v0.51.0), pinned exactly; v0.8.1, the newest release, cannot read Go 1.27.2 export data. Return to a release once one can
       - run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0 # ddsonic: v1.1.4 crashes on this code (ast.KeyValueExpr)
+      # ddsonic: the module archives (.info, .mod, .zip) the contract gate reads
+      # offline from the module download cache (Makefile, sdk-contract): the
+      # repository's modules, with the metadata of its whole graph (the gate's
+      # go list -m all; go mod download all would add to go.sum), tools/sdkgate's,
+      # and upstream go-librespot v0.9.1. A build never downloads the last, as
+      # go.mod replaces it with the tracked tree, so it is fetched in a scratch
+      # module, where nothing replaces it. Go verifies each archive against go.sum
+      # or the checksum database; the gate authenticates the SDK archive again
+      # against its provenance.
+      - name: Fetch the contract gate's modules
+        run: |
+          go mod download
+          go list -m all >/dev/null
+          (cd tools/sdkgate && go mod download)
+          scratch=$(mktemp -d)
+          (cd "$scratch" && go mod init ddsonic.invalid/sdkfetch && go mod download github.com/devgianlu/go-librespot@v0.9.1)
+          d=$(go env GOMODCACHE)/cache/download
+          for m in github.com/devgianlu/go-librespot/@v/v0.9.1 golang.org/x/tools/@v/v0.50.0 golang.org/x/mod/@v/v0.41.0 golang.org/x/sync/@v/v0.23.0; do
+            for ext in info mod zip; do
+              test -s "$d/$m.$ext" || { echo "missing $d/$m.$ext"; exit 1; }
+            done
+          done
       # ddsonic: make ci includes the go-librespot contract gate (make
       # sdk-contract). It runs here because this job has the pinned toolchain,
       # which the gate requires and checks; the macOS job below has the same pin

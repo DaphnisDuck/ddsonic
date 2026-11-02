@@ -584,8 +584,14 @@ func TestPlaybackEndsAndErrors(t *testing.T) {
 		if err := s.Seek(spotifySampleRate); err != nil {
 			t.Fatal(err)
 		}
-		if last := drain(t, s); last != failAt || !errors.Is(s.Err(), errBoom) {
-			t.Errorf("stream ended after %v with %v, want after %d with %v", last, s.Err(), failAt, errBoom)
+		// Where the stream ended, not its last value: a pull that runs
+		// short before the error fades its last samples out, so the value
+		// depends on how fast the decoder kept up. The position was rebased
+		// on the decoder, which tells it in milliseconds: within one
+		// millisecond of the sample.
+		drain(t, s)
+		if got := s.Position(); got > failAt || got < failAt-spotifySampleRate/1000 || !errors.Is(s.Err(), errBoom) {
+			t.Errorf("stream ended at %d with %v, want at %d to the millisecond with %v", got, s.Err(), failAt, errBoom)
 		}
 	})
 

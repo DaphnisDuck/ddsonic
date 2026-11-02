@@ -114,6 +114,9 @@ func TestCopierTeardownReportsWhatItCannotEstablish(t *testing.T) {
 		}
 	})
 	t.Run("an unreadable registry", func(t *testing.T) {
+		if runtime.GOOS != "linux" {
+			t.Skip("only Linux reads the registry (awaitRegistered)")
+		}
 		if os.Geteuid() == 0 {
 			t.Skip("root reads every file")
 		}
@@ -129,6 +132,9 @@ func TestCopierTeardownReportsWhatItCannotEstablish(t *testing.T) {
 		}
 	})
 	t.Run("a malformed registry line", func(t *testing.T) {
+		if runtime.GOOS != "linux" {
+			t.Skip("only Linux reads the registry (awaitRegistered)")
+		}
 		c := InstallCopier(t, Hang, "")
 		if err := os.WriteFile(filepath.Join(c.state, "registry"), []byte("child 1\n"), 0o644); err != nil {
 			t.Fatal(err)
