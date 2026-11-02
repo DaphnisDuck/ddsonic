@@ -7,7 +7,7 @@
 This document preserves ideas discussed during development of ddsonic that may be worth investigating after 1.0. Its purpose is to prevent good ideas from being lost while keeping the 1.0 release focused.
 
 
-This is the canonical catalog of post-1.0 ideas and investigations. [The project plan](../../plan.md#post-10-backlog) remains authoritative for scheduled work and existing deferred engineering decisions. Recording or consolidating an idea here does not promote it into that roadmap or change the 1.0 feature freeze. See [existing deferred work](#existing-deferred-work) for items already tracked there.
+This document is the original brainstorming source and rationale for post-1.0 ideas and investigations. The consolidated post-1.0 catalog is [POST-1.0-CATALOG.md](POST-1.0-CATALOG.md), which indexes these ideas together with the project's other deferred work; it is a dream catalog, not a committed backlog. Recording an idea here does not promote it into a roadmap or change the 1.0 feature freeze. See [existing deferred work](#existing-deferred-work) for the items the [project plan](../../plan.md#post-10-backlog) recorded.
 
 ## Guiding Principle
 
