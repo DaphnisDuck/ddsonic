@@ -413,8 +413,11 @@ func TestPlaybackSeekDropsQueuedAndHeldAudio(t *testing.T) {
 	s := playbackOf(t, src)
 	audible(t, s)
 	held, release := src.hold()
-	pumpUntil(s, held)
+	pumping := pumpUntil(s, held)
 	awaitClosed(t, held, "the decoder's next read")
+	// The pulls end before the seek: a pull still under way after it
+	// would take the first audio from the target, as the speaker would.
+	awaitClosed(t, pumping, "the pulls' end")
 
 	for _, target := range []int{spotifySampleRate, 2 * spotifySampleRate} {
 		var err error
@@ -479,8 +482,11 @@ func TestPlaybackEndsAndErrors(t *testing.T) {
 		src.mu.Lock()
 		src.failHeld = errBoom
 		src.mu.Unlock()
-		pumpUntil(s, held)
+		pumping := pumpUntil(s, held)
 		awaitClosed(t, held, "the decoder's next read")
+		// The pulls end before the seek: a pull still under way after it
+		// would take the first audio from the target, as the speaker would.
+		awaitClosed(t, pumping, "the pulls' end")
 		target := 6 * spotifySampleRate
 		if !returnsIn(promptly, func() { _ = s.Seek(target) }) {
 			t.Fatal("the seek waited for the held read")
