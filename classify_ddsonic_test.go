@@ -343,6 +343,73 @@ func TestClassifyChangeRefusesInvalidUTF8(t *testing.T) {
 	}
 }
 
+// A path with a code point that can move a terminal's cursor, break a
+// line, reorder or hide text, or is not a character, is full, in any
+// locale, and its bytes never reach the output. Letters beyond ASCII, and
+// punctuation next to the refused ranges, classify normally.
+func TestClassifyChangeRefusesInvisibleCodePoints(t *testing.T) {
+	odd := map[string]string{
+		"U+0085 NEL": "\u0085", "U+009B CSI": "\u009b", "U+00AD soft hyphen": "\u00ad", "U+061C ALM": "\u061c",
+		"U+200B ZWSP": "\u200b", "U+200F RLM": "\u200f", "U+2028 line separator": "\u2028", "U+202E RLO": "\u202e",
+		"U+2066 LRI": "\u2066", "U+FEFF BOM": "\ufeff", "U+FFFE": "\ufffe", "U+1FFFE": "\U0001fffe", "U+E0041 tag": "\U000e0041",
+	}
+	for name, cp := range odd {
+		for _, mode := range []string{supported, bashP} {
+			t.Run(name+", "+mode, func(t *testing.T) {
+				f, base := newFixture(t)
+				f.write("docs/a"+cp+"b.md", "x\n")
+				head := f.commit("an odd name")
+				stdout, _ := classifyStreams(t, mode, f.dir, nil, "--base", base, "--head", head)
+				first, rest, _ := strings.Cut(stdout, "\n")
+				if first != "full" || !strings.Contains(rest, "fail-closed: a path with an invisible, control or non-character code point") {
+					t.Fatalf("%q, want full with the constant reason\n%s", first, stdout)
+				}
+				if strings.Contains(stdout, cp) {
+					t.Fatalf("the code point reached the output: %q", stdout)
+				}
+			})
+		}
+	}
+	for _, name := range []string{"docs/é.md", "docs/straße.md", "docs/日本語.md", "docs/Привет.md", "docs/a–b….md"} {
+		t.Run(name, func(t *testing.T) {
+			f, base := newFixture(t)
+			f.write(name, "x\n")
+			head := f.commit("a valid name")
+			if got, rest := classifyAs(t, supported, f.dir, nil, "--base", base, "--head", head); got != "docs" {
+				t.Fatalf("%q: %q, want docs\n%s", name, got, rest)
+			}
+		})
+	}
+}
+
+// bash -p imports an exported FUNCNAME or BASH_EXECUTION_STRING, which make
+// a normal start look embedded: the script then prints no class (full, never
+// a downgrade). The supported start, under env -i, is not affected.
+func TestClassifyChangeExportedSpecialVariables(t *testing.T) {
+	f, base := newFixture(t)
+	f.write("docs/a.md", "b\n")
+	head := f.commit("a docs change")
+	script, err := filepath.Abs("tools/classify-change.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []string{"FUNCNAME=x", "BASH_EXECUTION_STRING=x"} {
+		// The refused return fails at a script's top level (status 2); what
+		// matters is that no class is printed.
+		for name, argv := range map[string][]string{bashP: {"/bin/bash", "-p", script}, direct: {script}} {
+			cmd := exec.Command(argv[0], append(argv[1:], "--base", base, "--head", head)...)
+			cmd.Dir, cmd.Env = f.dir, append(gitEnv(), v)
+			out, _ := cmd.Output()
+			if len(out) != 0 {
+				t.Errorf("%s, %s: stdout %q, want nothing", v, name, out)
+			}
+		}
+		if got, rest := classifyAs(t, supported, f.dir, []string{v}, "--base", base, "--head", head); got != "docs" {
+			t.Errorf("%s, supported: %q, want docs\n%s", v, got, rest)
+		}
+	}
+}
+
 // --paths uses the rules it is given: a rules file that says docs for a
 // probe path changes the answer from the default, full.
 func TestClassifyPathsUsesTheGivenRules(t *testing.T) {
@@ -586,6 +653,7 @@ func TestClassifyChangeRejectsBadRules(t *testing.T) {
 		"no pattern":             "docs\n",
 		"a pattern with a space": "docs a b\n",
 		"no rules":               "# nothing\n",
+		"an invisible character": "docs docs/\u202e*.md\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			f, _ := newFixture(t)

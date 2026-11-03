@@ -22,7 +22,11 @@
 #   tools/classify-change.sh ARGS      (its #!/bin/bash -p line; best with env -i)
 #   /bin/bash -p tools/classify-change.sh ARGS
 #
-# make validate and CI use the first (the Makefile's CLASSIFY variable).
+# make validate and CI use the first (the Makefile's CLASSIFY variable). It
+# is also the only one immune to an exported FUNCNAME or
+# BASH_EXECUTION_STRING: bash -p imports those, and the script then takes
+# the start for an embedded one and prints no class (full, never a
+# downgrade), exiting with the status of the refused return (2).
 # Started any other way (plain "bash script", or sourced), it classifies
 # nothing: it prints no class, which a consumer takes as full, and says why
 # on stderr. A caller that controls the environment of a plain bash can still
@@ -111,10 +115,10 @@ rank() {
 resolve() {
 	local id
 	case $2 in
-	'' | -* | *..* | *[!A-Za-z0-9._/@^~-]*) fail "refused a ref: not a plain name or commit ID" ;;
+	'' | -* | *..* | *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/@^~-]*) fail "refused a ref: not a plain name or commit ID" ;;
 	esac
 	id=$(git rev-parse --verify --quiet --end-of-options "$2^{commit}") || fail "a ref that is not a commit"
-	case $id in *[!0-9a-f]* | '') fail "an odd commit ID" ;; esac
+	case $id in *[!0123456789abcdef]* | '') fail "an odd commit ID" ;; esac
 	printf -v "$1" '%s' "$id"
 }
 
@@ -141,11 +145,48 @@ fi
 top=$(git rev-parse --show-toplevel 2>/dev/null) || fail "not in a git work tree"
 cd "$top" || fail "cannot enter the work tree"
 
-# safe_path refuses a path with a control character, or one that is not
-# valid UTF-8 (iconv decides; without iconv, every path is refused).
+# c0 matches a C0 control character or DEL, byte by byte (no locale class).
+c0=$'\x01'-$'\x1f'$'\x7f'
+
+# odd_text is true when its argument holds a code point no path or rule
+# should: one that can move a terminal's cursor, break a line, reorder or
+# hide text, or is not a character at all. Each is matched on its UTF-8
+# bytes, so the check is the same in every locale:
+#   C1 controls               U+0080-U+009F   c2 80-9f   (NEL U+0085, CSI U+009B)
+#   soft hyphen               U+00AD          c2 ad
+#   Arabic letter mark        U+061C          d8 9c
+#   Mongolian vowel separator U+180E          e1 a0 8e
+#   zero-width and marks      U+200B-U+200F   e2 80 8b-8f
+#   line, paragraph separator U+2028-U+2029   e2 80 a8-a9
+#   bidirectional embeddings  U+202A-U+202E   e2 80 aa-ae
+#   word joiner, invisible operators, bidirectional isolates, deprecated
+#     format characters       U+2060-U+206F   e2 81 a0-af
+#   non-characters            U+FDD0-U+FDEF   ef b7 90-af
+#   byte order mark           U+FEFF          ef bb bf
+#   interlinear annotation, U+FFFE, U+FFFF   U+FFF9-U+FFFF   ef bf b9-bf
+#   tags                      U+E0000-U+E007F f3 a0 80-81 ..
+#   plane-end non-characters  U+nFFFE, U+nFFFF  f0-f4 (8f|9f|af|bf) bf (be|bf)
+# Surrogates are not valid UTF-8; iconv refuses them. Letters beyond ASCII
+# (é, ß, 日本語, Cyrillic) are allowed.
+odd_text() {
+	case $1 in
+	*$'\xc2'[$'\x80'-$'\x9f']* | *$'\xc2\xad'* | *$'\xd8\x9c'* | *$'\xe1\xa0\x8e'* | \
+		*$'\xe2\x80'[$'\x8b'-$'\x8f']* | *$'\xe2\x80'[$'\xa8'-$'\xae']* | *$'\xe2\x81'[$'\xa0'-$'\xaf']* | \
+		*$'\xef\xb7'[$'\x90'-$'\xaf']* | *$'\xef\xbb\xbf'* | *$'\xef\xbf'[$'\xb9'-$'\xbf']* | \
+		*$'\xf3\xa0'[$'\x80'$'\x81']* | *[$'\xf0'-$'\xf4'][$'\x8f'$'\x9f'$'\xaf'$'\xbf']$'\xbf'[$'\xbe'$'\xbf']*)
+		return 0
+		;;
+	esac
+	return 1
+}
+
+# safe_path refuses an empty path, a path with a C0 control or DEL, one
+# that is not valid UTF-8 (iconv decides; without iconv, every path is
+# refused), and one with an odd_text code point. No refused path is printed.
 safe_path() {
-	case $1 in '' | *[[:cntrl:]]*) fail "a path with a control character or none" ;; esac
+	case $1 in '' | *[$c0]*) fail "a path with a control character or none" ;; esac
 	printf '%s' "$1" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 || fail "a path that is not valid UTF-8 (or no iconv)"
+	! odd_text "$1" || fail "a path with an invisible, control or non-character code point"
 }
 
 # load_rules reads the rules (from $tmp/rules) into classes, patterns and
@@ -162,7 +203,8 @@ load_rules() {
 		*) fail "a malformed rule at line $n" ;;
 		esac
 		cls=${line%% *} pat=${line#* }
-		case $pat in '' | *' '* | *[[:cntrl:]]*) fail "a malformed rule at line $n" ;; esac
+		case $pat in '' | *' '* | *[$c0]*) fail "a malformed rule at line $n" ;; esac
+		! odd_text "$pat" || fail "a malformed rule at line $n"
 		classes+=("$cls") patterns+=("$pat") lines+=("$n")
 	done <"$tmp/rules"
 	[ ${#classes[@]} -gt 0 ] || fail "no rules"
@@ -271,7 +313,7 @@ fi
 load_rules
 
 mb=$(git merge-base "$bid" "$hid" 2>/dev/null) || fail "no merge base of $bid and $hid"
-case $mb in *[!0-9a-f]* | '') fail "odd merge base" ;; esac
+case $mb in *[!0123456789abcdef]* | '') fail "odd merge base" ;; esac
 
 if [ -n "$head" ]; then
 	git diff --raw -z -M --no-ext-diff --no-textconv "$mb" "$hid" -- >"$tmp/raw" 2>/dev/null || fail "git diff failed"
