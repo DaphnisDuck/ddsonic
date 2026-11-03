@@ -110,6 +110,14 @@ const (
 // returns its first line and the rest of its standard output.
 func classifyAs(t *testing.T, mode, dir string, env []string, args ...string) (string, string) {
 	t.Helper()
+	stdout, _ := classifyStreams(t, mode, dir, env, args...)
+	first, rest, _ := strings.Cut(stdout, "\n")
+	return first, rest
+}
+
+// classifyStreams is classifyAs's run, returning all of stdout and stderr.
+func classifyStreams(t *testing.T, mode, dir string, env []string, args ...string) (string, string) {
+	t.Helper()
 	script, err := filepath.Abs("tools/classify-change.sh")
 	if err != nil {
 		t.Fatal(err)
@@ -132,6 +140,8 @@ func classifyAs(t *testing.T, mode, dir string, env []string, args ...string) (s
 	}
 	cmd.Dir = dir
 	cmd.Env = append(gitEnv(), env...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if ctx.Err() != nil {
 		t.Fatalf("the classifier (%s) did not finish within 60 s", mode)
@@ -139,8 +149,7 @@ func classifyAs(t *testing.T, mode, dir string, env []string, args ...string) (s
 	if err != nil {
 		t.Fatalf("the classifier exited with %v; it must exit 0\n%s", err, out)
 	}
-	first, rest, _ := strings.Cut(string(out), "\n")
-	return first, rest
+	return string(out), stderr.String()
 }
 
 // classify starts it with bash -p, the caller's environment and env passed
@@ -150,6 +159,21 @@ func classify(t *testing.T, dir string, env []string, args ...string) (string, s
 	return classifyAs(t, bashP, dir, env, args...)
 }
 
+// rule is how the classifier names a line of the real rules file in a
+// reason: by its line number and class, never its text.
+func rule(line string) string {
+	data, err := os.ReadFile("tools/validation-classes.txt")
+	if err != nil {
+		panic(err)
+	}
+	for i, l := range strings.Split(string(data), "\n") {
+		if l == line {
+			return "rule " + strconv.Itoa(i+1) + " (" + strings.Fields(line)[0] + ")"
+		}
+	}
+	panic("no rule " + line)
+}
+
 func TestClassifyChange(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -157,10 +181,10 @@ func TestClassifyChange(t *testing.T) {
 		want   string
 		reason string // in the output, when set
 	}{
-		{"docs", func(f *fixture) { f.write("docs/a.md", "b\n") }, "docs", "rule docs docs/*.md"},
-		{"test", func(f *fixture) { f.write("library/x_test.go", "package library\n// more\n") }, "test", "rule test *_test.go"},
-		{"code", func(f *fixture) { f.write("library/x.go", "package library\n// more\n") }, "code", "rule code *.go"},
-		{"full: the Makefile", func(f *fixture) { f.write("Makefile", "all:\n\ttrue\n") }, "full", "rule full Makefile"},
+		{"docs", func(f *fixture) { f.write("docs/a.md", "b\n") }, "docs", rule("docs docs/*.md")},
+		{"test", func(f *fixture) { f.write("library/x_test.go", "package library\n// more\n") }, "test", rule("test *_test.go")},
+		{"code", func(f *fixture) { f.write("library/x.go", "package library\n// more\n") }, "code", rule("code *.go")},
+		{"full: the Makefile", func(f *fixture) { f.write("Makefile", "all:\n\ttrue\n") }, "full", rule("full Makefile")},
 		{"mixed: docs and code is code", func(f *fixture) {
 			f.write("docs/a.md", "b\n")
 			f.write("library/x.go", "package library\n// more\n")
@@ -168,9 +192,9 @@ func TestClassifyChange(t *testing.T) {
 		{"mixed: test and full is full", func(f *fixture) {
 			f.write("library/x_test.go", "package library\n// more\n")
 			f.write("go.mod", "module x\n")
-		}, "full", "rule full go.mod"},
-		{"README is code, not docs", func(f *fixture) { f.write("README.md", "changed\n") }, "code", "rule code README.md"},
-		{"policy docs are full", func(f *fixture) { f.write("docs/ddsonic/acceptance.md", "x\n") }, "full", "rule full docs/ddsonic/acceptance.md"},
+		}, "full", rule("full go.mod")},
+		{"README is code, not docs", func(f *fixture) { f.write("README.md", "changed\n") }, "code", rule("code README.md")},
+		{"policy docs are full", func(f *fixture) { f.write("docs/ddsonic/acceptance.md", "x\n") }, "full", rule("full docs/ddsonic/acceptance.md")},
 		{"an unknown path is full", func(f *fixture) { f.write("new/thing.txt", "x\n") }, "full", "no rule matches"},
 		{"downgrade: a Go file renamed to .md", func(f *fixture) {
 			f.git("mv", "library/y.go", "docs/y.md")
@@ -198,7 +222,7 @@ func TestClassifyChange(t *testing.T) {
 			}
 		}, "full", "mode change"},
 		{"a binary file", func(f *fixture) { f.write("docs/img.md", "a\x00b\x00c") }, "full", "a binary file"},
-		{"the classifier itself", func(f *fixture) { f.write("tools/classify-change.sh", "echo docs\n") }, "full", "rule full tools/*"},
+		{"the classifier itself", func(f *fixture) { f.write("tools/classify-change.sh", "echo docs\n") }, "full", rule("full tools/*")},
 		{"a path with spaces", func(f *fixture) { f.write("docs/my file.md", "x\n") }, "docs", ""},
 		{"a path with unicode", func(f *fixture) { f.write("docs/ñandú.md", "x\n") }, "docs", ""},
 		{"a path with a leading dash", func(f *fixture) { f.write("docs/-n.md", "x\n") }, "docs", ""},
@@ -363,7 +387,7 @@ func TestClassifyChangeTrustsOnlyTheProjectOrigin(t *testing.T) {
 			}
 			got, rest := classifyAs(t, supported, f.dir, nil)
 			refused := false
-			for _, reason := range []string{"fail-closed: the repository config sets ", "fail-closed: origin is not the project's", "fail-closed: remote.origin.url is set "} {
+			for _, reason := range []string{"fail-closed: the repository config sets ", "fail-closed: remote.origin.url is not one of the project's", "fail-closed: remote.origin.url is set "} {
 				refused = refused || strings.Contains(rest, reason)
 			}
 			if got != "full" || !refused {
@@ -437,17 +461,84 @@ func TestClassifyChangeResistsExportedFunctions(t *testing.T) {
 	}
 }
 
-// Sourced, it neither execs nor exits the caller's shell.
-func TestClassifyChangeRefusesToBeSourced(t *testing.T) {
+// Run inside another shell, however its $0 is set, it refuses: nothing on
+// stdout, a message on stderr, and the caller's shell goes on with its
+// directory and traps as they were.
+func TestClassifyChangeRefusesToRunInsideAnotherShell(t *testing.T) {
 	script, err := filepath.Abs("tools/classify-change.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("/bin/bash", "-c", `source "$1" --paths x; echo "still here, status $?"`, "bash", script)
-	cmd.Env = gitEnv()
-	out, err := cmd.CombinedOutput()
-	if err != nil || !strings.Contains(string(out), "still here, status 1") || !strings.Contains(string(out), "do not source it") {
-		t.Fatalf("sourcing: %v\n%s", err, out)
+	dir := t.TempDir()
+	after := `echo "alive $? $(pwd) $(trap -p USR1)"`
+	setup := `cd / && trap 'echo T' USR1; `
+	caller := filepath.Join(dir, "caller.sh")
+	if err := os.WriteFile(caller, []byte(setup+`source "$S" --paths x; `+after+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string][]string{
+		"source from -c":                {"/bin/bash", "-p", "-c", setup + `source "$S" --paths x; ` + after},
+		"dot from -c":                   {"/bin/bash", "-p", "-c", setup + `. "$S" --paths x; ` + after},
+		"source with $0 set to it":      {"/bin/bash", "-p", "-c", setup + `source "$S" --paths x; ` + after, script},
+		"exec -a: argv[0] spoofed":      {"/bin/bash", "-c", `exec -a "$S" /bin/bash -p -c "$0"`, setup + `source "$S" --paths x; ` + after},
+		"source from another script":    {"/bin/bash", "-p", caller},
+		"source from an interactive -c": {"/bin/bash", "-p", "-i", "-c", setup + `source "$S" --paths x; ` + after},
+		"source in a function":          {"/bin/bash", "-p", "-c", setup + `f() { source "$S" --paths x; }; f; ` + after},
+		"source from stdin":             {"/bin/bash", "-p", "-s"},
+	}
+	for name, argv := range cases {
+		t.Run(name, func(t *testing.T) {
+			cmd := exec.Command(argv[0], argv[1:]...)
+			cmd.Env = append(gitEnv(), "S="+script)
+			if name == "source from stdin" {
+				cmd.Stdin = strings.NewReader(setup + `source "$S" --paths x; ` + after + "\n")
+			}
+			var stderr strings.Builder
+			cmd.Stderr = &stderr
+			out, err := cmd.Output()
+			want := "alive 1 / trap -- 'echo T' SIGUSR1"
+			if err != nil || !strings.Contains(string(out), want) {
+				t.Fatalf("the caller did not go on unchanged: %v\nstdout:\n%s\nstderr:\n%s", err, out, stderr.String())
+			}
+			for _, line := range strings.Split(string(out), "\n") {
+				if line == "docs" || line == "test" || line == "code" || line == "full" || strings.Contains(line, "\t") {
+					t.Errorf("a class or path line on stdout: %q", line)
+				}
+			}
+			if !strings.Contains(stderr.String(), "do not source it") {
+				t.Errorf("no refusal on stderr:\n%s", stderr.String())
+			}
+		})
+	}
+}
+
+// Nothing from the repository's config reaches the output: an origin or a
+// value with a secret in it is refused without showing it, and a key whose
+// subsection holds one is shown as its section and variable only.
+func TestClassifyChangeNeverPrintsConfigSecrets(t *testing.T) {
+	const gh = "https://github.com/DaphnisDuck/ddsonic.git"
+	for name, config := range map[string][][]string{
+		"origin with user and password": {{"remote.origin.url", "https://user:SECRET@github.com/other/repo"}},
+		"origin with a token query":     {{"remote.origin.url", "https://github.com/DaphnisDuck/ddsonic?token=SECRET"}},
+		"origin with a fragment":        {{"remote.origin.url", "git@github.com:DaphnisDuck/ddsonic.git#SECRET"}},
+		"a credential helper":           {{"remote.origin.url", gh}, {"credential.helper", "!echo SECRET"}},
+		"an Authorization header":       {{"remote.origin.url", gh}, {"http.extraHeader", "Authorization: Bearer SECRET"}},
+		"a URL rewrite with a password": {{"remote.origin.url", gh}, {"url.https://x:SECRET@github.com/.insteadOf", "https://github.com/"}},
+		"a per-URL HTTP setting":        {{"remote.origin.url", gh}, {"http.https://SECRET@github.com/.proxy", "http://127.0.0.1:9"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, _ := newFixture(t)
+			for _, kv := range config {
+				f.git("config", "--local", kv[0], kv[1])
+			}
+			stdout, stderr := classifyStreams(t, supported, f.dir, nil)
+			if first, _, _ := strings.Cut(stdout, "\n"); first != "full" {
+				t.Fatalf("class %q, want full\n%s", first, stdout)
+			}
+			if strings.Contains(stdout+stderr, "SECRET") {
+				t.Fatalf("the output shows the secret:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+			}
+		})
 	}
 }
 
@@ -462,13 +553,13 @@ func TestClassifyChangeFailsClosed(t *testing.T) {
 		args   []string
 		reason string
 	}{
-		{"an unknown base", nil, []string{"--base", "0123456789abcdef0123456789abcdef01234567", "--head", head}, "not a commit"},
-		{"a base that is an option", nil, []string{"--base", "--output=/tmp/x", "--head", head}, "refused ref"},
-		{"a base that is a range", nil, []string{"--base", base + ".." + head, "--head", head}, "refused ref"},
-		{"a base with shell characters", nil, []string{"--base", "$(id)", "--head", head}, "refused ref"},
-		{"rules from an option", nil, []string{"--base", base, "--head", head, "--rules-from", "-p"}, "refused ref"},
+		{"an unknown base", nil, []string{"--base", "0123456789abcdef0123456789abcdef01234567", "--head", head}, "a ref that is not a commit"},
+		{"a base that is an option", nil, []string{"--base", "--output=/tmp/x", "--head", head}, "refused a ref"},
+		{"a base that is a range", nil, []string{"--base", base + ".." + head, "--head", head}, "refused a ref"},
+		{"a base with shell characters", nil, []string{"--base", "$(id)", "--head", head}, "refused a ref"},
+		{"rules from an option", nil, []string{"--base", base, "--head", head, "--rules-from", "-p"}, "refused a ref"},
 		{"a missing value", nil, []string{"--base"}, "--base needs a value"},
-		{"an unknown argument", nil, []string{"--everything-is-docs"}, "unknown argument"},
+		{"an unknown argument", nil, []string{"--everything-is-docs"}, "an unknown argument"},
 		{"an empty diff", nil, []string{"--base", head, "--head", head}, "an empty diff"},
 		{"rules that do not exist", nil, []string{"--base", base, "--head", head, "--rules", "/nonexistent"}, "cannot read the rules file"},
 		{"no origin (the local default)", nil, []string{"--rules-from", base}, "remote.origin.url is set 0 times"},

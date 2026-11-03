@@ -54,8 +54,12 @@
 
 # The start uses only bash keywords ([[ ]], if), which no function can
 # replace, until privileged mode is confirmed: without -p, an exported
-# function could stand in for any command.
-if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
+# function could stand in for any command. It refuses to run inside another
+# shell: sourced or dotted (a caller's frame, a function, or -c, -s or an
+# interactive shell, whatever $0 says). Then it only returns: if return is
+# not allowed there, the if ends and the classifier below is skipped; it
+# never exits or replaces the caller.
+if [[ ${#BASH_SOURCE[@]} -ne 1 || -v BASH_EXECUTION_STRING || -v FUNCNAME || $- == *[ics]* || ${BASH_SOURCE[0]} != "$0" ]]; then
 	printf 'classify-change.sh: run it, do not source it\n' >&2
 	return 1 >&2
 elif [[ $- != *p* ]]; then
@@ -107,10 +111,10 @@ rank() {
 resolve() {
 	local id
 	case $2 in
-	'' | -* | *..* | *[!A-Za-z0-9._/@^~-]*) fail "refused ref '$2'" ;;
+	'' | -* | *..* | *[!A-Za-z0-9._/@^~-]*) fail "refused a ref: not a plain name or commit ID" ;;
 	esac
-	id=$(git rev-parse --verify --quiet --end-of-options "$2^{commit}") || fail "not a commit: '$2'"
-	case $id in *[!0-9a-f]* | '') fail "odd commit id for '$2'" ;; esac
+	id=$(git rev-parse --verify --quiet --end-of-options "$2^{commit}") || fail "a ref that is not a commit"
+	case $id in *[!0-9a-f]* | '') fail "an odd commit ID" ;; esac
 	printf -v "$1" '%s' "$id"
 }
 
@@ -123,12 +127,12 @@ while [ $# -gt 0 ]; do
 	--rules-from) [ $# -ge 2 ] || fail "--rules-from needs a value"; rules_from=$2; shift 2 ;;
 	--rules) [ $# -ge 2 ] || fail "--rules needs a value"; rules_file=$2; shift 2 ;;
 	--paths) paths_mode=1; shift; break ;;
-	*) fail "unknown argument '$1'" ;;
+	*) fail "an unknown argument" ;;
 	esac
 done
 if [ -n "$paths_mode" ]; then
 	for p in "$@"; do
-		case $p in --*) fail "an option after --paths ('$p'): options come before it" ;; esac
+		case $p in --*) fail "an option after --paths: options come before it" ;; esac
 	done
 	[ -z "$base$head" ] || fail "--paths takes no --base or --head"
 fi
@@ -144,19 +148,22 @@ safe_path() {
 	printf '%s' "$1" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 || fail "a path that is not valid UTF-8 (or no iconv)"
 }
 
-# load_rules reads the rules (from $tmp/rules) into classes and patterns.
-classes=() patterns=()
+# load_rules reads the rules (from $tmp/rules) into classes, patterns and
+# their line numbers. Messages name a rule by its line number and class,
+# never by its text.
+classes=() patterns=() lines=()
 load_rules() {
-	local line cls pat
+	local line cls pat n=0
 	while IFS= read -r line || [ -n "$line" ]; do
+		n=$((n + 1))
 		case $line in '' | '#'*) continue ;; esac
 		case $line in
 		'docs '* | 'test '* | 'code '* | 'full '*) ;;
-		*) fail "malformed rule '$line'" ;;
+		*) fail "a malformed rule at line $n" ;;
 		esac
 		cls=${line%% *} pat=${line#* }
-		case $pat in '' | *' '* | *[[:cntrl:]]*) fail "malformed rule '$line'" ;; esac
-		classes+=("$cls") patterns+=("$pat")
+		case $pat in '' | *' '* | *[[:cntrl:]]*) fail "a malformed rule at line $n" ;; esac
+		classes+=("$cls") patterns+=("$pat") lines+=("$n")
 	done <"$tmp/rules"
 	[ ${#classes[@]} -gt 0 ] || fail "no rules"
 }
@@ -173,7 +180,7 @@ class_of() {
 	for i in "${!patterns[@]}"; do
 		# shellcheck disable=SC2053 # the pattern is a glob, matched as one
 		if [[ $1 == ${patterns[$i]} ]]; then
-			printf '%s\trule %s %s\n' "${classes[$i]}" "${classes[$i]}" "${patterns[$i]}"
+			printf '%s\trule %s (%s)\n' "${classes[$i]}" "${lines[$i]}" "${classes[$i]}"
 			return
 		fi
 	done
@@ -220,19 +227,24 @@ if [ -z "$base" ]; then
 		remote.origin.url) origins=$((origins + 1)) url=$val ;;
 		remote.*.url | remote.*.fetch) ;; # other remotes: never fetched; their URL and refspec only
 		branch.*.remote | branch.*.merge) ;;
-		*) fail "the repository config sets $key, outside what the classifier trusts for a fetch" ;;
+		*)
+			# The key's section and variable only: a subsection can be a URL
+			# with credentials in it (url.<base>.insteadOf, http.<url>.*).
+			case $key in *.*.*) shown="${key%%.*}.*.${key##*.}" ;; *) shown=$key ;; esac
+			fail "the repository config sets $shown, outside what the classifier trusts for a fetch"
+			;;
 		esac
 	done <"$tmp/config"
 	[ "$origins" = 1 ] || fail "remote.origin.url is set $origins times"
 	case $url in
 	git@github.com:DaphnisDuck/ddsonic.git | https://github.com/DaphnisDuck/ddsonic | https://github.com/DaphnisDuck/ddsonic.git) ;;
-	*) fail "origin is not the project's GitHub repository ('$url')" ;;
+	*) fail "remote.origin.url is not one of the project's GitHub URLs" ;;
 	esac
 	fresh=refs/ddsonic/classify-base-$$-$RANDOM
 	git update-ref -d "$fresh" 2>/dev/null
 	! git show-ref --verify --quiet "$fresh" || fail "cannot clear $fresh"
 	git -c core.sshCommand=ssh -c credential.helper= fetch --quiet --no-tags --no-write-fetch-head -- "$url" "+refs/heads/main:$fresh" 2>/dev/null ||
-		fail "cannot fetch main from $url"
+		fail "cannot fetch main from the project's repository"
 	resolve base "$fresh"
 	git update-ref -d "$fresh" 2>/dev/null
 fi
@@ -334,7 +346,7 @@ while IFS= read -r -d '' meta <&3; do
 		fi
 		;;
 	T) note full T "$p1" "a type change" ;;
-	*) fail "unknown status '$st'" ;;
+	*) fail "an unknown status in the git diff output" ;;
 	esac
 done
 exec 3<&-
