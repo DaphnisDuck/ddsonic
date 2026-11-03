@@ -595,7 +595,7 @@ The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and correc
 - **Source:** owner (2026-11-02).
   - Timing records: `docs/ddsonic/acceptance.md:134` says about 5 min 21 s on the 32-core dev machine (2026-10-16).
   - CI: the Linux `go` job took 21m14s with `make ci` 20m03s (run 41374046108); the timeout was raised to 40 minutes in commit e3af1044.
-- **Status / prior decisions:** in progress: Phase 1 of Operation Pony Express implemented locally, awaiting the Reviewer and the owner (2026-11-03); not done, not merged, not released. Earlier: none. The gate is run "every release candidate" and on SDK-boundary changes (`docs/ddsonic/design/spotify-token-coordinator.md:1786-1790`).
+- **Status / prior decisions:** in progress: Phase 1 of Operation Pony Express is integrated into `main` (PR #4, `1cfbca2`, 2026-11-03; CI green on GitHub); not released, and the entry as a whole is not done. Earlier the same day: Phase 1 implemented locally, awaiting the Reviewer and the owner. Earlier: none. The gate is run "every release candidate" and on SDK-boundary changes (`docs/ddsonic/design/spotify-token-coordinator.md:1786-1790`).
   - Findings (2026-11-03; the maintainer's Pony Express records, WRITER-FINDINGS.md):
     - the contract gate is about 530 s of a full local `make ci` (about 614 s, 12 cores) and about 785 s of 1031 s in CI (4-core runner): 76-86% of a full run;
     - it is cold-compile bound by design (each runner starts from empty private caches), its stages run serially, and three stock-stage tests repeat step 15 in runners of their own;
@@ -606,6 +606,15 @@ The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and correc
     - CI only on pull requests, pushes to `main`, `v*` tags and by hand, with no cancelling of `main` runs;
     - the tests once, under the race detector and with coverage.
   - Deferred, a separate future item under E-03 that needs a Reviewer: parallelism inside the gate (independent heavy tests in parallel, no repeat of the stock stage), keeping its empty-cache isolation.
+  - E-03b, DONE and INTEGRATED (PR #5, `main` `5e5b169`, 2026-11-03; reviewed): the Spotify test flake of CI run 41677315411 is fixed. Its root cause was a test-harness chain (INVESTIGATION.md):
+    - a 50 ms wall-clock race on a second build the test did not assert on;
+    - a held fake builder that a failure left blocked;
+    - an unbounded wait on the package-wide build WaitGroup in the next test, which hung to the 10-minute timeout.
+
+    The fix is test-only.
+  - Deferred follow-ups of E-03b, tracked, not fixed:
+    - a milder 50 ms timing race at `external/spotify/session_setup_ddsonic_test.go:80-89` (not the same failure);
+    - the package's 17 other unbounded `builds`/`tails` waits, deliberately not changed.
 - **Category:** infrastructure.
 - **Dependencies:** E-05 (the SDK strategy changes what the gate must prove).
 - **Duplicates merged:** none.
@@ -614,12 +623,13 @@ The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and correc
 ### E-04 Streamline the AI development and release process
 - **Outcome:** a faster agent workflow and release process without losing meaningful QA. This includes deciding which `/tmp` release and harness tooling belongs in the repo, and the agent-docs cleanup.
 - **Source:** plan.md:1000 (owner request, 2026-10-19, "post-1.0, not started"); `docs/ddsonic/releasing.md:43` ("Agent docs cleanup (agreed, pending)… not started"); owner (2026-11-02).
-- **Status / prior decisions:** in progress: Phase 1 of Operation Pony Express implemented locally, awaiting the Reviewer and the owner (2026-11-03); not done, not merged, not released. Earlier, HIST: agreed and not started.
+- **Status / prior decisions:** in progress: Phase 1 of Operation Pony Express is integrated into `main` (PR #4, `1cfbca2`, 2026-11-03; CI green on GitHub); not released, and the entry as a whole is not done. Earlier the same day: Phase 1 implemented locally, awaiting the Reviewer and the owner. Earlier, HIST: agreed and not started.
   - Findings (2026-11-03; WRITER-FINDINGS.md): prerequisites kept going missing because the pinned tools were defined only in CI's workflow and lived nowhere persistent locally (an agent's session folder is cleared), the contract gate's module archives came only from a CI step, and shellcheck came from apt in CI; nothing checked for them before a ten-minute run.
   - Phase 1 items under E-04:
     - persistent pinned tools and a fast preflight (`tools/devtools.sh`, `make tools`, `make preflight`, a check that the script's pins equal `ci.yml`'s);
     - the design of proportional validation (PROPORTIONAL-VALIDATION-PROPOSAL.md; a proposal, not active, with the owner's decisions open);
     - the orchestration and closeout-overhead findings, which the Dispatcher records.
+  - Next planned optimization: proportional validation. The design proposal (PROPORTIONAL-VALIDATION-PROPOSAL.md) is preserved; it is not active, and its owner decisions are open.
 - **Category:** infrastructure.
 - **Dependencies:** D-14 (stale CLAUDE.md), D-12 (artifact cleanup).
 - **Duplicates merged:** plan.md:1000; releasing.md:43; the `/tmp` tooling evaluation.
