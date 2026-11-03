@@ -52,6 +52,7 @@ full .gitattributes
 full .gitmodules
 full classify_ddsonic_test.go
 full citations_ddsonic_test.go
+full validate_ddsonic_test.go
 
 # test: tests, which the whole suite runs. A deleted or renamed test is full.
 test *_test.go

@@ -22,7 +22,7 @@
 #   tools/classify-change.sh ARGS      (its #!/bin/bash -p line; best with env -i)
 #   /bin/bash -p tools/classify-change.sh ARGS
 #
-# make validate and CI use the first (the Makefile's CLASSIFY variable). It
+# make validate and CI use the first, through tools/ci-classify.sh. It
 # is also the only one immune to an exported FUNCNAME or
 # BASH_EXECUTION_STRING: bash -p imports those, and the script then takes
 # the start for an embedded one and prints no class (full, never a

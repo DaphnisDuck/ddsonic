@@ -11,7 +11,7 @@ ifneq ($(wildcard $(DEVTOOLS)/bin/.),)
 export PATH := $(DEVTOOLS)/bin:$(PATH)
 endif
 
-.PHONY: build test vet lint staticcheck fmt fmt-check coverage security ci check clean install acceptance acceptance-validate sdk-contract tools preflight preflight-core preflight-contract ci-core ci-checks ci-tail ci-tests test-race-cover
+.PHONY: build test vet lint staticcheck fmt fmt-check coverage security ci check clean install acceptance acceptance-validate sdk-contract tools preflight preflight-core preflight-contract ci-core ci-checks ci-tail ci-tests test-race-cover validate validate-docs validate-test
 
 build:
 	go build -trimpath -ldflags="$(LDFLAGS)" -o $(BINARY) .
@@ -94,6 +94,27 @@ ci-tail:
 	git diff --exit-code
 
 check: fmt vet test
+
+# ddsonic: proportional validation (docs/ddsonic/acceptance.md). make
+# validate classifies the change against a freshly fetched main and runs the
+# profile for its class; PROFILE=test|code|full may raise it, never lower it
+# (tools/validate.sh). It prints the class line a review request quotes.
+# The classifier is started in one place, tools/ci-classify.sh, which CI
+# runs too; it is not a Make variable, which a command line could replace.
+validate:
+	@MAKE='$(MAKE)' sh tools/validate.sh
+
+# The docs and test profiles. validate-docs needs the base commit, which
+# make validate and CI pass; the citation check is strict, so a missing base
+# is a failure, never a skip.
+validate-docs: preflight-core fmt-check
+	@expr "$(VALIDATE_BASE)" : '[0-9a-f]\{40,64\}$$' >/dev/null || { echo "validate-docs: VALIDATE_BASE must be a commit ID"; exit 2; }
+	git diff --check $(VALIDATE_BASE)
+	DDSONIC_CITATION_BASE=$(VALIDATE_BASE) DDSONIC_CITATION_STRICT=1 go test -count=1 .
+
+validate-test: preflight-core
+	$(MAKE) vet staticcheck ci-tests
+	shellcheck packaging/*.sh tools/*.sh
 
 # ddsonic: the go-librespot contract gate (external/spotify/sdkcontract,
 # docs/ddsonic/acceptance.md). It is not part of check or test: it stages the
