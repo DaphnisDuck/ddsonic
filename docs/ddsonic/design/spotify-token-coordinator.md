@@ -1785,7 +1785,7 @@ out of `go test ./...`, `make test` and `make check`; `make ci` runs it. It
 is required, and may not be skipped, for: the full validation of a change to
 the Spotify session code, every release candidate's validation, and any
 change that touches the boundary with go-librespot or the version of it that
-`go.mod` selects. CI runs it in the Linux job, which has the pinned
+`go.mod` selects. CI runs it in its own Linux job, sdk-contract, with the pinned
 toolchain; macOS has no CI job for now, so the native release checks are
 unverified on macOS until macOS acceptance. On
 macOS the runner adds Homebrew's two prefixes to the child's `PATH` and

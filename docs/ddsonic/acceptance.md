@@ -6,7 +6,7 @@ This page says how it works. The cases are in [acceptance/cases.yaml](acceptance
 
 ## Three layers, in this order
 
-1. **Automated code validation.** `make ci`: format, vet, staticcheck, govulncheck, the tests with the race detector. Every push.
+1. **Automated code validation.** `make ci`: format, vet, staticcheck, govulncheck, the tests with the race detector, the contract gate. In CI on every pull request commit, every commit on `main` and every release tag (a branch's pushes are covered by its pull request), as two parallel jobs: `go` (`make ci-core`, everything but the gate) and `sdk-contract`; locally, `make tools` once, then `make ci`.
 2. **Agent and workflow acceptance.** The scripted cases below, then the manual and live cases an agent can review, against the candidate.
 3. **Human exploratory acceptance.** A person, on the same binary, **after** the agent pass is green.
 

@@ -11,7 +11,7 @@ ifneq ($(wildcard $(DEVTOOLS)/bin/.),)
 export PATH := $(DEVTOOLS)/bin:$(PATH)
 endif
 
-.PHONY: build test vet lint staticcheck fmt fmt-check coverage security ci check clean install acceptance acceptance-validate sdk-contract tools preflight preflight-core preflight-contract ci-checks ci-tail
+.PHONY: build test vet lint staticcheck fmt fmt-check coverage security ci check clean install acceptance acceptance-validate sdk-contract tools preflight preflight-core preflight-contract ci-core ci-checks ci-tail
 
 build:
 	go build -trimpath -ldflags="$(LDFLAGS)" -o $(BINARY) .
@@ -58,11 +58,19 @@ preflight-core:
 preflight-contract:
 	@DDSONIC_DEVTOOLS=$(DEVTOOLS) sh tools/devtools.sh preflight contract
 
-# ddsonic: the full validation, after the preflight.
+# ddsonic: the full validation. CI runs the same steps as two jobs: go
+# (make ci-core) and sdk-contract (make sdk-contract).
 ci: preflight
 	$(MAKE) ci-checks
 	go test -count=1 -race ./...
 	$(MAKE) sdk-contract
+	$(MAKE) coverage
+	$(MAKE) ci-tail
+
+# ddsonic: everything in ci but the contract gate, in the same order.
+ci-core: preflight-core
+	$(MAKE) ci-checks
+	go test -count=1 -race ./...
 	$(MAKE) coverage
 	$(MAKE) ci-tail
 
