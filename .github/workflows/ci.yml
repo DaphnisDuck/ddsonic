@@ -13,11 +13,12 @@ on:
 permissions:
   contents: read
 
-# ddsonic: a pull request's newer commit cancels its older run; a push to
-# main or a tag is never cancelled (its group is its commit), so every main
-# commit gets a result.
+# ddsonic: a pull request's newer commit cancels its older run. Every other
+# run (a push to main, a tag, a manual run) has a group of its own, its run
+# ID, so none is cancelled, and none waits as the pending run of a shared
+# group, which a later run would replace: every main commit gets a result.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('{0}-{1}', github.ref, github.sha) }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # ddsonic: make ci, as two parallel jobs. go runs make ci-core (everything
