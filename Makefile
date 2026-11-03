@@ -11,7 +11,7 @@ ifneq ($(wildcard $(DEVTOOLS)/bin/.),)
 export PATH := $(DEVTOOLS)/bin:$(PATH)
 endif
 
-.PHONY: build test vet lint staticcheck fmt fmt-check coverage security ci check clean install acceptance acceptance-validate sdk-contract tools preflight preflight-core preflight-contract ci-core ci-checks ci-tail
+.PHONY: build test vet lint staticcheck fmt fmt-check coverage security ci check clean install acceptance acceptance-validate sdk-contract tools preflight preflight-core preflight-contract ci-core ci-checks ci-tail test-race-cover
 
 build:
 	go build -trimpath -ldflags="$(LDFLAGS)" -o $(BINARY) .
@@ -39,6 +39,14 @@ coverage:
 	go test -count=1 -coverprofile=coverage.out ./...
 	go tool cover -func=coverage.out
 
+# ddsonic: the tests once, under the race detector and with coverage; -race
+# requires the atomic mode. make ci runs this in place of the race run and
+# make coverage, which ran the suite a second time.
+TESTPKGS ?= ./...
+test-race-cover:
+	go test -count=1 -race -covermode=atomic -coverprofile=coverage.out $(TESTPKGS)
+	go tool cover -func=coverage.out
+
 security:
 	@command -v govulncheck >/dev/null 2>&1 || { echo "govulncheck is required: make tools"; exit 1; }
 	govulncheck ./...
@@ -62,16 +70,14 @@ preflight-contract:
 # (make ci-core) and sdk-contract (make sdk-contract).
 ci: preflight
 	$(MAKE) ci-checks
-	go test -count=1 -race ./...
+	$(MAKE) test-race-cover
 	$(MAKE) sdk-contract
-	$(MAKE) coverage
 	$(MAKE) ci-tail
 
 # ddsonic: everything in ci but the contract gate, in the same order.
 ci-core: preflight-core
 	$(MAKE) ci-checks
-	go test -count=1 -race ./...
-	$(MAKE) coverage
+	$(MAKE) test-race-cover
 	$(MAKE) ci-tail
 
 ci-checks: fmt-check vet staticcheck security
