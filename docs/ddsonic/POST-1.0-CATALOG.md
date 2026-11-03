@@ -2,7 +2,7 @@
 
 > **Status:** a dream catalog, not a committed implementation backlog  
 > **Scope:** after the 1.0 release (`v1.0.0`, 2026-10-31)  
-> **Items:** 97, with stable IDs: P-01 to P-44 (product), E-01 to E-20 (engineering), R-01 to R-15 (reliability and security), D-01 to D-18 (distribution, documentation and infrastructure)
+> **Items:** 98, with stable IDs: P-01 to P-45 (product), E-01 to E-20 (engineering), R-01 to R-15 (reliability and security), D-01 to D-18 (distribution, documentation and infrastructure)
 
 This is the single consolidated catalog of post-1.0 ideas, investigations and deferred work, together with the context and earlier decisions each one carries. It is still a dream catalog, not a committed backlog: it ranks and schedules nothing.
 
@@ -62,7 +62,7 @@ It was compiled on 2026-11-02 from a read-only review of the repository at `efbc
 - the git history;
 - the maintainer's private records of the 1.0 release.
 
-The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and corrected the website entry (D-01). Item IDs are stable: later additions take new numbers.
+The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and corrected the website entry (D-01). P-45 was added on 2026-11-03, when P-27 closed. Item IDs are stable: later additions take new numbers.
 
 ---
 
@@ -366,11 +366,29 @@ The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and correc
 ### P-27 Alphabetical radio station sorting
 - **Outcome:** deterministic, case-insensitive name sort, applied consistently.
 - **Source:** IDEAS:516-532; plan.md:604.
-- **Status / prior decisions:** unscheduled. Check intentional orderings, such as favourites, first.
+- **Status / prior decisions:** COMPLETED (development), independently reviewed (Reviewer PASS on the final delta, P-27d, `7c67c52`) and OWNER-ACCEPTED after a hands-on test on Titan of the candidate `p27d-7c67c52` (2026-11-03). Final implementation commit `7c67c52f962b763c2e01a6b6db8b06fbe3f8329b`. PR: pending. Integration: awaiting owner-authorized merge. Planned release target: v1.1.0 (planned, not released). Behaviour: Favorites, a country's or a tag's stations, the radio directory's search and the cliamp radio channels list A–Z by the shown name; the capped lists say "Top 200 by votes, listed A–Z."; the Genres & Tags categories and the countries keep the directory's order (P-27d); the Top 200 cap is kept; "Popular vs All" is deferred to P-45. Earlier: unscheduled. Check intentional orderings, such as favourites, first.
 - **Category:** feature (UX).
 - **Dependencies:** none.
 - **Duplicates merged:** none.
 - **Flags:** none.
+
+### P-45 Full-directory Radio Browsing
+- **Outcome:** let users explore radio stations beyond the Top 200 popularity limit of a country's or a tag's list and of a directory search:
+  - keep today's fast, popularity-oriented browsing;
+  - support useful alphabetical navigation through a large list;
+  - investigate server-side pagination (the directory's `offset` and `limit`) against an optional, persistent local database cache;
+  - avoid unnecessary startup delays, network traffic and storage;
+  - behave reasonably when the remote directory is unavailable.
+- **Source:** owner, 2026-11-03, at the P-27 closeout. It takes in the deferred "Popular vs All" note of P-27 (IDEAS:518; plan.md:604).
+- **Status / prior decisions:** a feature concept, not an approved architecture; unscheduled. P-27 kept the 200 cap and the fetch limits (owner). What P-27 found about retrieval today, from the code:
+  - each opened country's or tag's list and each directory search is a live request, at most 200 stations by votes (`external/radio/countries.go:22`, `tags.go:18`, `provider.go:527`);
+  - the category lists are cached in memory for the session only, with no TTL; nothing is cached on disk;
+  - the library's `r` does not refresh radio;
+  - one hard-coded server (`de1.api.radio-browser.info`, `external/radio/catalog.go:19`): no mirror, no retries and no stale fallback; a failed list shows the error with "Press Enter to retry."
+- **Category:** feature / investigation.
+- **Dependencies:** none. Related: P-12 (offline awareness), P-11 (failover).
+- **Duplicates merged:** P-27's "Popular vs All" deferral.
+- **Flags:** OWNER (the approach).
 
 ### P-28 Sign in from a Spotify play request
 - **Outcome:** offer browser sign-in when a play needs it, and optionally resume the track afterwards.
@@ -1238,6 +1256,7 @@ The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and correc
   - P-43 queue and session restoration (an investigation; the inherited `internal/resume` covers only a narrow case).
   - Also the owner's P-01 sleep-timer detail.
   - P-44 external radio service integrations (Pandora, SiriusXM, AccuRadio). None of them is named elsewhere in the repository.
+  - P-45 full-directory radio browsing (2026-11-03), taking in P-27's "Popular vs All" note.
 
 # (d) Decisions the owner will eventually need to make (not a ranking)
 
@@ -1250,6 +1269,7 @@ The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and correc
   - the defaults for P-42 (audio-only listing, and whether all files can still be shown);
   - P-43 (what is restored by default, and whether position resume is opt-in);
   - P-40/P-41 (how much alignment is worth against width).
+- **When P-45 is taken up** (no decision needed now): server-side pagination or a local directory cache, and how alphabetical navigation works over a long list.
 - **When P-44 is taken up** (no decision needed now): whether external radio services belong in the Internet Radio interface or a separate provider model, and which of the three services the owner uses and can test.
 - **Non-goals** (plan.md:15-18): keep or revise, for enrichment, generated playlists and rediscovery.
 - **Upstream and independence:** when to do the full merge (E-10), and whether the module path still earns its cost (E-11).
@@ -1276,5 +1296,5 @@ The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and correc
 
 ## Counts
 
-- **By part:** 44 product (P-01 to P-44), 20 engineering (E-01 to E-20), 15 reliability and security (R-01 to R-15), 18 distribution, docs and infrastructure (D-01 to D-18). 97 items in all, of which 2 are RESOLVED (R-04, D-18).
-- **By category field:** feature 31, architecture 15, investigation 14, documentation 12, reliability-security 10, bug 5, distribution 5, infrastructure 5. Where an item names two categories (for example "feature / investigation"), it is counted under the first.
+- **By part:** 45 product (P-01 to P-45), 20 engineering (E-01 to E-20), 15 reliability and security (R-01 to R-15), 18 distribution, docs and infrastructure (D-01 to D-18). 98 items in all, of which 2 are RESOLVED (R-04, D-18).
+- **By category field:** feature 32, architecture 15, investigation 14, documentation 12, reliability-security 10, bug 5, distribution 5, infrastructure 5. Where an item names two categories (for example "feature / investigation"), it is counted under the first.

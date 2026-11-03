@@ -515,7 +515,7 @@ If a common command/action registry shared by hotkeys, the command palette and C
 
 ### Alphabetical Radio Station Sorting
 
-**Status:** implemented on a local branch (P-27, 2026-11-03), under review; see [navigation.md](navigation.md) and the `plan.md` Status entry for what sorts and what keeps its order. Deferred to a roadmap discussion: a choice between the directory's most-voted 200 and all of a country's or a tag's stations ("Popular vs All"); the 200 cap stays.
+**Status:** COMPLETED (development), independently reviewed (Reviewer PASS on the final delta, P-27d, `7c67c52`) and OWNER-ACCEPTED after a hands-on test on Titan of the candidate `p27d-7c67c52` (2026-11-03). Final implementation commit `7c67c52f962b763c2e01a6b6db8b06fbe3f8329b`. PR: pending. Integration: awaiting owner-authorized merge. Planned release target: v1.1.0 (planned, not released). History: implemented on a local branch (P-27, 2026-11-03) and reviewed in deltas (P-27, P-27b, P-27c, P-27d); see [navigation.md](navigation.md) and the `plan.md` Status entry for what sorts and what keeps its order. Decisions kept: the Genres & Tags categories stay in the directory's popularity order (P-27d); the Top 200 by votes cap stays. Deferred to a roadmap discussion: a choice between the directory's most-voted 200 and all of a country's or a tag's stations ("Popular vs All"), now part of [P-45 Full-directory Radio Browsing](POST-1.0-CATALOG.md#p-45-full-directory-radio-browsing).
 
 Radio station lists currently appear in an unintuitive or effectively arbitrary order. After 1.0, present stations sorted alphabetically by their displayed station name.
 

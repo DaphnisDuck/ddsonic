@@ -82,3 +82,14 @@ Two rules follow from the rename:
 - **No repository named `ddmus` is ever created under `DaphnisDuck`.** A new repository of that name takes the old addresses and ends the redirects, including the ones `v1.0.0-rc.1`'s links rely on.
 
 The AUR package is `ddsonic-bin`. `ddmus-bin` was never pushed to the AUR, so there is nothing to replace there; a `ddmus-bin` built locally from the candidate is removed by hand (`pacman -R ddmus-bin`).
+
+## Versioning
+
+ddsonic follows [Semantic Versioning](https://semver.org/) (owner, 2026-11-03):
+
+- **v1.0.0** is the published stable release. Its tag and artifacts are never altered.
+- **v1.0.x** is reserved for compatible bug fixes, security fixes and maintenance releases, when they are needed.
+- **v1.1.0** is the next planned feature release. It takes post-1.0 usability improvements, such as P-27 (alphabetical radio sorting). Its scope and timing stay deliberately open: no fixed feature count, date or milestone threshold.
+- **v2.0.0** is reserved for changes that break an established compatibility commitment.
+
+A change moves through three separate statuses: development complete (reviewed, and accepted by the owner), integrated (merged into `main`), and released (published as part of a version). Reaching one does not imply the next.
