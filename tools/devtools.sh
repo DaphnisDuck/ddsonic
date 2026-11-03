@@ -95,7 +95,7 @@ install_tools() {
 		esac
 		archive=$devtools/downloads/$(basename "$SHELLCHECK_URL")
 		if ! echo "$SHELLCHECK_SHA256  $archive" | sha256sum -c - >/dev/null 2>&1; then
-			curl -fsSL -o "$archive.part" "$SHELLCHECK_URL"
+			curl -fsSL --proto '=https' --proto-redir '=https' -o "$archive.part" "$SHELLCHECK_URL"
 			mv "$archive.part" "$archive"
 		fi
 		if ! echo "$SHELLCHECK_SHA256  $archive" | sha256sum -c -; then
