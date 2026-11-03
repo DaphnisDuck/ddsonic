@@ -8,7 +8,6 @@ import (
 
 	"github.com/bjarneo/cliamp/catalog"
 	"github.com/bjarneo/cliamp/playlist"
-	"github.com/bjarneo/cliamp/provider"
 )
 
 // sortedByName sorts rows A–Z by the name each shows, the way every other
@@ -41,21 +40,6 @@ func sortedByName[T any](rows []T, name, id func(T) string) []T {
 		out[i] = k.row
 	}
 	return out
-}
-
-// namedGenres is implemented by a category browser whose categories the
-// library lists A–Z by name (radio's tags) instead of in the browser's
-// order (radio's countries keep theirs: grouped by region, most stations
-// first). GenreName is a category's name as its row shows it, without what
-// the label adds to it, such as a station count.
-type namedGenres interface {
-	GenreName(provider.GenreInfo) string
-}
-
-// sortedGenres sorts a namedGenres browser's categories A–Z by name, then
-// by ID. Their labels are left as they are.
-func sortedGenres(genres []provider.GenreInfo, ng namedGenres) []provider.GenreInfo {
-	return sortedByName(genres, ng.GenreName, func(g provider.GenreInfo) string { return g.ID })
 }
 
 // sortedStations sorts radio stations A–Z by the name each row shows, then

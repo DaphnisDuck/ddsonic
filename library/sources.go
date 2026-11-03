@@ -293,11 +293,11 @@ func browseStations(prov, channels playlist.Provider) Level {
 	return Menu("Browse Stations", entries...)
 }
 
-// genresLevel lists a GenreBrowser's categories, A–Z for a namedGenres
-// browser; each opens its stations, A–Z. The directory still picks which
-// stations a category shows (its first sort type, most voted for radio);
-// only their order is the library's, and the provider's StationSelection
-// says which they are.
+// genresLevel lists a GenreBrowser's categories in the browser's order (for
+// radio: countries by region, tags most stations first); each opens its
+// stations, A–Z. The directory still picks which stations a category shows
+// (its first sort type, most voted for radio); only their order is the
+// library's, and the provider's StationSelection says which they are.
 func genresLevel(prov playlist.Provider, gb provider.GenreBrowser, title string) Level {
 	sort := ""
 	if types := gb.GenreSortTypes(); len(types) > 0 {
@@ -307,9 +307,6 @@ func genresLevel(prov playlist.Provider, gb provider.GenreBrowser, title string)
 		genres, err := gb.Genres()
 		if err != nil {
 			return nil, err
-		}
-		if ng, ok := gb.(namedGenres); ok {
-			genres = sortedGenres(genres, ng)
 		}
 		entries := make([]Entry, len(genres))
 		for i, g := range genres {

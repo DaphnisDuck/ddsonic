@@ -15,7 +15,7 @@ import (
 )
 
 // orderRadio is a radio provider with a tag browser whose tags arrive most
-// stations first; each tag's one station is named after it.
+// stations first, not A–Z; each tag's one station is named after it.
 type orderRadio struct{}
 
 func (orderRadio) Name() string                                 { return "Radio" }
@@ -29,10 +29,9 @@ func (orderRadio) BrowseEntries() []provider.BrowseEntry {
 
 type orderTags struct{}
 
-func (orderTags) GenreName(g provider.GenreInfo) string { return g.ID }
-func (orderTags) GenreLabel() string                    { return "Genres & Tags" }
+func (orderTags) GenreLabel() string { return "Genres & Tags" }
 func (orderTags) Genres() ([]provider.GenreInfo, error) {
-	return []provider.GenreInfo{{ID: "rock", Name: "rock (900)"}, {ID: "ambient", Name: "ambient (300)"}, {ID: "jazz", Name: "jazz (40)"}}, nil
+	return []provider.GenreInfo{{ID: "rock", Name: "rock (900)"}, {ID: "jazz", Name: "jazz (400)"}, {ID: "ambient", Name: "ambient (300)"}}, nil
 }
 func (orderTags) GenreSortTypes() []provider.SortType { return []provider.SortType{{ID: "votes"}} }
 func (orderTags) GenreTracks(id, _ string) ([]playlist.Track, error) {
@@ -48,11 +47,12 @@ func openTags(t *testing.T) Model {
 	return m
 }
 
-// The tags list A–Z, and the row the cursor is on is the tag that opens.
-// Back returns to that row, and opening it again opens the same tag.
+// The tags keep the browser's order, most stations first, and the row the
+// cursor is on is the tag that opens. Back returns to that row, and opening
+// it again opens the same tag.
 func TestRadioTagsOpenTheRowSelected(t *testing.T) {
 	m := openTags(t)
-	if got, want := libRowTitles(m), []string{"ambient (300)", "jazz (40)", "rock (900)"}; !slices.Equal(got, want) {
+	if got, want := libRowTitles(m), []string{"rock (900)", "jazz (400)", "ambient (300)"}; !slices.Equal(got, want) {
 		t.Fatalf("tags = %q, want %q", got, want)
 	}
 	m.libTop().cursor = 1
@@ -61,8 +61,8 @@ func TestRadioTagsOpenTheRowSelected(t *testing.T) {
 		t.Fatalf("the second row opened %q, want the jazz tag", got)
 	}
 	m = libPress(t, m, "esc")
-	if f := m.libTop(); f.level.Title() != "Genres & Tags" || f.cursor != 1 || f.entries[f.cursor].Title != "jazz (40)" {
-		t.Fatalf("back on %q at row %d, want Genres & Tags on jazz (40)", f.level.Title(), f.cursor)
+	if f := m.libTop(); f.level.Title() != "Genres & Tags" || f.cursor != 1 || f.entries[f.cursor].Title != "jazz (400)" {
+		t.Fatalf("back on %q at row %d, want Genres & Tags on jazz (400)", f.level.Title(), f.cursor)
 	}
 	m = libPress(t, m, "enter")
 	if got := libRowTitles(m); !slices.Equal(got, []string{"in jazz"}) {
@@ -77,7 +77,7 @@ func TestRadioStationListNoteFits(t *testing.T) {
 	for _, size := range []struct{ w, h int }{{40, 30}, {56, 30}, {80, 24}, {120, 40}} {
 		t.Run(fmt.Sprintf("%dx%d", size.w, size.h), func(t *testing.T) {
 			m := openTags(t)
-			m = resized(t, libEnter(t, m, "jazz (40)"), size.w, size.h)
+			m = resized(t, libEnter(t, m, "jazz (400)"), size.w, size.h)
 			width, rows := m.bodySize()
 			lines := strings.Split(ansi.Strip(m.renderLibraryBody()), "\n")
 			shown := len(m.libNote())
