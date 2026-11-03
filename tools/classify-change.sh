@@ -166,8 +166,10 @@ c0=$'\x01'-$'\x1f'$'\x7f'
 #   interlinear annotation, U+FFFE, U+FFFF   U+FFF9-U+FFFF   ef bf b9-bf
 #   tags                      U+E0000-U+E007F f3 a0 80-81 ..
 #   plane-end non-characters  U+nFFFE, U+nFFFF  f0-f4 (8f|9f|af|bf) bf (be|bf)
-# Surrogates are not valid UTF-8; iconv refuses them. Letters beyond ASCII
-# (é, ß, 日本語, Cyrillic) are allowed.
+# Letters beyond ASCII (é, ß, 日本語, Cyrillic, supplementary planes such as
+# U+1F600) are allowed. Known and accepted: variation selectors, the
+# combining grapheme joiner, Hangul fillers and the like can make two names
+# look alike, but move, break or reorder nothing.
 odd_text() {
 	case $1 in
 	*$'\xc2'[$'\x80'-$'\x9f']* | *$'\xc2\xad'* | *$'\xd8\x9c'* | *$'\xe1\xa0\x8e'* | \
@@ -180,13 +182,50 @@ odd_text() {
 	return 1
 }
 
-# safe_path refuses an empty path, a path with a C0 control or DEL, one
-# that is not valid UTF-8 (iconv decides; without iconv, every path is
-# refused), and one with an odd_text code point. No refused path is printed.
+# not_canonical is true when its argument holds bytes that are never valid
+# UTF-8 as a lead byte, or a lead byte with a second byte outside its range:
+#   C0, C1          overlong two-byte forms
+#   F5-FF           beyond U+10FFFF, and the old five- and six-byte forms
+#   E0 80-9F        overlong three-byte forms
+#   ED A0-BF        encoded surrogates
+#   F0 80-8F        overlong four-byte forms
+#   F4 90-BF        beyond U+10FFFF
+# None of these bytes can be a continuation byte, so valid text never
+# matches. glibc's iconv accepts F4 90.., F5-F7, F8-FB and FC-FD forms, so
+# these checks do not rely on it; iconv still catches what is structural
+# (a lone continuation byte, a truncated sequence, a lead byte before ASCII).
+not_canonical() {
+	case $1 in
+	*[$'\xc0'$'\xc1'$'\xf5'-$'\xff']* | *$'\xe0'[$'\x80'-$'\x9f']* | *$'\xed'[$'\xa0'-$'\xbf']* | \
+		*$'\xf0'[$'\x80'-$'\x8f']* | *$'\xf4'[$'\x90'-$'\xbf']*)
+		return 0
+		;;
+	esac
+	return 1
+}
+
+# text_problem prints why its argument may not be a path or a rule pattern,
+# or nothing: empty, a C0 control or DEL, not valid UTF-8 (the byte checks,
+# then iconv; without iconv, everything is refused), or an odd_text code
+# point. Its argument is never printed.
+text_problem() {
+	case $1 in '' | *[$c0]*) echo "a control character or nothing" && return ;; esac
+	if not_canonical "$1" || ! printf '%s' "$1" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
+		echo "not valid UTF-8 (or no iconv)" && return
+	fi
+	! odd_text "$1" || echo "an invisible, control or non-character code point"
+}
+
+# safe_path refuses a path with a text_problem. No refused path is printed.
 safe_path() {
-	case $1 in '' | *[$c0]*) fail "a path with a control character or none" ;; esac
-	printf '%s' "$1" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 || fail "a path that is not valid UTF-8 (or no iconv)"
-	! odd_text "$1" || fail "a path with an invisible, control or non-character code point"
+	local why
+	why=$(text_problem "$1")
+	case $why in
+	'') ;;
+	'a control character or nothing') fail "a path with a control character or none" ;;
+	'not valid UTF-8'*) fail "a path that is not valid UTF-8 (or no iconv)" ;;
+	*) fail "a path with an invisible, control or non-character code point" ;;
+	esac
 }
 
 # load_rules reads the rules (from $tmp/rules) into classes, patterns and
@@ -203,8 +242,8 @@ load_rules() {
 		*) fail "a malformed rule at line $n" ;;
 		esac
 		cls=${line%% *} pat=${line#* }
-		case $pat in '' | *' '* | *[$c0]*) fail "a malformed rule at line $n" ;; esac
-		! odd_text "$pat" || fail "a malformed rule at line $n"
+		case $pat in *' '*) fail "a malformed rule at line $n" ;; esac
+		[ -z "$(text_problem "$pat")" ] || fail "a malformed rule at line $n"
 		classes+=("$cls") patterns+=("$pat") lines+=("$n")
 	done <"$tmp/rules"
 	[ ${#classes[@]} -gt 0 ] || fail "no rules"

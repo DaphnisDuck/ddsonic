@@ -343,6 +343,64 @@ func TestClassifyChangeRefusesInvalidUTF8(t *testing.T) {
 	}
 }
 
+// Byte forms that glibc's iconv accepts but that are not UTF-8 (beyond
+// U+10FFFF, the old five- and six-byte forms), and forms it refuses
+// (overlong, surrogates), are full in a path, in both starts, and never
+// reach the output; in a rule they make the rules malformed. Supplementary
+// characters, up to U+10FFFF, classify normally.
+func TestClassifyChangeRefusesNonCanonicalUTF8(t *testing.T) {
+	bad := map[string]string{
+		"F4 90 80 80 (above U+10FFFF)": "\xf4\x90\x80\x80", "F4 BF BF BF": "\xf4\xbf\xbf\xbf",
+		"F5 80 80 80": "\xf5\x80\x80\x80", "F7 BF BF BF": "\xf7\xbf\xbf\xbf",
+		"F8 five bytes": "\xf8\x88\x80\x80\x80", "FB five bytes": "\xfb\xbf\xbf\xbf\xbf",
+		"FC six bytes": "\xfc\x84\x80\x80\x80\x80", "FD six bytes": "\xfd\xbf\xbf\xbf\xbf\xbf",
+		"C0 80 overlong": "\xc0\x80", "E0 80 80 overlong": "\xe0\x80\x80", "F0 8F BF BF overlong": "\xf0\x8f\xbf\xbf",
+		"ED A0 80 surrogate": "\xed\xa0\x80",
+	}
+	for name, b := range bad {
+		for _, mode := range []string{supported, bashP} {
+			t.Run(name+", "+mode, func(t *testing.T) {
+				f, base := newFixture(t)
+				f.write("docs/a"+b+"b.md", "x\n")
+				head := f.commit("a non-canonical name")
+				stdout, _ := classifyStreams(t, mode, f.dir, nil, "--base", base, "--head", head)
+				first, rest, _ := strings.Cut(stdout, "\n")
+				if first != "full" || !strings.Contains(rest, "fail-closed: a path that is not valid UTF-8 (or no iconv)") {
+					t.Fatalf("%q, want full with the constant reason\n%s", first, strings.ToValidUTF8(stdout, "?"))
+				}
+				if strings.Contains(stdout, b) {
+					t.Fatalf("the bytes reached the output: %q", stdout)
+				}
+			})
+		}
+		t.Run(name+", in a rule", func(t *testing.T) {
+			f, _ := newFixture(t)
+			f.write("tools/validation-classes.txt", "# rules\ndocs docs/"+b+"*.md\n")
+			base := f.commit("a non-canonical rule")
+			f.write("docs/a.md", "b\n")
+			head := f.commit("change")
+			stdout, _ := classifyStreams(t, bashP, f.dir, nil, "--base", base, "--head", head, "--rules-from", base)
+			first, rest, _ := strings.Cut(stdout, "\n")
+			if first != "full" || !strings.Contains(rest, "fail-closed: a malformed rule at line 2") {
+				t.Fatalf("%q, want full, a malformed rule at line 2\n%s", first, strings.ToValidUTF8(stdout, "?"))
+			}
+			if strings.Contains(stdout, b) {
+				t.Fatalf("the bytes reached the output: %q", stdout)
+			}
+		})
+	}
+	for name, cp := range map[string]string{"U+10000": "\U00010000", "U+1F600": "\U0001f600", "U+10FFFD": "\U0010fffd"} {
+		t.Run(name, func(t *testing.T) {
+			f, base := newFixture(t)
+			f.write("docs/a"+cp+"b.md", "x\n")
+			head := f.commit("a supplementary character")
+			if got, rest := classifyAs(t, supported, f.dir, nil, "--base", base, "--head", head); got != "docs" {
+				t.Fatalf("%s: %q, want docs\n%s", name, got, rest)
+			}
+		})
+	}
+}
+
 // A path with a code point that can move a terminal's cursor, break a
 // line, reorder or hide text, or is not a character, is full, in any
 // locale, and its bytes never reach the output. Letters beyond ASCII, and
