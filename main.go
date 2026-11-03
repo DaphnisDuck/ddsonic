@@ -372,7 +372,7 @@ func run(overrides config.Overrides, positional []string, daemon, visualizer60FP
 		// same order, same titles -- and a new channel needs no code change.
 		// It goes through the normal pending path, so the fetch happens in the
 		// background rather than delaying launch.
-		resolved.Pending = append(resolved.Pending, radio.BuiltinURL)
+		resolved.Pending = append(resolved.Pending, radio.BuiltinURL) // ddsonic: in the M3U's order; the library lists the channels A–Z
 	}
 	pl.Add(resolved.Tracks...)
 

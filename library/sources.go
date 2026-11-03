@@ -264,7 +264,10 @@ func radio(prov, channels playlist.Provider) Level {
 func browseStations(prov, channels playlist.Provider) Level {
 	var entries []Entry
 	if channels != nil {
-		entries = append(entries, Entry{Title: channels.Name(), Open: playlistsLevel(channels.Name(), channels, nil, func(info playlist.PlaylistInfo) Entry {
+		// The channels list A–Z, as stations do. The startup queue of live
+		// channels (main.go, streams.m3u) is a separate list and keeps the
+		// server's order.
+		entries = append(entries, Entry{Title: channels.Name(), Open: playlistsLevel(channels.Name(), sortedPlaylists{channels}, nil, func(info playlist.PlaylistInfo) Entry {
 			return Entry{Title: info.Name, Play: func(context.Context) ([]playlist.Track, error) {
 				return channels.Tracks(info.ID)
 			}}
@@ -290,10 +293,11 @@ func browseStations(prov, channels playlist.Provider) Level {
 	return Menu("Browse Stations", entries...)
 }
 
-// genresLevel lists a GenreBrowser's categories; each opens its stations,
-// A–Z. The directory still picks which stations a category shows (its
-// first sort type, most voted for radio); only their order is the
-// library's.
+// genresLevel lists a GenreBrowser's categories, A–Z for a namedGenres
+// browser; each opens its stations, A–Z. The directory still picks which
+// stations a category shows (its first sort type, most voted for radio);
+// only their order is the library's, and the provider's StationSelection
+// says which they are.
 func genresLevel(prov playlist.Provider, gb provider.GenreBrowser, title string) Level {
 	sort := ""
 	if types := gb.GenreSortTypes(); len(types) > 0 {
@@ -304,11 +308,13 @@ func genresLevel(prov playlist.Provider, gb provider.GenreBrowser, title string)
 		if err != nil {
 			return nil, err
 		}
+		if _, ok := gb.(namedGenres); ok {
+			genres = sortedGenres(genres)
+		}
 		entries := make([]Entry, len(genres))
 		for i, g := range genres {
-			entries[i] = Entry{Title: g.Name, Section: g.Group, Favorite: g.Favorite, Open: TrackLevel(g.Name, prov, func(context.Context) ([]playlist.Track, error) {
-				tracks, err := gb.GenreTracks(g.ID, sort)
-				return sortedStations(tracks), err
+			entries[i] = Entry{Title: g.Name, Section: g.Group, Favorite: g.Favorite, Open: directoryStationsLevel(g.Name, prov, func() ([]playlist.Track, error) {
+				return gb.GenreTracks(g.ID, sort)
 			})}
 		}
 		return groupBySection(entries), nil

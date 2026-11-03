@@ -4,6 +4,7 @@ import (
 	"math/rand/v2"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/bjarneo/cliamp/catalog"
@@ -142,6 +143,7 @@ func (r *shuffledRadio) FavoriteTracks() []playlist.Track { return slices.Clone(
 func (r *shuffledRadio) SearchStationTracks(string) ([]playlist.Track, error) {
 	return slices.Clone(r.stations), nil
 }
+func (*shuffledRadio) StationSelection() string { return "Top 200 by votes" }
 func (r *shuffledRadio) BrowseEntries() []provider.BrowseEntry {
 	return []provider.BrowseEntry{
 		{ID: "Countries", Name: "Browse all countries", Mode: provider.BrowseGenres},
@@ -149,24 +151,50 @@ func (r *shuffledRadio) BrowseEntries() []provider.BrowseEntry {
 	}
 }
 func (r *shuffledRadio) GenreBrowserFor(id string) provider.GenreBrowser {
-	return &shuffledGenres{r, id}
+	if id == "Genres & Tags" {
+		return &shuffledTags{shuffledGenres{r, id, unsortedTags}}
+	}
+	return &shuffledGenres{r, id, unsortedCountries}
 }
 
+// shuffledGenres is a category browser. A category's stations are the
+// radio's for "jazz", and one station named after the category otherwise,
+// so a row shows which category it opened.
 type shuffledGenres struct {
-	r    *shuffledRadio
-	name string
+	r      *shuffledRadio
+	name   string
+	genres []provider.GenreInfo
 }
 
-func (g *shuffledGenres) GenreLabel() string { return g.name }
-func (g *shuffledGenres) Genres() ([]provider.GenreInfo, error) {
-	return []provider.GenreInfo{{ID: "jazz", Name: "jazz (6)"}}, nil
-}
+func (g *shuffledGenres) GenreLabel() string                    { return g.name }
+func (g *shuffledGenres) Genres() ([]provider.GenreInfo, error) { return g.genres, nil }
 func (*shuffledGenres) GenreSortTypes() []provider.SortType {
 	return []provider.SortType{{ID: "votes"}}
 }
-func (g *shuffledGenres) GenreTracks(string, string) ([]playlist.Track, error) {
-	return slices.Clone(g.r.stations), nil
+func (g *shuffledGenres) GenreTracks(id, _ string) ([]playlist.Track, error) {
+	if id == "jazz" {
+		return slices.Clone(g.r.stations), nil
+	}
+	return []playlist.Track{st("in "+id, "https://"+id)}, nil
 }
+
+// shuffledTags is a tag browser: the library lists its categories by name.
+type shuffledTags struct{ shuffledGenres }
+
+func (*shuffledTags) GenresByName() {}
+
+// Countries arrive grouped by region, most stations first; tags most
+// stations first, as the directory gives them.
+var (
+	unsortedCountries = []provider.GenreInfo{
+		{ID: "jazz", Name: "Sweden", Group: "Europe"}, {ID: "AR", Name: "Argentina", Group: "Americas"},
+		{ID: "NO", Name: "Norway", Group: "Europe", Favorite: true},
+	}
+	unsortedTags = []provider.GenreInfo{
+		{ID: "rock", Name: "rock (900)"}, {ID: "ambient", Name: "ambient (300)"}, {ID: "Jazz", Name: "Jazz (50)"},
+		{ID: "jazz", Name: "jazz (40)"}, {ID: "électro", Name: "électro (12)"},
+	}
+)
 
 func trackRows(t *testing.T, entries []Entry) []string {
 	t.Helper()
@@ -183,31 +211,54 @@ func trackRows(t *testing.T, entries []Entry) []string {
 	return out
 }
 
+func directorySearch(t *testing.T, prov playlist.Provider) Level {
+	t.Helper()
+	for _, e := range (&catalogView{radioProv: prov}).beyond(catalog.ParseQuery("jazz")) {
+		if e.Open != nil {
+			return e.Open
+		}
+	}
+	t.Fatal("no \"Search the radio directory\" row")
+	return nil
+}
+
+func noteOf(l Level) []string {
+	if nl, ok := l.(NotedLevel); ok {
+		return nl.Note()
+	}
+	return nil
+}
+
 // Favorites, a country's and a tag's stations, and the radio directory's
 // search results all list stations A–Z, whatever order the provider gave.
+// The directory's lists say which of its stations they are; Favorites,
+// all of them, says nothing.
 func TestStationListsSortAZ(t *testing.T) {
 	prov := &shuffledRadio{fakeProvider: fakeProvider{name: "Radio"}, stations: unsortedStations}
 	r := radio(prov, nil)
 	browse := child(t, r, "Browse Stations")
-	search := &catalogView{radioProv: prov}
-	var directory Level
-	for _, e := range search.beyond(catalog.ParseQuery("jazz")) {
-		if e.Open != nil {
-			directory = e.Open
+	selected := []string{"Top 200 by votes, listed A–Z."}
+	lists := []struct {
+		name string
+		l    Level
+		note []string
+	}{
+		{"Favorites", child(t, r, "Favorites"), nil},
+		{"a country's stations", child(t, child(t, browse, "Countries"), "Sweden"), selected},
+		{"a tag's stations", child(t, child(t, browse, "Genres & Tags"), "jazz (40)"), selected},
+		{"radio directory's search", directorySearch(t, prov), selected},
+	}
+	for _, tc := range lists {
+		entries := load(t, tc.l)
+		if got := trackRows(t, entries); !slices.Equal(got, stationsAZ) {
+			t.Errorf("%s = %q\nwant %q", tc.name, got, stationsAZ)
 		}
-	}
-	if directory == nil {
-		t.Fatal("no \"Search the radio directory\" row")
-	}
-	lists := map[string]Level{
-		"Favorites":                child(t, r, "Favorites"),
-		"a country's stations":     child(t, child(t, browse, "Countries"), "jazz (6)"),
-		"a tag's stations":         child(t, child(t, browse, "Genres & Tags"), "jazz (6)"),
-		"radio directory's search": directory,
-	}
-	for name, l := range lists {
-		if got := trackRows(t, load(t, l)); !slices.Equal(got, stationsAZ) {
-			t.Errorf("%s = %q\nwant %q", name, got, stationsAZ)
+		if got := noteOf(tc.l); !slices.Equal(got, tc.note) {
+			t.Errorf("%s note = %q, want %q", tc.name, got, tc.note)
+		}
+		// Playing from the list queues it as shown.
+		if queued, at := Tracks(entries, 2); !slices.Equal(stationNames(queued), stationsAZ) || at != 2 {
+			t.Errorf("%s plays %q from %d, want the list as shown from 2", tc.name, stationNames(queued), at)
 		}
 	}
 	if !slices.Equal(stationNames(prov.stations), stationNames(unsortedStations)) {
@@ -215,14 +266,90 @@ func TestStationListsSortAZ(t *testing.T) {
 	}
 }
 
-// The cliamp radio channels keep the order the channel list gives: it is
-// cliamp radio's own order, and the startup queue plays them in it.
-func TestCliampRadioChannelsKeepTheirOrder(t *testing.T) {
-	channels := &fakeProvider{name: "cliamp radio", lists: []playlist.PlaylistInfo{
-		{ID: "z", Name: "Zen"}, {ID: "a", Name: "Ambient · live"}, {ID: "m", Name: "Mixed"},
-	}}
+// A provider that does not say what its directory lists hold gets no note.
+func TestStationListWithoutSelectionHasNoNote(t *testing.T) {
+	l := directorySearch(t, &directoryRadio{fakeProvider{name: "Radio"}})
+	if note := noteOf(l); note != nil {
+		t.Errorf("note = %q, want none", note)
+	}
+	if rows := load(t, l); len(rows) != 1 || rows[0].Track == nil {
+		t.Errorf("directory search = %+v, want its one station", rows)
+	}
+}
+
+// Genres & Tags lists its tags A–Z by the label each row shows, count and
+// all, and each row still opens its own tag. Countries keep the browser's
+// order: grouped by region, the provider's order within one.
+func TestRadioCategories(t *testing.T) {
+	prov := &shuffledRadio{fakeProvider: fakeProvider{name: "Radio"}, stations: unsortedStations}
+	browse := child(t, radio(prov, nil), "Browse Stations")
+
+	tags := load(t, child(t, browse, "Genres & Tags"))
+	if got, want := titles(tags), []string{"ambient (300)", "électro (12)", "jazz (40)", "Jazz (50)", "rock (900)"}; !slices.Equal(got, want) {
+		t.Errorf("tags = %q, want %q", got, want)
+	}
+	for _, e := range tags {
+		if e.Title == "jazz (40)" {
+			continue
+		}
+		id := e.Title[:strings.IndexByte(e.Title, ' ')]
+		if got := trackRows(t, load(t, e.Open)); !slices.Equal(got, []string{"in " + id + " <https://" + id + ">"}) {
+			t.Errorf("tag row %q opens %q, want tag %q", e.Title, got, id)
+		}
+	}
+	if e := tags[2]; e.Open.Title() != "jazz (40)" || len(load(t, e.Open)) != len(unsortedStations) {
+		t.Errorf("tag row %q opens %q", e.Title, e.Open.Title())
+	}
+	if !slices.Equal(titles(load(t, child(t, browse, "Genres & Tags"))), titles(tags)) {
+		t.Error("tags reopen in another order")
+	}
+
+	countries := load(t, child(t, browse, "Countries"))
+	if got, want := titles(countries), []string{"Sweden", "Norway", "Argentina"}; !slices.Equal(got, want) {
+		t.Errorf("countries = %q, want the browser's order by region %q", got, want)
+	}
+	if !countries[1].Favorite || countries[1].Section != "Europe" {
+		t.Errorf("Norway = %+v, want a pinned place in Europe", countries[1])
+	}
+	if !slices.Equal(titles(sliceEntries(unsortedTags)), []string{"rock (900)", "ambient (300)", "Jazz (50)", "jazz (40)", "électro (12)"}) {
+		t.Error("listing sorted the browser's own tags")
+	}
+}
+
+func sliceEntries(genres []provider.GenreInfo) []Entry {
+	out := make([]Entry, len(genres))
+	for i, g := range genres {
+		out[i] = Entry{Title: g.Name}
+	}
+	return out
+}
+
+// The cliamp radio channels list A–Z by the name each row shows, " · live"
+// and all, and each row plays its own channel. The channel list itself is
+// left as the provider holds it.
+func TestCliampRadioChannelsSortAZ(t *testing.T) {
+	lists := []playlist.PlaylistInfo{
+		{ID: "z", Name: "Zen"}, {ID: "a", Name: "Ambient · live"}, {ID: "m", Name: "Mixed", TrackCount: 40},
+		{ID: "c", Name: "ambient"}, {ID: "b", Name: "Ambient · live"},
+	}
+	channels := &fakeProvider{name: "cliamp radio", lists: slices.Clone(lists), tracks: map[string][]playlist.Track{}}
+	for _, l := range lists {
+		channels.tracks[l.ID] = []playlist.Track{st(l.Name, "https://"+l.ID)}
+	}
 	rows := load(t, child(t, child(t, radio(&fakeRadio{fakeProvider{name: "Radio"}}, channels), "Browse Stations"), "cliamp radio"))
-	if got := titles(rows); !slices.Equal(got, []string{"Zen", "Ambient · live", "Mixed"}) {
-		t.Errorf("channels = %v, want the channel list's own order", got)
+	if got, want := titles(rows), []string{"ambient", "Ambient · live", "Ambient · live", "Mixed", "Zen"}; !slices.Equal(got, want) {
+		t.Fatalf("channels = %q, want %q", got, want)
+	}
+	for i, wantID := range []string{"c", "a", "b", "m", "z"} {
+		played, err := rows[i].Play(t.Context())
+		if err != nil || len(played) != 1 || played[0].Path != "https://"+wantID {
+			t.Errorf("row %d (%q) plays %+v, %v; want channel %q", i, rows[i].Title, played, err, wantID)
+		}
+	}
+	if noteOf(child(t, child(t, radio(&fakeRadio{fakeProvider{name: "Radio"}}, channels), "Browse Stations"), "cliamp radio")) != nil {
+		t.Error("the channels have a note")
+	}
+	if !slices.EqualFunc(channels.lists, lists, func(a, b playlist.PlaylistInfo) bool { return a == b }) {
+		t.Error("listing sorted the provider's own channel list")
 	}
 }
