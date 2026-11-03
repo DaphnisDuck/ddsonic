@@ -3,7 +3,15 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 BINARY  ?= ddsonic
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: build test vet lint staticcheck fmt fmt-check coverage security ci check clean install acceptance acceptance-validate sdk-contract
+# ddsonic: the pinned developer tools (tools/devtools.sh, `make tools`) live
+# outside the repository; their bin/ comes first on PATH when it exists. CI
+# has no such directory and installs the tools its own way.
+DEVTOOLS ?= $(HOME)/.local/share/ddsonic/devtools
+ifneq ($(wildcard $(DEVTOOLS)/bin/.),)
+export PATH := $(DEVTOOLS)/bin:$(PATH)
+endif
+
+.PHONY: build test vet lint staticcheck fmt fmt-check coverage security ci check clean install acceptance acceptance-validate sdk-contract tools preflight preflight-core preflight-contract ci-checks ci-tail
 
 build:
 	go build -trimpath -ldflags="$(LDFLAGS)" -o $(BINARY) .
@@ -15,10 +23,10 @@ vet:
 	go vet ./...
 
 lint: vet
-	@if command -v staticcheck >/dev/null 2>&1; then staticcheck ./...; else echo "staticcheck not installed — skipping (go install honnef.co/go/tools/cmd/staticcheck@latest)"; fi
+	@if command -v staticcheck >/dev/null 2>&1; then staticcheck ./...; else echo "staticcheck not installed — skipping (make tools installs the pinned one)"; fi
 
 staticcheck:
-	@command -v staticcheck >/dev/null 2>&1 || { echo "staticcheck is required"; exit 1; }
+	@command -v staticcheck >/dev/null 2>&1 || { echo "staticcheck is required: make tools"; exit 1; }
 	staticcheck ./...
 
 fmt:
@@ -32,14 +40,36 @@ coverage:
 	go tool cover -func=coverage.out
 
 security:
-	@command -v govulncheck >/dev/null 2>&1 || { echo "govulncheck is required"; exit 1; }
+	@command -v govulncheck >/dev/null 2>&1 || { echo "govulncheck is required: make tools"; exit 1; }
 	govulncheck ./...
 
-ci: fmt-check vet staticcheck security
+# ddsonic: the pinned tools (CI's pins) into $(DEVTOOLS)/bin, and the module
+# archives the contract gate reads offline. Idempotent.
+tools:
+	DDSONIC_DEVTOOLS=$(DEVTOOLS) sh tools/devtools.sh install
+
+# ddsonic: a fast check, without network, that the tools PATH finds are at the
+# pins and the gate's archives are cached; it names the remedy. make ci and
+# make sdk-contract run it before anything expensive.
+preflight:
+	@DDSONIC_DEVTOOLS=$(DEVTOOLS) sh tools/devtools.sh preflight all
+preflight-core:
+	@DDSONIC_DEVTOOLS=$(DEVTOOLS) sh tools/devtools.sh preflight core
+preflight-contract:
+	@DDSONIC_DEVTOOLS=$(DEVTOOLS) sh tools/devtools.sh preflight contract
+
+# ddsonic: the full validation, after the preflight.
+ci: preflight
+	$(MAKE) ci-checks
 	go test -count=1 -race ./...
 	$(MAKE) sdk-contract
 	$(MAKE) coverage
-	shellcheck packaging/*.sh
+	$(MAKE) ci-tail
+
+ci-checks: fmt-check vet staticcheck security
+
+ci-tail:
+	shellcheck packaging/*.sh tools/*.sh
 	git diff --exit-code
 
 check: fmt vet test
@@ -64,7 +94,7 @@ check: fmt vet test
 # once with `go mod download github.com/devgianlu/go-librespot@v0.9.1` in a
 # scratch module, or carry it in the release cache. No extracted copy is
 # needed. It fails, and never skips, when one of those is missing.
-sdk-contract:
+sdk-contract: preflight-contract
 	go test -tags sdkcontract -count=1 -timeout 30m ./external/spotify/sdkcontract
 
 # ddsonic: release acceptance (docs/ddsonic/acceptance.md). acceptance runs the
