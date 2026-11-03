@@ -181,19 +181,137 @@ func TestClassifyChange(t *testing.T) {
 	}
 }
 
-// A change that loosens the rules is classified by the base's rules: it
-// cannot classify itself downward. Read from the change's own copy, the
-// same rules would have said docs.
+// A change that loosens the rules is classified by the base's rules: by
+// default, with --base alone, the rules come from that same commit, and the
+// "# " line says so. Asking for the change's own rules is refused; only the
+// dev-mode rules file, which make validate and CI never pass, would let the
+// change's rules classify it, and the "# " line says that too.
 func TestClassifyChangeUsesTheBaseRules(t *testing.T) {
 	f, base := newFixture(t)
 	f.write("tools/validation-classes.txt", "docs *\n")
 	f.write("library/x.go", "package library\n// more\n")
 	head := f.commit("loosen the rules")
-	if got, rest := classify(t, f.dir, nil, "--base", base, "--head", head, "--rules-from", base); got != "full" {
-		t.Fatalf("with the base's rules: %q, want full\n%s", got, rest)
+	got, rest := classify(t, f.dir, nil, "--base", base, "--head", head)
+	if got != "full" {
+		t.Fatalf("by default: %q, want full by the base's rules\n%s", got, rest)
 	}
-	if got, _ := classify(t, f.dir, nil, "--base", base, "--head", head, "--rules-from", head); got != "docs" {
-		t.Fatalf("with the change's own rules: %q; the test expects docs, which is why the base's are used", got)
+	meta := "# base=" + base + " head=" + head + " rules=" + base + ":tools/validation-classes.txt"
+	if line, _, _ := strings.Cut(rest, "\n"); line != meta {
+		t.Errorf("the # line is %q, want %q", line, meta)
+	}
+	if got, rest := classify(t, f.dir, nil, "--base", base, "--head", head, "--rules-from", head); got != "full" || !strings.Contains(rest, "is not the base") {
+		t.Fatalf("with --rules-from the change: %q, want full, fail-closed\n%s", got, rest)
+	}
+	got, rest = classify(t, f.dir, nil, "--rules", "tools/validation-classes.txt", "--base", base, "--head", head)
+	if got != "docs" || !strings.Contains(rest, "(dev mode)") {
+		t.Fatalf("dev mode with the change's rules file: %q; the test expects docs, reported as dev mode\n%s", got, rest)
+	}
+}
+
+// The caller's shell state does not change the classification: inherited
+// bash options (nocasematch would let DOCS/new.md match docs/*.md), a
+// BASH_ENV that sets them, SHELLOPTS and an odd IFS.
+func TestClassifyChangeIgnoresShellState(t *testing.T) {
+	f, base := newFixture(t)
+	f.write("DOCS/new.md", "x\n")
+	head := f.commit("an unknown path that only nocasematch would match")
+	g, gbase := newFixture(t)
+	g.write("docs/a.md", "b\n")
+	ghead := g.commit("a docs change")
+	bashenv := filepath.Join(t.TempDir(), "bashenv")
+	if err := os.WriteFile(bashenv, []byte("shopt -s nocasematch extglob globstar nullglob\nIFS=x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name, env := range map[string][]string{
+		"BASHOPTS=nocasematch":   {"BASHOPTS=nocasematch:extglob:globstar"},
+		"SHELLOPTS":              {"SHELLOPTS=allexport:noglob"},
+		"BASH_ENV":               {"BASH_ENV=" + bashenv},
+		"IFS":                    {"IFS=/"},
+		"all, and a fake marker": {"DDSONIC_CLASSIFY_CLEAN=1", "BASHOPTS=nocasematch", "BASH_ENV=" + bashenv, "IFS=/"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got, rest := classify(t, f.dir, env, "--base", base, "--head", head); got != "full" || !strings.Contains(rest, "no rule matches") {
+				t.Errorf("DOCS/new.md: %q, want full (no rule matches)\n%s", got, rest)
+			}
+			if got, rest := classify(t, g.dir, env, "--base", gbase, "--head", ghead); got != "docs" {
+				t.Errorf("a docs change: %q, want docs\n%s", got, rest)
+			}
+		})
+	}
+}
+
+// A BASH_ENV runs in the caller's bash before the script does, and could
+// define functions the script calls (here an iconv that accepts anything).
+// The clean restart under env -i leaves them behind.
+func TestClassifyChangeIgnoresBashEnvFunctions(t *testing.T) {
+	f, base := newFixture(t)
+	f.write("docs/\xff.md", "x\n")
+	head := f.commit("an invalid name")
+	bashenv := filepath.Join(t.TempDir(), "bashenv")
+	if err := os.WriteFile(bashenv, []byte("iconv() { cat >/dev/null; return 0; }\nexport -f iconv\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, rest := classify(t, f.dir, []string{"BASH_ENV=" + bashenv}, "--base", base, "--head", head); got != "full" || !strings.Contains(rest, "not valid UTF-8") {
+		t.Fatalf("with a BASH_ENV iconv: %q, want full, not valid UTF-8\n%s", got, rest)
+	}
+}
+
+// A path that is not valid UTF-8 is full, even where its bytes would match a
+// docs rule; valid UTF-8 beyond ASCII classifies normally.
+func TestClassifyChangeRefusesInvalidUTF8(t *testing.T) {
+	for _, name := range []string{"docs/\xff.md", "docs/\xc3\x28.md", "docs/a\xe2\x82.md"} {
+		t.Run(strings.ToValidUTF8(name, "?"), func(t *testing.T) {
+			f, base := newFixture(t)
+			f.write(name, "x\n")
+			head := f.commit("an invalid name")
+			if got, rest := classify(t, f.dir, nil, "--base", base, "--head", head); got != "full" || !strings.Contains(rest, "not valid UTF-8") {
+				t.Fatalf("%q: %q, want full, not valid UTF-8\n%s", name, got, rest)
+			}
+		})
+	}
+	f, base := newFixture(t)
+	f.write("docs/日本語.md", "x\n")
+	head := f.commit("a valid name")
+	if got, rest := classify(t, f.dir, nil, "--base", base, "--head", head); got != "docs" {
+		t.Fatalf("a valid UTF-8 name: %q, want docs\n%s", got, rest)
+	}
+}
+
+// --paths uses the rules it is given: a rules file that says docs for a
+// probe path changes the answer from the default, full.
+func TestClassifyPathsUsesTheGivenRules(t *testing.T) {
+	rules := filepath.Join(t.TempDir(), "rules")
+	if err := os.WriteFile(rules, []byte("docs probe/*\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, def := classify(t, ".", nil, "--paths", "probe/x")
+	meta, given := classify(t, ".", nil, "--rules", rules, "--paths", "probe/x")
+	if !strings.Contains(def, "probe/x\tfull\t") || !strings.Contains(given, "probe/x\tdocs\t") || meta != "# rules=file:"+rules+" (dev mode)" {
+		t.Fatalf("default:\n%s\ngiven rules:\n%s\nwant full, then docs from the given file", def, given)
+	}
+}
+
+// The local default fetches main only from the project's GitHub URL, and
+// only when the repository's config cannot redirect the fetch. Each of
+// these is refused before any network access.
+func TestClassifyChangeTrustsOnlyTheProjectOrigin(t *testing.T) {
+	for name, config := range map[string][][]string{
+		"origin is a local path":       {{"remote.origin.url", "/tmp/elsewhere"}},
+		"origin is another repository": {{"remote.origin.url", "https://github.com/someone/ddsonic.git"}},
+		"a URL rewrite":                {{"remote.origin.url", "https://github.com/DaphnisDuck/ddsonic.git"}, {"url./tmp/elsewhere.insteadOf", "https://github.com/"}},
+		"an include":                   {{"remote.origin.url", "https://github.com/DaphnisDuck/ddsonic.git"}, {"include.path", "/tmp/other.config"}},
+		"an ssh command":               {{"remote.origin.url", "git@github.com:DaphnisDuck/ddsonic.git"}, {"core.sshCommand", "/tmp/evil"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, _ := newFixture(t)
+			for _, kv := range config {
+				f.git("config", "--local", kv[0], kv[1])
+			}
+			got, rest := classify(t, f.dir, nil)
+			if got != "full" || !strings.Contains(rest, "fail-closed:") || strings.Contains(rest, "cannot fetch") {
+				t.Fatalf("%q, want full, refused before fetching\n%s", got, rest)
+			}
+		})
 	}
 }
 
@@ -215,9 +333,13 @@ func TestClassifyChangeFailsClosed(t *testing.T) {
 		{"rules from an option", nil, []string{"--base", base, "--head", head, "--rules-from", "-p"}, "refused ref"},
 		{"a missing value", nil, []string{"--base"}, "--base needs a value"},
 		{"an unknown argument", nil, []string{"--everything-is-docs"}, "unknown argument"},
-		{"an empty diff", nil, []string{"--base", head, "--head", head, "--rules-from", base}, "an empty diff"},
+		{"an empty diff", nil, []string{"--base", head, "--head", head}, "an empty diff"},
 		{"rules that do not exist", nil, []string{"--base", base, "--head", head, "--rules", "/nonexistent"}, "cannot read the rules file"},
-		{"no fetchable origin (the local default)", nil, []string{"--rules-from", base}, "cannot fetch origin main"},
+		{"no origin (the local default)", nil, []string{"--rules-from", base}, "no origin remote"},
+		{"rules from a commit other than the base", nil, []string{"--base", base, "--head", head, "--rules-from", head}, "--rules-from " + head + " is not the base"},
+		{"--rules-from with --rules", nil, []string{"--base", base, "--head", head, "--rules-from", base, "--rules", "x"}, "--rules-from and --rules together"},
+		{"an option after --paths", nil, []string{"--paths", "--rules", "tools/validation-classes.txt", "docs/a.md"}, "an option after --paths"},
+		{"--paths with a base", nil, []string{"--base", base, "--paths", "docs/a.md"}, "--paths takes no --base"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -309,7 +431,7 @@ func TestClassifyChangeWorkingTree(t *testing.T) {
 
 // The classifier, its rules and these tests are full by their own rules.
 func TestClassifierFilesAreFull(t *testing.T) {
-	_, rest := classify(t, ".", nil, "--paths", "--rules", "tools/validation-classes.txt",
+	_, rest := classify(t, ".", nil, "--rules", "tools/validation-classes.txt", "--paths",
 		"tools/classify-change.sh", "tools/validation-classes.txt", "classify_ddsonic_test.go", "citations_ddsonic_test.go", ".github/workflows/ci.yml", "Makefile")
 	for _, line := range strings.Split(strings.TrimSpace(rest), "\n") {
 		if f := strings.Split(line, "\t"); len(f) < 2 || f[1] != "full" {
@@ -395,7 +517,7 @@ func TestReadOrEmbeddedFilesAreCodeOrAbove(t *testing.T) {
 	for p := range named {
 		paths = append(paths, p)
 	}
-	_, rest := classify(t, ".", nil, append([]string{"--paths", "--rules", "tools/validation-classes.txt"}, paths...)...)
+	_, rest := classify(t, ".", nil, append([]string{"--rules", "tools/validation-classes.txt", "--paths"}, paths...)...)
 	for _, line := range strings.Split(strings.TrimSpace(rest), "\n") {
 		f := strings.Split(line, "\t")
 		if len(f) < 2 {

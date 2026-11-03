@@ -1,50 +1,89 @@
 #!/usr/bin/env bash
 # ddsonic: classifies a change for proportional validation
 # (docs/ddsonic/acceptance.md, "Proportional validation"). It prints the
-# change's class on its first line, exactly one of docs, test, code or full,
-# then one line per changed path: class, status, path, the reason. It always
-# exits 0 once it has printed a class. Anything it cannot decide safely is
-# full, with the reason "fail-closed: ...". A consumer must treat any first
-# line other than exactly docs, test or code as full.
+# change's class on its first line, exactly one of docs, test, code or full;
+# a second line starting with "# " says what it compared (the base, the head
+# and where the rules came from); then one line per changed path: class,
+# status, path, the reason. It exits 0 once it has printed a class. Anything
+# it cannot decide safely is full, with the reason "fail-closed: ...". A
+# consumer must treat any first line other than exactly docs, test or code
+# as full.
 #
-#   tools/classify-change.sh [--base REF] [--head REF] [--rules-from REF | --rules FILE]
-#   tools/classify-change.sh --paths [--rules-from REF | --rules FILE] PATH...
+#   tools/classify-change.sh [--base REF] [--head REF] [--rules-from REF]
+#   tools/classify-change.sh [--rules-from REF | --rules FILE] --paths PATH...
+#   tools/classify-change.sh --rules FILE [--base REF] [--head REF]   (dev mode)
 #
-# --base   the commit the change is measured from; the diff starts at its
-#          merge base with the head. Without --base, origin/main is fetched
-#          now (the only network access) and used; a failed fetch is full.
+# --base   the trusted commit the change is measured from; the diff starts at
+#          its merge base with the head. The rules are read from this same
+#          commit, so a change cannot loosen the rules that classify it.
+#          Without --base, main is fetched from the project's GitHub
+#          repository into refs/ddsonic/classify-base (the only network access
+#          and the only write) and used; an unexpected origin, a repository
+#          config that rewrites URLs or includes other files, or a failed
+#          fetch is full.
 # --head   the commit to classify. Without --head, the working tree: HEAD, the
 #          uncommitted changes to tracked files and the untracked files.
-# --rules-from  read tools/validation-classes.txt from that commit, as CI and
-#          make validate do with the base, so that a change cannot loosen the
-#          rules that classify it. Without it, --rules or the working tree's.
-# --paths  classify the given paths by the rules alone (one line each, no
-#          overall class); for the tests.
+# --rules-from  must name the same commit as --base (it exists for clarity);
+#          any other commit is full. With --paths, the commit to read the rules
+#          from.
+# --rules FILE  dev mode: rules from a file, reported as such on the "# "
+#          line. make validate and CI never use it.
+# --paths  last: everything after it is a path to classify by the rules alone
+#          (one line each, no overall class); an option after it is full.
 #
-# It reads the repository and changes nothing in it, and treats every path,
-# rule and ref as data: rules are read line by line, never sourced, and refs
-# are checked and resolved to commit IDs before use.
+# It reads the repository and changes nothing in it but that one ref, and
+# treats every path, rule and ref as data: rules are read line by line, never
+# sourced, refs are checked and resolved to commit IDs before use, and paths
+# are never passed to a command.
+
+# A clean start: none of the caller's environment (BASHOPTS, SHELLOPTS,
+# BASH_ENV, IFS, GIT_* and the rest) reaches the classification. The script
+# runs itself again under env -i with a fixed environment, unless it already
+# is that run; an inherited marker alone does not count, as the environment
+# must also hold nothing else.
+clean_env() {
+	local v
+	[ "${DDSONIC_CLASSIFY_CLEAN:-}" = 1 ] || return 1
+	for v in $(compgen -e); do
+		case $v in DDSONIC_CLASSIFY_CLEAN | PATH | LC_ALL | HOME | PWD | OLDPWD | SHLVL | _) ;; *) return 1 ;; esac
+	done
+}
+if ! clean_env; then
+	if [ ! -x /usr/bin/env ] || [ ! -x /bin/bash ]; then
+		printf 'full\n# fail-closed\nfull\t-\t-\tfail-closed: no /usr/bin/env or /bin/bash for a clean start\n'
+		exit 0
+	fi
+	exec /usr/bin/env -i DDSONIC_CLASSIFY_CLEAN=1 PATH=/usr/local/bin:/usr/bin:/bin LC_ALL=C HOME=/nonexistent \
+		/bin/bash --noprofile --norc -- "$0" "$@"
+fi
+# Then the shell's own state, whatever this bash started with: default
+# options, the default IFS, no inherited functions.
+set +o allexport +o noglob +o errexit
 set -u
-export LC_ALL=C
-export PATH=/usr/local/bin:/usr/bin:/bin
-# Only the repository it runs in, read with no outside configuration: git's
-# environment overrides (GIT_DIR, GIT_WORK_TREE, GIT_CONFIG_*, GIT_EXTERNAL_DIFF
-# and the rest) and the user's and system configuration are dropped.
+shopt -u nocasematch nocaseglob extglob globstar nullglob failglob dotglob expand_aliases
+IFS=$' \t\n'
+unset -v CDPATH GLOBIGNORE BASH_ENV ENV
 for v in $(compgen -e); do
 	case $v in GIT_*) unset "$v" ;; esac
 done
+export LC_ALL=C PATH=/usr/local/bin:/usr/bin:/bin
+# Git reads no outside configuration (the user's and the system's are
+# dropped), runs no hooks and allows no ext:: or file:// transport.
 export GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
-git() { command git -c core.quotepath=false -c core.fsmonitor=false -c diff.external= "$@"; }
+git() {
+	command git -c core.quotepath=false -c core.fsmonitor=false -c diff.external= \
+		-c core.hooksPath=/dev/null -c protocol.ext.allow=never -c protocol.file.allow=never "$@"
+}
 
 tmp=$(mktemp -d) || {
-	printf 'full\nfull\t-\t-\tfail-closed: no temporary directory\n'
+	printf 'full\n# fail-closed\nfull\t-\t-\tfail-closed: no temporary directory\n'
 	exit 0
 }
 trap 'rm -rf "$tmp"' EXIT
 
 # fail ends the classification as full, with its reason.
 fail() {
-	printf 'full\nfull\t-\t-\tfail-closed: %s\n' "$1"
+	printf 'full\n# fail-closed\nfull\t-\t-\tfail-closed: %s\n' "$1"
 	exit 0
 }
 
@@ -78,32 +117,46 @@ while [ $# -gt 0 ]; do
 	*) fail "unknown argument '$1'" ;;
 	esac
 done
+if [ -n "$paths_mode" ]; then
+	for p in "$@"; do
+		case $p in --*) fail "an option after --paths ('$p'): options come before it" ;; esac
+	done
+	[ -z "$base$head" ] || fail "--paths takes no --base or --head"
+fi
+[ -z "$rules_from" ] || [ -z "$rules_file" ] || fail "--rules-from and --rules together"
 
 top=$(git rev-parse --show-toplevel 2>/dev/null) || fail "not in a git work tree"
 cd "$top" || fail "cannot enter the work tree"
 
-# The rules: from a commit (the base, in CI and make validate), a file, or
-# the working tree's copy.
-if [ -n "$rules_from" ]; then
-	resolve rid "$rules_from"
-	git cat-file blob "$rid:tools/validation-classes.txt" >"$tmp/rules" 2>/dev/null || fail "no tools/validation-classes.txt in $rid"
-elif [ -n "$rules_file" ]; then
-	cat -- "$rules_file" >"$tmp/rules" 2>/dev/null || fail "cannot read the rules file"
-else
-	cat tools/validation-classes.txt >"$tmp/rules" 2>/dev/null || fail "cannot read tools/validation-classes.txt"
-fi
+# safe_path refuses a path with a control character, or one that is not
+# valid UTF-8 (iconv decides; without iconv, every path is refused).
+safe_path() {
+	case $1 in '' | *[[:cntrl:]]*) fail "a path with a control character or none" ;; esac
+	printf '%s' "$1" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 || fail "a path that is not valid UTF-8 (or no iconv)"
+}
+
+# load_rules reads the rules (from $tmp/rules) into classes and patterns.
 classes=() patterns=()
-while IFS= read -r line || [ -n "$line" ]; do
-	case $line in '' | '#'*) continue ;; esac
-	case $line in
-	'docs '* | 'test '* | 'code '* | 'full '*) ;;
-	*) fail "malformed rule '$line'" ;;
-	esac
-	cls=${line%% *} pat=${line#* }
-	case $pat in '' | *' '* | *[[:cntrl:]]*) fail "malformed rule '$line'" ;; esac
-	classes+=("$cls") patterns+=("$pat")
-done <"$tmp/rules"
-[ ${#classes[@]} -gt 0 ] || fail "no rules"
+load_rules() {
+	local line cls pat
+	while IFS= read -r line || [ -n "$line" ]; do
+		case $line in '' | '#'*) continue ;; esac
+		case $line in
+		'docs '* | 'test '* | 'code '* | 'full '*) ;;
+		*) fail "malformed rule '$line'" ;;
+		esac
+		cls=${line%% *} pat=${line#* }
+		case $pat in '' | *' '* | *[[:cntrl:]]*) fail "malformed rule '$line'" ;; esac
+		classes+=("$cls") patterns+=("$pat")
+	done <"$tmp/rules"
+	[ ${#classes[@]} -gt 0 ] || fail "no rules"
+}
+
+# rules_from_commit reads the rules of commit $1.
+rules_from_commit() {
+	git cat-file blob "$1:tools/validation-classes.txt" >"$tmp/rules" 2>/dev/null || fail "no tools/validation-classes.txt in $1"
+	rules_src="$1:tools/validation-classes.txt"
+}
 
 # class_of prints a path's class and the rule that decided it.
 class_of() {
@@ -118,8 +171,22 @@ class_of() {
 	printf 'full\tno rule matches\n'
 }
 
+rules_src=''
 if [ -n "$paths_mode" ]; then
+	if [ -n "$rules_from" ]; then
+		resolve rid "$rules_from"
+		rules_from_commit "$rid"
+	elif [ -n "$rules_file" ]; then
+		cat -- "$rules_file" >"$tmp/rules" 2>/dev/null || fail "cannot read the rules file"
+		rules_src="file:$rules_file (dev mode)"
+	else
+		cat tools/validation-classes.txt >"$tmp/rules" 2>/dev/null || fail "cannot read tools/validation-classes.txt"
+		rules_src="file:tools/validation-classes.txt (dev mode)"
+	fi
+	load_rules
+	printf '# rules=%s\n' "$rules_src"
 	for p in "$@"; do
+		safe_path "$p"
 		r=$(class_of "$p")
 		printf '%s\t%s\n' "$p" "$r"
 	done
@@ -128,9 +195,22 @@ fi
 
 [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = false ] || fail "a shallow or unreadable repository: the merge base cannot be trusted"
 
+# The base: given, or main fetched now from the project's repository. The
+# fetch trusts nothing in the repository's own config that could redirect or
+# extend it: origin must be the project's GitHub URL, and the config may
+# rewrite no URL and include no other file.
 if [ -z "$base" ]; then
-	git fetch --quiet --no-tags origin main 2>/dev/null || fail "cannot fetch origin main"
-	base=FETCH_HEAD
+	url=$(git config --local --get remote.origin.url 2>/dev/null) || fail "no origin remote to fetch main from"
+	case $url in
+	git@github.com:DaphnisDuck/ddsonic.git | https://github.com/DaphnisDuck/ddsonic | https://github.com/DaphnisDuck/ddsonic.git) ;;
+	*) fail "origin is not the project's GitHub repository ('$url')" ;;
+	esac
+	if git config --local --name-only --get-regexp '^(url\.|include\.|includeif\.|core\.sshcommand$|credential\.)' >/dev/null 2>&1; then
+		fail "the repository config rewrites URLs, includes other files or sets ssh or credential commands"
+	fi
+	git -c core.sshCommand=ssh -c credential.helper= fetch --quiet --no-tags --no-write-fetch-head -- "$url" "+refs/heads/main:refs/ddsonic/classify-base" 2>/dev/null ||
+		fail "cannot fetch main from $url"
+	base=refs/ddsonic/classify-base
 fi
 resolve bid "$base"
 if [ -n "$head" ]; then
@@ -138,6 +218,22 @@ if [ -n "$head" ]; then
 else
 	resolve hid HEAD
 fi
+
+# The rules come from the base itself, unless a dev-mode file is given. A
+# --rules-from that is not the base is refused: one trusted commit decides
+# both what the change is measured from and the rules that classify it.
+if [ -n "$rules_file" ]; then
+	cat -- "$rules_file" >"$tmp/rules" 2>/dev/null || fail "cannot read the rules file"
+	rules_src="file:$rules_file (dev mode)"
+else
+	if [ -n "$rules_from" ]; then
+		resolve rid "$rules_from"
+		[ "$rid" = "$bid" ] || fail "--rules-from $rid is not the base $bid"
+	fi
+	rules_from_commit "$bid"
+fi
+load_rules
+
 mb=$(git merge-base "$bid" "$hid" 2>/dev/null) || fail "no merge base of $bid and $hid"
 case $mb in *[!0-9a-f]* | '') fail "odd merge base" ;; esac
 
@@ -160,9 +256,6 @@ note() { # class status path reason
 	[ "$r" -gt "$worst" ] && worst=$r
 	out+=("$(printf '%s\t%s\t%s\t%s' "$1" "$2" "$3" "$4")")
 	n=$((n + 1))
-}
-safe_path() {
-	case $1 in '' | *[[:cntrl:]]*) fail "a path with a control character or none" ;; esac
 }
 by_rules() { # status path
 	local r
@@ -255,4 +348,7 @@ exec 3<&-
 
 [ "$n" -gt 0 ] || fail "an empty diff"
 case $worst in 0) echo docs ;; 1) echo test ;; 2) echo code ;; *) echo full ;; esac
+headdesc=$hid
+[ -n "$head" ] || headdesc="$hid+worktree"
+printf '# base=%s head=%s rules=%s\n' "$bid" "$headdesc" "$rules_src"
 printf '%s\n' "${out[@]}"
