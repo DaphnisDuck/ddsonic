@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # ddsonic: classifies a change for proportional validation
 # (docs/ddsonic/acceptance.md, "Proportional validation"). It prints the
 # change's class on its first line, exactly one of docs, test, code or full;
@@ -13,13 +13,29 @@
 #   tools/classify-change.sh [--rules-from REF | --rules FILE] --paths PATH...
 #   tools/classify-change.sh --rules FILE [--base REF] [--head REF]   (dev mode)
 #
+# How to run it: bash in privileged mode (-p), which takes no functions,
+# BASH_ENV, SHELLOPTS or BASHOPTS from the environment, and with a clean
+# environment. The supported invocations are exactly:
+#
+#   env -i PATH=/usr/local/bin:/usr/bin:/bin LC_ALL=C HOME=/nonexistent \
+#       /bin/bash --noprofile --norc -p tools/classify-change.sh ARGS
+#   tools/classify-change.sh ARGS      (its #!/bin/bash -p line; best with env -i)
+#   /bin/bash -p tools/classify-change.sh ARGS
+#
+# make validate and CI use the first (the Makefile's CLASSIFY variable).
+# Started any other way (plain "bash script", or sourced), it classifies
+# nothing: it prints no class, which a consumer takes as full, and says why
+# on stderr. A caller that controls the environment of a plain bash can still
+# make that bash print anything before the script's first line (BASH_ENV);
+# that is why only the invocations above are supported.
+#
 # --base   the trusted commit the change is measured from; the diff starts at
 #          its merge base with the head. The rules are read from this same
 #          commit, so a change cannot loosen the rules that classify it.
 #          Without --base, main is fetched from the project's GitHub
-#          repository into refs/ddsonic/classify-base (the only network access
-#          and the only write) and used; an unexpected origin, a repository
-#          config that rewrites URLs or includes other files, or a failed
+#          repository into a ref of this run's own (the only network access;
+#          the ref is removed after use) and used; a repository config with a
+#          key a plain clone does not have, an unexpected origin, or a failed
 #          fetch is full.
 # --head   the commit to classify. Without --head, the working tree: HEAD, the
 #          uncommitted changes to tracked files and the untracked files.
@@ -31,42 +47,35 @@
 # --paths  last: everything after it is a path to classify by the rules alone
 #          (one line each, no overall class); an option after it is full.
 #
-# It reads the repository and changes nothing in it but that one ref, and
+# It reads the repository and changes nothing in it (but that passing ref), and
 # treats every path, rule and ref as data: rules are read line by line, never
 # sourced, refs are checked and resolved to commit IDs before use, and paths
 # are never passed to a command.
 
-# A clean start: none of the caller's environment (BASHOPTS, SHELLOPTS,
-# BASH_ENV, IFS, GIT_* and the rest) reaches the classification. The script
-# runs itself again under env -i with a fixed environment, unless it already
-# is that run; an inherited marker alone does not count, as the environment
-# must also hold nothing else.
-clean_env() {
-	local v
-	[ "${DDSONIC_CLASSIFY_CLEAN:-}" = 1 ] || return 1
-	for v in $(compgen -e); do
-		case $v in DDSONIC_CLASSIFY_CLEAN | PATH | LC_ALL | HOME | PWD | OLDPWD | SHLVL | _) ;; *) return 1 ;; esac
-	done
-}
-if ! clean_env; then
-	if [ ! -x /usr/bin/env ] || [ ! -x /bin/bash ]; then
-		printf 'full\n# fail-closed\nfull\t-\t-\tfail-closed: no /usr/bin/env or /bin/bash for a clean start\n'
-		exit 0
-	fi
-	exec /usr/bin/env -i DDSONIC_CLASSIFY_CLEAN=1 PATH=/usr/local/bin:/usr/bin:/bin LC_ALL=C HOME=/nonexistent \
-		/bin/bash --noprofile --norc -- "$0" "$@"
-fi
-# Then the shell's own state, whatever this bash started with: default
-# options, the default IFS, no inherited functions.
+# The start uses only bash keywords ([[ ]], if), which no function can
+# replace, until privileged mode is confirmed: without -p, an exported
+# function could stand in for any command.
+if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
+	printf 'classify-change.sh: run it, do not source it\n' >&2
+	return 1 >&2
+elif [[ $- != *p* ]]; then
+	# Nothing on stdout: a function standing in for printf or exit can only
+	# write to stderr here (and if exit returns, nothing follows but the final
+	# fi); no class line means full to every consumer.
+	printf 'classify-change.sh: fail-closed: not started in privileged mode; run it directly, or: env -i PATH=/usr/local/bin:/usr/bin:/bin LC_ALL=C HOME=/nonexistent /bin/bash --noprofile --norc -p tools/classify-change.sh ...\n' >&2
+	exit 0 >&2
+else
+
+# A second layer: the shell's options and IFS as bash starts them, and no
+# environment from the caller but what is set here.
 set +o allexport +o noglob +o errexit
 set -u
 shopt -u nocasematch nocaseglob extglob globstar nullglob failglob dotglob expand_aliases
 IFS=$' \t\n'
-unset -v CDPATH GLOBIGNORE BASH_ENV ENV
 for v in $(compgen -e); do
-	case $v in GIT_*) unset "$v" ;; esac
+	case $v in PATH | LC_ALL | HOME) ;; *) unset -v "$v" 2>/dev/null ;; esac
 done
-export LC_ALL=C PATH=/usr/local/bin:/usr/bin:/bin
+export LC_ALL=C PATH=/usr/local/bin:/usr/bin:/bin HOME=/nonexistent
 # Git reads no outside configuration (the user's and the system's are
 # dropped), runs no hooks and allows no ext:: or file:// transport.
 export GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
@@ -196,21 +205,36 @@ fi
 [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = false ] || fail "a shallow or unreadable repository: the merge base cannot be trusted"
 
 # The base: given, or main fetched now from the project's repository. The
-# fetch trusts nothing in the repository's own config that could redirect or
-# extend it: origin must be the project's GitHub URL, and the config may
-# rewrite no URL and include no other file.
+# fetch trusts nothing in the repository's own config that could redirect,
+# extend or weaken it: the config may hold only the keys a plain clone has
+# (an allow-list), origin must be set once to the project's GitHub URL, and
+# the result goes to a ref of this run's own, created by this fetch, which
+# is read once and removed.
 if [ -z "$base" ]; then
-	url=$(git config --local --get remote.origin.url 2>/dev/null) || fail "no origin remote to fetch main from"
+	git config --local --list -z >"$tmp/config" 2>/dev/null || fail "cannot read the repository config"
+	url='' origins=0
+	while IFS= read -r -d '' entry; do
+		key=${entry%%$'\n'*} val=${entry#*$'\n'}
+		case $key in
+		core.repositoryformatversion | core.filemode | core.bare | core.logallrefupdates | core.ignorecase | core.precomposeunicode) ;;
+		remote.origin.url) origins=$((origins + 1)) url=$val ;;
+		remote.*.url | remote.*.fetch) ;; # other remotes: never fetched; their URL and refspec only
+		branch.*.remote | branch.*.merge) ;;
+		*) fail "the repository config sets $key, outside what the classifier trusts for a fetch" ;;
+		esac
+	done <"$tmp/config"
+	[ "$origins" = 1 ] || fail "remote.origin.url is set $origins times"
 	case $url in
 	git@github.com:DaphnisDuck/ddsonic.git | https://github.com/DaphnisDuck/ddsonic | https://github.com/DaphnisDuck/ddsonic.git) ;;
 	*) fail "origin is not the project's GitHub repository ('$url')" ;;
 	esac
-	if git config --local --name-only --get-regexp '^(url\.|include\.|includeif\.|core\.sshcommand$|credential\.)' >/dev/null 2>&1; then
-		fail "the repository config rewrites URLs, includes other files or sets ssh or credential commands"
-	fi
-	git -c core.sshCommand=ssh -c credential.helper= fetch --quiet --no-tags --no-write-fetch-head -- "$url" "+refs/heads/main:refs/ddsonic/classify-base" 2>/dev/null ||
+	fresh=refs/ddsonic/classify-base-$$-$RANDOM
+	git update-ref -d "$fresh" 2>/dev/null
+	! git show-ref --verify --quiet "$fresh" || fail "cannot clear $fresh"
+	git -c core.sshCommand=ssh -c credential.helper= fetch --quiet --no-tags --no-write-fetch-head -- "$url" "+refs/heads/main:$fresh" 2>/dev/null ||
 		fail "cannot fetch main from $url"
-	base=refs/ddsonic/classify-base
+	resolve base "$fresh"
+	git update-ref -d "$fresh" 2>/dev/null
 fi
 resolve bid "$base"
 if [ -n "$head" ]; then
@@ -352,3 +376,5 @@ headdesc=$hid
 [ -n "$head" ] || headdesc="$hid+worktree"
 printf '# base=%s head=%s rules=%s\n' "$bid" "$headdesc" "$rules_src"
 printf '%s\n' "${out[@]}"
+
+fi # privileged mode

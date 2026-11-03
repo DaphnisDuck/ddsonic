@@ -9,6 +9,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fixture is a throwaway repository with the real classifier rules.
@@ -92,23 +94,60 @@ func newFixture(t *testing.T) (*fixture, string) {
 	return f, f.commit("base")
 }
 
-// classify runs the repository's classifier in dir and returns its class
-// line and the rest.
-func classify(t *testing.T, dir string, env []string, args ...string) (string, string) {
+// The ways a caller can start the classifier. supported is the one make
+// validate and CI use (the usage text and the Makefile's CLASSIFY);
+// bashP and direct are also supported; plainBash is not, and must classify
+// nothing.
+const (
+	supported = "env -i … /bin/bash -p"
+	bashP     = "/bin/bash -p script"
+	direct    = "the script itself (#!/bin/bash -p)"
+	plainBash = "bash script (unsupported)"
+)
+
+// classifyAs starts the repository's classifier in dir the given way, with
+// env added to the test's environment (supported drops it all), and
+// returns its first line and the rest of its standard output.
+func classifyAs(t *testing.T, mode, dir string, env []string, args ...string) (string, string) {
 	t.Helper()
 	script, err := filepath.Abs("tools/classify-change.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("bash", append([]string{script}, args...)...)
+	// A classifier that does not finish is a failure of its own, not a hang
+	// of the suite.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	var cmd *exec.Cmd
+	switch mode {
+	case supported:
+		cmd = exec.CommandContext(ctx, "/usr/bin/env", append([]string{"-i", "PATH=/usr/local/bin:/usr/bin:/bin", "LC_ALL=C", "HOME=/nonexistent",
+			"/bin/bash", "--noprofile", "--norc", "-p", script}, args...)...)
+	case bashP:
+		cmd = exec.CommandContext(ctx, "/bin/bash", append([]string{"-p", script}, args...)...)
+	case direct:
+		cmd = exec.CommandContext(ctx, script, args...)
+	case plainBash:
+		cmd = exec.CommandContext(ctx, "/bin/bash", append([]string{script}, args...)...)
+	}
 	cmd.Dir = dir
 	cmd.Env = append(gitEnv(), env...)
 	out, err := cmd.Output()
+	if ctx.Err() != nil {
+		t.Fatalf("the classifier (%s) did not finish within 60 s", mode)
+	}
 	if err != nil {
-		t.Fatalf("the classifier exited with %v; it must exit 0 once it has printed a class\n%s", err, out)
+		t.Fatalf("the classifier exited with %v; it must exit 0\n%s", err, out)
 	}
 	first, rest, _ := strings.Cut(string(out), "\n")
 	return first, rest
+}
+
+// classify starts it with bash -p, the caller's environment and env passed
+// on, so that what the script does about an environment is tested.
+func classify(t *testing.T, dir string, env []string, args ...string) (string, string) {
+	t.Helper()
+	return classifyAs(t, bashP, dir, env, args...)
 }
 
 func TestClassifyChange(t *testing.T) {
@@ -229,20 +268,21 @@ func TestClassifyChangeIgnoresShellState(t *testing.T) {
 		"IFS":                    {"IFS=/"},
 		"all, and a fake marker": {"DDSONIC_CLASSIFY_CLEAN=1", "BASHOPTS=nocasematch", "BASH_ENV=" + bashenv, "IFS=/"},
 	} {
-		t.Run(name, func(t *testing.T) {
-			if got, rest := classify(t, f.dir, env, "--base", base, "--head", head); got != "full" || !strings.Contains(rest, "no rule matches") {
-				t.Errorf("DOCS/new.md: %q, want full (no rule matches)\n%s", got, rest)
-			}
-			if got, rest := classify(t, g.dir, env, "--base", gbase, "--head", ghead); got != "docs" {
-				t.Errorf("a docs change: %q, want docs\n%s", got, rest)
-			}
-		})
+		for _, mode := range []string{bashP, direct} {
+			t.Run(name+", "+mode, func(t *testing.T) {
+				if got, rest := classifyAs(t, mode, f.dir, env, "--base", base, "--head", head); got != "full" || !strings.Contains(rest, "no rule matches") {
+					t.Errorf("DOCS/new.md: %q, want full (no rule matches)\n%s", got, rest)
+				}
+				if got, rest := classifyAs(t, mode, g.dir, env, "--base", gbase, "--head", ghead); got != "docs" {
+					t.Errorf("a docs change: %q, want docs\n%s", got, rest)
+				}
+			})
+		}
 	}
 }
 
-// A BASH_ENV runs in the caller's bash before the script does, and could
-// define functions the script calls (here an iconv that accepts anything).
-// The clean restart under env -i leaves them behind.
+// A BASH_ENV could define functions the script calls (here an iconv that
+// accepts anything); in privileged mode bash reads no BASH_ENV.
 func TestClassifyChangeIgnoresBashEnvFunctions(t *testing.T) {
 	f, base := newFixture(t)
 	f.write("docs/\xff.md", "x\n")
@@ -251,8 +291,10 @@ func TestClassifyChangeIgnoresBashEnvFunctions(t *testing.T) {
 	if err := os.WriteFile(bashenv, []byte("iconv() { cat >/dev/null; return 0; }\nexport -f iconv\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got, rest := classify(t, f.dir, []string{"BASH_ENV=" + bashenv}, "--base", base, "--head", head); got != "full" || !strings.Contains(rest, "not valid UTF-8") {
-		t.Fatalf("with a BASH_ENV iconv: %q, want full, not valid UTF-8\n%s", got, rest)
+	for _, mode := range []string{bashP, direct} {
+		if got, rest := classifyAs(t, mode, f.dir, []string{"BASH_ENV=" + bashenv}, "--base", base, "--head", head); got != "full" || !strings.Contains(rest, "not valid UTF-8") {
+			t.Fatalf("%s with a BASH_ENV iconv: %q, want full, not valid UTF-8\n%s", mode, got, rest)
+		}
 	}
 }
 
@@ -292,26 +334,120 @@ func TestClassifyPathsUsesTheGivenRules(t *testing.T) {
 }
 
 // The local default fetches main only from the project's GitHub URL, and
-// only when the repository's config cannot redirect the fetch. Each of
-// these is refused before any network access.
+// only when the repository's config holds nothing but the keys a plain
+// clone has: anything else that could redirect, weaken or extend the fetch
+// is refused before any network access.
 func TestClassifyChangeTrustsOnlyTheProjectOrigin(t *testing.T) {
+	const gh = "https://github.com/DaphnisDuck/ddsonic.git"
 	for name, config := range map[string][][]string{
 		"origin is a local path":       {{"remote.origin.url", "/tmp/elsewhere"}},
 		"origin is another repository": {{"remote.origin.url", "https://github.com/someone/ddsonic.git"}},
-		"a URL rewrite":                {{"remote.origin.url", "https://github.com/DaphnisDuck/ddsonic.git"}, {"url./tmp/elsewhere.insteadOf", "https://github.com/"}},
-		"an include":                   {{"remote.origin.url", "https://github.com/DaphnisDuck/ddsonic.git"}, {"include.path", "/tmp/other.config"}},
-		"an ssh command":               {{"remote.origin.url", "git@github.com:DaphnisDuck/ddsonic.git"}, {"core.sshCommand", "/tmp/evil"}},
+		"no origin":                    {},
+		"origin twice":                 {{"remote.origin.url", gh}, {"--add", "remote.origin.url", gh}},
+		"a URL rewrite":                {{"remote.origin.url", gh}, {"url./tmp/elsewhere.insteadOf", "https://github.com/"}},
+		"an include":                   {{"remote.origin.url", gh}, {"include.path", "/tmp/other.config"}},
+		"an ssh command":               {{"remote.origin.url", gh}, {"core.sshCommand", "/tmp/evil"}},
+		"http.sslVerify off":           {{"remote.origin.url", gh}, {"http.sslVerify", "false"}},
+		"an extra HTTP header":         {{"remote.origin.url", gh}, {"http.extraHeader", "X: y"}},
+		"an HTTP proxy":                {{"remote.origin.url", gh}, {"http.proxy", "http://127.0.0.1:9"}},
+		"a git proxy":                  {{"remote.origin.url", gh}, {"core.gitProxy", "/tmp/evil"}},
+		"a push URL":                   {{"remote.origin.url", gh}, {"remote.origin.pushurl", "/tmp/elsewhere"}},
+		"an extension":                 {{"remote.origin.url", gh}, {"extensions.worktreeConfig", "true"}},
+		"an fsmonitor":                 {{"remote.origin.url", gh}, {"core.fsmonitor", "/tmp/evil"}},
+		"a credential helper":          {{"remote.origin.url", gh}, {"credential.helper", "/tmp/evil"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f, _ := newFixture(t)
 			for _, kv := range config {
-				f.git("config", "--local", kv[0], kv[1])
+				f.git(append([]string{"config", "--local"}, kv...)...)
 			}
-			got, rest := classify(t, f.dir, nil)
-			if got != "full" || !strings.Contains(rest, "fail-closed:") || strings.Contains(rest, "cannot fetch") {
-				t.Fatalf("%q, want full, refused before fetching\n%s", got, rest)
+			got, rest := classifyAs(t, supported, f.dir, nil)
+			refused := false
+			for _, reason := range []string{"fail-closed: the repository config sets ", "fail-closed: origin is not the project's", "fail-closed: remote.origin.url is set "} {
+				refused = refused || strings.Contains(rest, reason)
+			}
+			if got != "full" || !refused {
+				t.Fatalf("%q, want full with a refusal of the config or origin, before any fetch\n%s", got, rest)
 			}
 		})
+	}
+}
+
+// A plain clone's config passes, and the base is what this run fetched:
+// never a ref left from before (here two, pointing at the fixture's base,
+// which would make the docs change classify as docs). Offline, the fetch
+// fails: full. Online, the fetched main is not the fixture's history:
+// full, naming the fetched commit, never the stale one. It reaches GitHub,
+// so it runs only with DDSONIC_NETWORK_TESTS=1, and says SKIPPED otherwise.
+func TestClassifyChangeUsesOnlyAFreshlyFetchedBase(t *testing.T) {
+	if os.Getenv("DDSONIC_NETWORK_TESTS") != "1" {
+		t.Skip("SKIPPED: fetches main from GitHub; set DDSONIC_NETWORK_TESTS=1 to run it")
+	}
+	f, base := newFixture(t)
+	f.git("config", "--local", "remote.origin.url", "https://github.com/DaphnisDuck/ddsonic.git")
+	f.git("config", "--local", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+	f.git("config", "--local", "branch.main.remote", "origin")
+	f.git("config", "--local", "branch.main.merge", "refs/heads/main")
+	f.git("update-ref", "refs/ddsonic/classify-base", base)
+	f.git("update-ref", "refs/ddsonic/classify-base-1-1", base)
+	f.write("docs/a.md", "a docs change\n")
+	got, rest := classifyAs(t, supported, f.dir, nil)
+	if got != "full" || strings.Contains(rest, base) {
+		t.Fatalf("%q, want full and nothing measured from the stale base %s\n%s", got, base, rest)
+	}
+	// Offline: the fetch fails. Online: the fetched main has no rules file yet
+	// (it predates the classifier), or shares no history with the fixture.
+	if !strings.Contains(rest, "cannot fetch main") && !strings.Contains(rest, "no merge base of ") && !strings.Contains(rest, "no tools/validation-classes.txt in ") {
+		t.Fatalf("want a failed fetch, or a fail-closed result about the fetched main:\n%s", rest)
+	}
+	t.Logf("result: %s", strings.TrimSpace(rest))
+}
+
+// Every way to start it gives the right class or no class at all (full to
+// a consumer), never one taken from an attacker's repository or forged by
+// an exported function: functions named after the commands the script uses,
+// a forged marker of the old clean-start scheme, and GIT_DIR and
+// GIT_WORK_TREE pointing at a repository whose change is only docs.
+func TestClassifyChangeResistsExportedFunctions(t *testing.T) {
+	f, base := newFixture(t)
+	f.write("library/x.go", "package library\n// a code change\n")
+	attacker := filepath.Join(t.TempDir(), "attacker")
+	a := &fixture{t: t, dir: filepath.Dir(attacker)}
+	a.git("clone", "-q", "file://"+f.dir, attacker)
+	a.dir = attacker
+	a.write("docs/a.md", "only docs\n")
+	env := []string{"DDSONIC_CLASSIFY_CLEAN=1", "GIT_DIR=" + filepath.Join(attacker, ".git"), "GIT_WORK_TREE=" + attacker}
+	// Each stands in for a command and prints docs; echo stays the builtin
+	// they print with (a function calling itself would only crash bash).
+	for _, name := range []string{"compgen", "exec", "builtin", "command", "unset", "env", "printf", "set", "declare",
+		"read", "git", "iconv", "[", "cd", "pwd", "which", "exit", "return", "cat", "shopt", "export", "mktemp", "rm", "tr", "wc"} {
+		env = append(env, "BASH_FUNC_"+name+"%%=() { echo docs; }")
+	}
+	want := map[string]string{supported: "code", bashP: "code", direct: "code", plainBash: ""}
+	for _, mode := range []string{supported, bashP, direct, plainBash} {
+		t.Run(mode, func(t *testing.T) {
+			got, rest := classifyAs(t, mode, f.dir, env, "--base", base)
+			if got != want[mode] {
+				t.Fatalf("first line %q, want %q\n%s", got, want[mode], rest)
+			}
+			if strings.Contains(got+rest, "docs\t") {
+				t.Fatalf("the attacker's change or a function's output leaked:\n%s\n%s", got, rest)
+			}
+		})
+	}
+}
+
+// Sourced, it neither execs nor exits the caller's shell.
+func TestClassifyChangeRefusesToBeSourced(t *testing.T) {
+	script, err := filepath.Abs("tools/classify-change.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/bash", "-c", `source "$1" --paths x; echo "still here, status $?"`, "bash", script)
+	cmd.Env = gitEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "still here, status 1") || !strings.Contains(string(out), "do not source it") {
+		t.Fatalf("sourcing: %v\n%s", err, out)
 	}
 }
 
@@ -335,7 +471,7 @@ func TestClassifyChangeFailsClosed(t *testing.T) {
 		{"an unknown argument", nil, []string{"--everything-is-docs"}, "unknown argument"},
 		{"an empty diff", nil, []string{"--base", head, "--head", head}, "an empty diff"},
 		{"rules that do not exist", nil, []string{"--base", base, "--head", head, "--rules", "/nonexistent"}, "cannot read the rules file"},
-		{"no origin (the local default)", nil, []string{"--rules-from", base}, "no origin remote"},
+		{"no origin (the local default)", nil, []string{"--rules-from", base}, "remote.origin.url is set 0 times"},
 		{"rules from a commit other than the base", nil, []string{"--base", base, "--head", head, "--rules-from", head}, "--rules-from " + head + " is not the base"},
 		{"--rules-from with --rules", nil, []string{"--base", base, "--head", head, "--rules-from", base, "--rules", "x"}, "--rules-from and --rules together"},
 		{"an option after --paths", nil, []string{"--paths", "--rules", "tools/validation-classes.txt", "docs/a.md"}, "an option after --paths"},
