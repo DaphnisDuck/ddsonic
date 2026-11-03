@@ -5,8 +5,12 @@ package main
 // line: it may rewrite one in place, but not insert or delete lines above
 // it. This test compares the working tree with a base: DDSONIC_CITATION_BASE
 // when set (make validate sets it), else the merge base with origin/main.
+// Without either it is skipped and says "citation check: SKIPPED", unless
+// DDSONIC_CITATION_STRICT=1, as make validate and CI's docs profile set: then
+// a missing base is a failure.
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"regexp"
@@ -68,14 +72,29 @@ func moved(n int, hunks []shift) bool {
 	return offset != 0
 }
 
+// citationBase chooses the base: the variable, else the merge base. It
+// returns a reason to skip when there is none, or an error in strict mode.
+func citationBase(getenv func(string) string, mergeBase func() (string, error)) (base, skip string, err error) {
+	if base = getenv("DDSONIC_CITATION_BASE"); base != "" {
+		return base, "", nil
+	}
+	out, mbErr := mergeBase()
+	if mbErr == nil && strings.TrimSpace(out) != "" {
+		return strings.TrimSpace(out), "", nil
+	}
+	if getenv("DDSONIC_CITATION_STRICT") == "1" {
+		return "", "", errors.New("citation check: no base (DDSONIC_CITATION_BASE unset and no origin/main), and DDSONIC_CITATION_STRICT=1")
+	}
+	return "", "citation check: SKIPPED: no base to compare with: set DDSONIC_CITATION_BASE, or fetch origin/main (make validate does)", nil
+}
+
 func TestCatalogCitationsDoNotMove(t *testing.T) {
-	base := os.Getenv("DDSONIC_CITATION_BASE")
-	if base == "" {
-		out, err := gitOut(t, "merge-base", "origin/main", "HEAD")
-		if err != nil {
-			t.Skip("no base to compare with: set DDSONIC_CITATION_BASE, or fetch origin/main (make validate does)")
-		}
-		base = strings.TrimSpace(out)
+	base, skip, err := citationBase(os.Getenv, func() (string, error) { return gitOut(t, "merge-base", "origin/main", "HEAD") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skip != "" {
+		t.Skip(skip)
 	}
 	if _, err := gitOut(t, "cat-file", "-e", base+"^{commit}"); err != nil {
 		t.Fatalf("the base %q is not a commit", base)
@@ -147,6 +166,37 @@ func TestCitationMoved(t *testing.T) {
 	for _, tt := range tests {
 		if got := moved(tt.n, tt.hunks); got != tt.want {
 			t.Errorf("%s: moved = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}
+
+// Strict mode turns a missing base into a failure; otherwise it is a skip
+// that says so, never a pass.
+func TestCitationBaseStrict(t *testing.T) {
+	none := func() (string, error) { return "", errors.New("no origin/main") }
+	found := func() (string, error) { return "abc123\n", nil }
+	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	tests := []struct {
+		name     string
+		vars     map[string]string
+		mb       func() (string, error)
+		wantBase string
+		wantSkip bool
+		wantErr  bool
+	}{
+		{"the variable wins", map[string]string{"DDSONIC_CITATION_BASE": "deadbeef"}, none, "deadbeef", false, false},
+		{"the merge base", nil, found, "abc123", false, false},
+		{"no base: a skip that says so", nil, none, "", true, false},
+		{"no base, strict: a failure", map[string]string{"DDSONIC_CITATION_STRICT": "1"}, none, "", false, true},
+		{"strict with a base: runs", map[string]string{"DDSONIC_CITATION_STRICT": "1"}, found, "abc123", false, false},
+	}
+	for _, tt := range tests {
+		base, skip, err := citationBase(env(tt.vars), tt.mb)
+		if base != tt.wantBase || (skip != "") != tt.wantSkip || (err != nil) != tt.wantErr {
+			t.Errorf("%s: base %q, skip %q, err %v", tt.name, base, skip, err)
+		}
+		if skip != "" && !strings.HasPrefix(skip, "citation check: SKIPPED") {
+			t.Errorf("%s: the skip does not say citation check: SKIPPED: %q", tt.name, skip)
 		}
 	}
 }
