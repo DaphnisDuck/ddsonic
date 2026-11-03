@@ -11,7 +11,7 @@ ifneq ($(wildcard $(DEVTOOLS)/bin/.),)
 export PATH := $(DEVTOOLS)/bin:$(PATH)
 endif
 
-.PHONY: build test vet lint staticcheck fmt fmt-check coverage security ci check clean install acceptance acceptance-validate sdk-contract tools preflight preflight-core preflight-contract ci-core ci-checks ci-tail test-race-cover
+.PHONY: build test vet lint staticcheck fmt fmt-check coverage security ci check clean install acceptance acceptance-validate sdk-contract tools preflight preflight-core preflight-contract ci-core ci-checks ci-tail ci-tests test-race-cover
 
 build:
 	go build -trimpath -ldflags="$(LDFLAGS)" -o $(BINARY) .
@@ -40,8 +40,14 @@ coverage:
 	go tool cover -func=coverage.out
 
 # ddsonic: the tests once, under the race detector and with coverage; -race
-# requires the atomic mode. make ci runs this in place of the race run and
-# make coverage, which ran the suite a second time.
+# requires the atomic mode. make ci and make ci-core run ci-tests, in place of
+# the race run and make coverage, which ran the suite a second time; its
+# package list is written out, with no variable a caller could set.
+# test-race-cover is the same for use by hand, on TESTPKGS (default ./...).
+ci-tests:
+	go test -count=1 -race -covermode=atomic -coverprofile=coverage.out ./...
+	go tool cover -func=coverage.out
+
 TESTPKGS ?= ./...
 test-race-cover:
 	go test -count=1 -race -covermode=atomic -coverprofile=coverage.out $(TESTPKGS)
@@ -70,14 +76,14 @@ preflight-contract:
 # (make ci-core) and sdk-contract (make sdk-contract).
 ci: preflight
 	$(MAKE) ci-checks
-	$(MAKE) test-race-cover
+	$(MAKE) ci-tests
 	$(MAKE) sdk-contract
 	$(MAKE) ci-tail
 
 # ddsonic: everything in ci but the contract gate, in the same order.
 ci-core: preflight-core
 	$(MAKE) ci-checks
-	$(MAKE) test-race-cover
+	$(MAKE) ci-tests
 	$(MAKE) ci-tail
 
 ci-checks: fmt-check vet staticcheck security
