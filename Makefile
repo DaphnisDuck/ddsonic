@@ -42,7 +42,8 @@ coverage:
 # ddsonic: the tests once, under the race detector and with coverage; -race
 # requires the atomic mode. make ci and make ci-core run ci-tests, in place of
 # the race run and make coverage, which ran the suite a second time; its
-# package list is written out, with no variable a caller could set.
+# package list is written out, with no Make variable a caller could set, and
+# preflight rejects a GOFLAGS that could narrow it.
 # test-race-cover is the same for use by hand, on TESTPKGS (default ./...).
 ci-tests:
 	go test -count=1 -race -covermode=atomic -coverprofile=coverage.out ./...

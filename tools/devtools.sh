@@ -176,6 +176,17 @@ preflight() {
 	got=$(go env GOVERSION 2>/dev/null || true)
 	if [ "$got" = "go$want" ]; then row ok go "$got" "go$want"; else row WRONG go "${got:-not found}" "go$want"; fi
 
+	# GOFLAGS reaches every go test the targets run (a -run there could leave
+	# make ci with no tests to fail), so it must be empty. go env reads both
+	# the environment and the go env -w file.
+	got=$(go env GOFLAGS 2>/dev/null || true)
+	if [ -z "$got" ]; then
+		row ok GOFLAGS "empty" "empty"
+	else
+		row WRONG GOFLAGS "$got" "empty"
+		goflags_set=1
+	fi
+
 	if [ "$profile" != contract ]; then
 		for pair in "staticcheck $STATICCHECK_MOD $STATICCHECK_PIN" "govulncheck $GOVULNCHECK_MOD $GOVULNCHECK_PIN"; do
 			# shellcheck disable=SC2086 # the triple splits into its three words
@@ -204,6 +215,9 @@ preflight() {
 		echo
 		echo "preflight ($profile): not ready. Locally: make tools (installs into $devtools/bin and fetches the archives)."
 		echo "In CI: the workflow's install and fetch steps. A pin mismatch: make ci.yml and tools/devtools.sh agree."
+		if [ -n "${goflags_set:-}" ]; then
+			echo "GOFLAGS: unset GOFLAGS (or run with GOFLAGS=), and go env -u GOFLAGS if it is in the go env file."
+		fi
 		exit 1
 	fi
 	echo "preflight ($profile): ready"
