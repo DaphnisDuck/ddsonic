@@ -63,14 +63,16 @@ jobs:
       # against its provenance. The commands are tools/devtools.sh fetch, which
       # make tools runs locally; it fails when an archive is still missing.
       - name: Fetch the contract gate's modules
-        run: sh tools/devtools.sh fetch
+        run: |
+          sh tools/devtools.sh fetch
       # ddsonic: the go-librespot contract gate, unchanged; it runs here because
       # this job has the pinned toolchain, which the gate requires and checks.
       # macOS has no CI job for now (see below), so the gate's native release
       # checks are unverified on macOS until macOS acceptance.
       - run: make sdk-contract
       - name: The tree is clean
-        run: git diff --exit-code
+        run: |
+          git diff --exit-code
 
   # ddsonic: no macOS job, temporarily. It is disabled pending open macOS
   # issues in the player's yt-dlp handling, which its tests found and which
