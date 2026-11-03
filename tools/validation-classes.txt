@@ -1,0 +1,72 @@
+# ddsonic: the validation classes of changed paths, read by
+# tools/classify-change.sh (docs/ddsonic/acceptance.md, "Proportional
+# validation"). Each line is a class and a pattern: docs, test, code or full,
+# then a glob in which * matches any characters, / included. The first line
+# whose pattern matches a path decides its class, so the strongest classes
+# come first. A path that no line matches is full. A malformed line, or a
+# class not among the four, makes the whole classification full.
+#
+# A change's class is the strongest of its paths' classes. Besides these
+# lines, the classifier makes a change full for a symlink, a submodule, a
+# mode or type change, a binary file, a deleted or renamed test, a path it
+# cannot read safely, an empty diff, and any error.
+
+# full: the build, CI, tooling and this classifier; dependencies; the Spotify
+# boundary and the go-librespot it relies on; sign-in, credentials, external
+# processes and the plugin sandbox; storage schema, config, IPC and upgrade;
+# release and acceptance material; policy documents.
+full go.mod
+full go.sum
+full Makefile
+full mise.toml
+full tools/*
+full .github/*
+full packaging/*
+full third_party/*
+full patches/*
+full assets/*
+full external/spotify/*
+full external/ytmusic/*
+full internal/ytdlp/*
+full internal/ytdlcookies/*
+full internal/browser/*
+full player/ytdl*
+full player/ffmpeg*
+full luaplugin/sandbox*
+full ipc/*
+full config/*
+full upgrade/*
+full catalog/sqlite/migrations/*
+full acceptance/*
+full docs/ddsonic/acceptance/*
+full docs/ddsonic/acceptance.md
+full docs/ddsonic/releasing.md
+full docs/ddsonic/design/*
+full CLAUDE.md
+full AGENTS.md
+full SECURITY.md
+full SOURCE-PROVENANCE.md
+full LICENSE*
+full .gitignore
+full .gitattributes
+full .gitmodules
+full classify_ddsonic_test.go
+full citations_ddsonic_test.go
+
+# test: tests, which the whole suite runs. A deleted or renamed test is full.
+test *_test.go
+
+# code: Go source, and what tests read or Go embeds (testdata, README.md,
+# the embedded themes); the scan in classify_ddsonic_test.go keeps every
+# such file at code or above.
+code *.go
+code */testdata/*
+code testdata/*
+code README.md
+code theme/themes/*
+code internal/worldmap/raster.bin.gz
+
+# docs: documentation no test reads, outside the policy documents above.
+docs docs/*.md
+docs CHANGELOG.md
+docs plan.md
