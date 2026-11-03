@@ -23,7 +23,11 @@ concurrency:
 
 # ddsonic: make ci, as two parallel jobs. go runs make ci-core (everything
 # but the contract gate, in make ci's order); sdk-contract runs make
-# sdk-contract. Together they run every step of make ci once.
+# sdk-contract. Together they run every step of make ci once. A pull
+# request whose class (tools/ci-classify.sh) is docs runs the docs profile
+# in go, and one below full skips the gate, saying so; every other event is
+# full. A pull request runs its own copy of this file, so it can change these
+# conditions: the push to main after a merge, always full, is the backstop.
 jobs:
   go:
     runs-on: ubuntu-24.04
@@ -32,6 +36,54 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0 # ddsonic: the classifier needs the merge base; a shallow clone is full
+      # ddsonic: proportional validation (docs/ddsonic/acceptance.md). On a
+      # pull request the tested commit is GitHub's merge commit; its first
+      # parent is the base branch as GitHub merged it, and the classifier and
+      # rules come from that commit, never from the pull request. Any other
+      # event is full.
+      - name: Pick the base
+        id: base
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = pull_request ] && [ "$(git rev-list --parents -n 1 HEAD | wc -w)" = 3 ]; then
+            echo "sha=$(git rev-parse HEAD^1)" >>"$GITHUB_OUTPUT"
+          fi
+      - name: Check out the base's classifier
+        if: steps.base.outputs.sha != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.base.outputs.sha }}
+          path: .base
+          persist-credentials: false
+      - name: Classify the change
+        id: class
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ steps.base.outputs.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          class=full
+          tested=$(git rev-parse HEAD)
+          : >"$RUNNER_TEMP/classification"
+          if [ "$EVENT" = pull_request ] && [ -n "$BASE" ] && [ -f .base/tools/ci-classify.sh ]; then
+            sh .base/tools/ci-classify.sh --base "$BASE" --head "$tested" >"$RUNNER_TEMP/classification" || :
+            c=$(sed -n 1p "$RUNNER_TEMP/classification")
+            case $c in docs | test | code | full) class=$c ;; esac
+            cat "$RUNNER_TEMP/classification"
+          fi
+          rm -rf -- "${GITHUB_WORKSPACE:?}/.base"
+          echo "class=$class" >>"$GITHUB_OUTPUT"
+          {
+            echo "### Validation class: $class"
+            echo
+            echo "Event $EVENT; tested commit $tested; base ${BASE:-none}; pull request head ${PR_HEAD:-none}."
+            echo
+            echo '```'
+            sed -n 2p "$RUNNER_TEMP/classification"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.27.3" # ddsonic: the pinned release toolchain (mise.toml, packaging/Dockerfile); go.mod keeps upstream's minimum
@@ -39,7 +91,14 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libflac-dev libvorbis-dev libogg-dev libmpg123-dev shellcheck
       - run: go install honnef.co/go/tools/cmd/staticcheck@v0.7.0-0.dev.0.20261009221906-f1838cc308e5 # ddsonic: upstream commit f1838cc308e5cfbb38d91cfc973355611845997e (its move to x/tools v0.51.0), pinned exactly; v0.8.1, the newest release, cannot read Go 1.27.2 export data. Return to a release once one can
       - run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0 # ddsonic: v1.1.4 crashes on this code (ast.KeyValueExpr)
-      - run: make ci-core
+      - name: The docs profile (class docs)
+        if: steps.class.outputs.class == 'docs'
+        env:
+          BASE: ${{ steps.base.outputs.sha }}
+        run: make validate-docs VALIDATE_BASE="$BASE"
+      - name: make ci-core
+        if: steps.class.outputs.class != 'docs'
+        run: make ci-core
 
   sdk-contract:
     runs-on: ubuntu-24.04
@@ -48,11 +107,71 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+          fetch-depth: 0 # ddsonic: the classifier needs the merge base; a shallow clone is full
+      # ddsonic: proportional validation (docs/ddsonic/acceptance.md). On a
+      # pull request the tested commit is GitHub's merge commit; its first
+      # parent is the base branch as GitHub merged it, and the classifier and
+      # rules come from that commit, never from the pull request. Any other
+      # event is full.
+      - name: Pick the base
+        id: base
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = pull_request ] && [ "$(git rev-list --parents -n 1 HEAD | wc -w)" = 3 ]; then
+            echo "sha=$(git rev-parse HEAD^1)" >>"$GITHUB_OUTPUT"
+          fi
+      - name: Check out the base's classifier
+        if: steps.base.outputs.sha != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.base.outputs.sha }}
+          path: .base
+          persist-credentials: false
+      - name: Classify the change
+        id: class
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ steps.base.outputs.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          class=full
+          tested=$(git rev-parse HEAD)
+          : >"$RUNNER_TEMP/classification"
+          if [ "$EVENT" = pull_request ] && [ -n "$BASE" ] && [ -f .base/tools/ci-classify.sh ]; then
+            sh .base/tools/ci-classify.sh --base "$BASE" --head "$tested" >"$RUNNER_TEMP/classification" || :
+            c=$(sed -n 1p "$RUNNER_TEMP/classification")
+            case $c in docs | test | code | full) class=$c ;; esac
+            cat "$RUNNER_TEMP/classification"
+          fi
+          rm -rf -- "${GITHUB_WORKSPACE:?}/.base"
+          echo "class=$class" >>"$GITHUB_OUTPUT"
+          {
+            echo "### Validation class: $class"
+            echo
+            echo "Event $EVENT; tested commit $tested; base ${BASE:-none}; pull request head ${PR_HEAD:-none}."
+            echo
+            echo '```'
+            sed -n 2p "$RUNNER_TEMP/classification"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+      # ddsonic: the gate runs unless the class is exactly docs, test or code,
+      # so a missing or odd class runs it. Otherwise the job says it was skipped.
+      - name: "sdk-contract SKIPPED BY POLICY (class ${{ steps.class.outputs.class }}): the contract gate was NOT executed; it runs on every merge to main"
+        if: steps.class.outputs.class == 'docs' || steps.class.outputs.class == 'test' || steps.class.outputs.class == 'code'
+        env:
+          CLASS: ${{ steps.class.outputs.class }}
+        run: |
+          msg="sdk-contract SKIPPED BY POLICY (class $CLASS): the contract gate was NOT executed; it runs on every merge to main"
+          echo "::notice title=sdk-contract SKIPPED BY POLICY::$msg"
+          { echo "### $msg"; echo; echo "No contract test ran in this job."; } >>"$GITHUB_STEP_SUMMARY"
+      - if: steps.class.outputs.class != 'docs' && steps.class.outputs.class != 'test' && steps.class.outputs.class != 'code'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.27.3" # ddsonic: the pinned release toolchain (mise.toml, packaging/Dockerfile); go.mod keeps upstream's minimum
           cache: true
-      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libflac-dev libvorbis-dev libogg-dev libmpg123-dev shellcheck
+      - if: steps.class.outputs.class != 'docs' && steps.class.outputs.class != 'test' && steps.class.outputs.class != 'code'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libflac-dev libvorbis-dev libogg-dev libmpg123-dev shellcheck
       # ddsonic: the module archives (.info, .mod, .zip) the contract gate reads
       # offline from the module download cache (Makefile, sdk-contract): the
       # repository's modules, with the metadata of its whole graph (the gate's
@@ -64,14 +183,17 @@ jobs:
       # against its provenance. The commands are tools/devtools.sh fetch, which
       # make tools runs locally; it fails when an archive is still missing.
       - name: Fetch the contract gate's modules
+        if: steps.class.outputs.class != 'docs' && steps.class.outputs.class != 'test' && steps.class.outputs.class != 'code'
         run: |
           sh tools/devtools.sh fetch
       # ddsonic: the go-librespot contract gate, unchanged; it runs here because
       # this job has the pinned toolchain, which the gate requires and checks.
       # macOS has no CI job for now (see below), so the gate's native release
       # checks are unverified on macOS until macOS acceptance.
-      - run: make sdk-contract
+      - if: steps.class.outputs.class != 'docs' && steps.class.outputs.class != 'test' && steps.class.outputs.class != 'code'
+        run: make sdk-contract
       - name: The tree is clean
+        if: steps.class.outputs.class != 'docs' && steps.class.outputs.class != 'test' && steps.class.outputs.class != 'code'
         run: |
           git diff --exit-code
 

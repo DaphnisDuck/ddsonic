@@ -2,8 +2,9 @@ package main
 
 // ddsonic: tests of the consumers of the classifier (docs/ddsonic/
 // acceptance.md, "Proportional validation"): tools/ci-classify.sh, which
-// make validate and CI run; and tools/validate.sh, make validate's
-// profiles.
+// make validate and CI run; tools/validate.sh, make validate's profiles; and
+// the classification steps and step conditions of .github/workflows/ci.yml,
+// run here from the workflow file itself.
 
 import (
 	"os"
@@ -11,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"go.yaml.in/yaml/v3"
 )
 
 func writeExec(t *testing.T, path, data string) {
@@ -210,6 +213,211 @@ func TestValidateMakeTargets(t *testing.T) {
 		cmd.Env = append(os.Environ(), "DDSONIC_DEVTOOLS=/nonexistent")
 		if out, err := cmd.CombinedOutput(); err == nil || strings.Contains(string(out), "go test") {
 			t.Fatalf("VALIDATE_BASE=%q was accepted\n%s", bad, out)
+		}
+	}
+}
+
+type workflow struct {
+	On   map[string]any `yaml:"on"`
+	Jobs map[string]struct {
+		Steps []struct {
+			ID   string            `yaml:"id"`
+			Name string            `yaml:"name"`
+			If   string            `yaml:"if"`
+			Uses string            `yaml:"uses"`
+			Run  string            `yaml:"run"`
+			With map[string]string `yaml:"with"`
+		} `yaml:"steps"`
+	} `yaml:"jobs"`
+}
+
+func readWorkflow(t *testing.T) workflow {
+	t.Helper()
+	var w workflow
+	if err := yaml.Unmarshal([]byte(readRepo(t, ".github/workflows/ci.yml")), &w); err != nil {
+		t.Fatal(err)
+	}
+	return w
+}
+
+// stepRun is the run script of the step with that id in a job.
+func stepRun(t *testing.T, w workflow, job, id string) string {
+	t.Helper()
+	for _, s := range w.Jobs[job].Steps {
+		if s.ID == id {
+			return s.Run
+		}
+	}
+	t.Fatalf("%s has no step %s", job, id)
+	return ""
+}
+
+// The workflow's own base and classification steps, run as GitHub runs a
+// run step (bash -e), on a fixture whose HEAD is a merge commit, as a pull
+// request's checkout is.
+func TestCIWorkflowClassifySteps(t *testing.T) {
+	w := readWorkflow(t)
+	for _, job := range []string{"go", "sdk-contract"} {
+		pick, classifyStep := stepRun(t, w, job, "base"), stepRun(t, w, job, "class")
+		for _, tt := range []struct {
+			name, event, path string
+			base              string // which copies .base gets: both, consumer, none, or garbage (a consumer that prints an odd class)
+			want              string
+		}{
+			{"docs", "pull_request", "docs/a.md", "both", "docs"},
+			{"test", "pull_request", "library/x_test.go", "both", "test"},
+			{"code", "pull_request", "library/x.go", "both", "code"},
+			{"full", "pull_request", "Makefile", "both", "full"},
+			{"a base without the consumer", "pull_request", "docs/a.md", "none", "full"},
+			{"a base without the classifier", "pull_request", "docs/a.md", "consumer", "full"},
+			{"a consumer that prints an odd class", "pull_request", "docs/a.md", "garbage", "full"},
+			{"a push", "push", "docs/a.md", "both", "full"},
+			{"a manual run", "workflow_dispatch", "docs/a.md", "both", "full"},
+		} {
+			t.Run(job+", "+tt.name, func(t *testing.T) {
+				f, base := newFixture(t)
+				f.write("tools/ci-classify.sh", readRepo(t, "tools/ci-classify.sh"))
+				base = f.commit("the consumer")
+				f.git("checkout", "-q", "-b", "pr")
+				f.write(tt.path, "changed\n")
+				prHead := f.commit("change")
+				f.git("checkout", "-q", "main")
+				f.git("merge", "-q", "--no-ff", "-m", "merge", "pr")
+				temp := t.TempDir()
+				output := filepath.Join(temp, "output")
+				env := []string{"EVENT=" + tt.event, "GITHUB_OUTPUT=" + output, "GITHUB_STEP_SUMMARY=" + filepath.Join(temp, "summary"),
+					"RUNNER_TEMP=" + temp, "GITHUB_WORKSPACE=" + f.dir, "PR_HEAD=" + prHead}
+
+				if _, stderr, code := runSh(t, f.dir, env, "/bin/bash", "-e", "-c", pick); code != 0 {
+					t.Fatalf("Pick the base: exit %d\n%s", code, stderr)
+				}
+				got, _ := os.ReadFile(output)
+				picked := strings.TrimPrefix(strings.TrimSpace(string(got)), "sha=")
+				if wantPick := map[bool]string{true: base, false: ""}[tt.event == "pull_request"]; picked != wantPick {
+					t.Fatalf("Pick the base: %q, want %q", got, wantPick)
+				}
+				// actions/checkout of the picked base into .base
+				for _, file := range map[string][]string{"both": {"tools/ci-classify.sh", "tools/classify-change.sh"}, "consumer": {"tools/ci-classify.sh"}}[tt.base] {
+					writeExec(t, filepath.Join(f.dir, ".base", file), f.git("show", base+":"+file)+"\n")
+				}
+				if tt.base == "garbage" {
+					writeExec(t, filepath.Join(f.dir, ".base/tools/ci-classify.sh"), "echo 'docs extra'\necho '# m'\n")
+				}
+				if err := os.Remove(output); err != nil && !os.IsNotExist(err) {
+					t.Fatal(err)
+				}
+				if _, stderr, code := runSh(t, f.dir, append(env, "BASE="+picked), "/bin/bash", "-e", "-c", classifyStep); code != 0 {
+					t.Fatalf("Classify the change: exit %d\n%s", code, stderr)
+				}
+				got, _ = os.ReadFile(output)
+				if strings.TrimSpace(string(got)) != "class="+tt.want {
+					t.Fatalf("Classify the change: %q, want class=%s", got, tt.want)
+				}
+				summary, _ := os.ReadFile(filepath.Join(temp, "summary"))
+				if !strings.Contains(string(summary), "### Validation class: "+tt.want) {
+					t.Fatalf("the job summary: %q", summary)
+				}
+				if _, err := os.Stat(filepath.Join(f.dir, ".base")); !os.IsNotExist(err) {
+					t.Fatal(".base is still there")
+				}
+			})
+		}
+	}
+	t.Run("a head that is not a merge commit", func(t *testing.T) {
+		f, _ := newFixture(t)
+		output := filepath.Join(t.TempDir(), "output")
+		if _, stderr, code := runSh(t, f.dir, []string{"EVENT=pull_request", "GITHUB_OUTPUT=" + output}, "/bin/bash", "-e", "-c", stepRun(t, w, "go", "base")); code != 0 {
+			t.Fatal(stderr)
+		}
+		if got, _ := os.ReadFile(output); len(got) != 0 {
+			t.Fatalf("a base was picked: %q", got)
+		}
+	})
+}
+
+// evalIf evaluates the step conditions this workflow uses: comparisons of
+// steps.class.outputs.class with a literal, joined by all && or all ||.
+func evalIf(t *testing.T, cond, class string) bool {
+	t.Helper()
+	if cond == "" {
+		return true
+	}
+	op, parts := "&&", strings.Split(cond, " && ")
+	if strings.Contains(cond, " || ") {
+		op, parts = "||", strings.Split(cond, " || ")
+	}
+	result := op == "&&"
+	for _, p := range parts {
+		var v bool
+		switch {
+		case strings.HasPrefix(p, "steps.class.outputs.class == '"):
+			v = class == strings.TrimSuffix(strings.TrimPrefix(p, "steps.class.outputs.class == '"), "'")
+		case strings.HasPrefix(p, "steps.class.outputs.class != '"):
+			v = class != strings.TrimSuffix(strings.TrimPrefix(p, "steps.class.outputs.class != '"), "'")
+		default:
+			t.Fatalf("a condition this test cannot read: %q", cond)
+		}
+		if op == "&&" {
+			result = result && v
+		} else {
+			result = result || v
+		}
+	}
+	return result
+}
+
+// After the classification, the contract gate's steps run unless the class
+// is exactly docs, test or code, and otherwise one step, named for it, says
+// it was skipped; go runs the docs profile for docs only, else make ci-core.
+// An empty or odd class runs everything. The pull request is not given
+// pull_request_target, and the checkouts keep no credentials.
+func TestCIWorkflowConditions(t *testing.T) {
+	w := readWorkflow(t)
+	if _, ok := w.On["pull_request_target"]; ok {
+		t.Fatal("ci.yml runs on pull_request_target")
+	}
+	for _, class := range []string{"docs", "test", "code", "full", "", "garbage"} {
+		ran := map[string]bool{}
+		for job, j := range w.Jobs {
+			after := false
+			for _, s := range j.Steps {
+				if s.Uses != "" && strings.HasPrefix(s.Uses, "actions/checkout@") && s.With["persist-credentials"] != "false" {
+					t.Fatalf("%s: a checkout keeps credentials", job)
+				}
+				if s.ID == "class" {
+					after = true
+					continue
+				}
+				if !after {
+					continue
+				}
+				name := s.Name
+				if name == "" {
+					name = s.Uses + s.Run
+				}
+				if evalIf(t, s.If, class) {
+					ran[job+": "+name] = true
+				}
+			}
+		}
+		lower := class == "docs" || class == "test" || class == "code"
+		skipped := "sdk-contract: sdk-contract SKIPPED BY POLICY (class ${{ steps.class.outputs.class }}): the contract gate was NOT executed; it runs on every merge to main"
+		if ran[skipped] != lower || ran["sdk-contract: make sdk-contract"] == lower || ran["sdk-contract: The tree is clean"] == lower {
+			t.Errorf("class %q: the gate ran %v, the skip step ran %v", class, ran["sdk-contract: make sdk-contract"], ran[skipped])
+		}
+		for name := range ran {
+			if lower && strings.HasPrefix(name, "sdk-contract: ") && name != skipped {
+				t.Errorf("class %q: %s ran with the gate skipped", class, name)
+			}
+		}
+		if ran["go: The docs profile (class docs)"] != (class == "docs") || ran["go: make ci-core"] == (class == "docs") {
+			t.Errorf("class %q: go's profile is wrong: %v", class, ran)
+		}
+	}
+	for _, job := range []string{"go", "sdk-contract"} {
+		steps := w.Jobs[job].Steps
+		if steps[0].With["fetch-depth"] != "0" || steps[2].With["path"] != ".base" || steps[2].With["ref"] != "${{ steps.base.outputs.sha }}" {
+			t.Errorf("%s: the checkouts are not the full history and the base in .base", job)
 		}
 	}
 }

@@ -629,7 +629,7 @@ The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and correc
     - persistent pinned tools and a fast preflight (`tools/devtools.sh`, `make tools`, `make preflight`, a check that the script's pins equal `ci.yml`'s);
     - the design of proportional validation (PROPORTIONAL-VALIDATION-PROPOSAL.md; a proposal, not active, with the owner's decisions open);
     - the orchestration and closeout-overhead findings, which the Dispatcher records.
-  - Next planned optimization: proportional validation. The design proposal (PROPORTIONAL-VALIDATION-PROPOSAL.md) is preserved; it is not active, and its owner decisions are open.
+  - Proportional validation (owner decisions D1-D7, 2026-11-03): implemented on a branch (the classifier, `make validate`, CI by class; acceptance.md, "Proportional validation") and not integrated; one integration pull request awaits the owner's approval.
 - **Category:** infrastructure.
 - **Dependencies:** D-14 (stale CLAUDE.md), D-12 (artifact cleanup).
 - **Duplicates merged:** plan.md:1000; releasing.md:43; the `/tmp` tooling evaluation.
