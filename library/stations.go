@@ -43,18 +43,19 @@ func sortedByName[T any](rows []T, name, id func(T) string) []T {
 	return out
 }
 
-// sortedGenres sorts a category browser's categories A–Z by the name each
-// row shows, then by ID.
-func sortedGenres(genres []provider.GenreInfo) []provider.GenreInfo {
-	return sortedByName(genres, func(g provider.GenreInfo) string { return g.Name }, func(g provider.GenreInfo) string { return g.ID })
-}
-
 // namedGenres is implemented by a category browser whose categories the
 // library lists A–Z by name (radio's tags) instead of in the browser's
 // order (radio's countries keep theirs: grouped by region, most stations
-// first).
+// first). GenreName is a category's name as its row shows it, without what
+// the label adds to it, such as a station count.
 type namedGenres interface {
-	GenresByName()
+	GenreName(provider.GenreInfo) string
+}
+
+// sortedGenres sorts a namedGenres browser's categories A–Z by name, then
+// by ID. Their labels are left as they are.
+func sortedGenres(genres []provider.GenreInfo, ng namedGenres) []provider.GenreInfo {
+	return sortedByName(genres, ng.GenreName, func(g provider.GenreInfo) string { return g.ID })
 }
 
 // sortedStations sorts radio stations A–Z by the name each row shows, then

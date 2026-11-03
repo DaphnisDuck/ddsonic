@@ -4,7 +4,6 @@ import (
 	"math/rand/v2"
 	"reflect"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/bjarneo/cliamp/catalog"
@@ -179,9 +178,10 @@ func (g *shuffledGenres) GenreTracks(id, _ string) ([]playlist.Track, error) {
 }
 
 // shuffledTags is a tag browser: the library lists its categories by name.
+// A tag's ID is its name, and its label the name and its station count.
 type shuffledTags struct{ shuffledGenres }
 
-func (*shuffledTags) GenresByName() {}
+func (*shuffledTags) GenreName(g provider.GenreInfo) string { return g.ID }
 
 // Countries arrive grouped by region, most stations first; tags most
 // stations first, as the directory gives them.
@@ -191,8 +191,9 @@ var (
 		{ID: "NO", Name: "Norway", Group: "Europe", Favorite: true},
 	}
 	unsortedTags = []provider.GenreInfo{
-		{ID: "rock", Name: "rock (900)"}, {ID: "ambient", Name: "ambient (300)"}, {ID: "Jazz", Name: "Jazz (50)"},
-		{ID: "jazz", Name: "jazz (40)"}, {ID: "électro", Name: "électro (12)"},
+		{ID: "ambient", Name: "ambient (300)"}, {ID: "jazz", Name: "jazz (100)"}, {ID: "rock", Name: "rock (90)"},
+		{ID: "rock and roll", Name: "rock and roll (50)"}, {ID: "Jazz", Name: "Jazz (20)"},
+		{ID: "électro", Name: "électro (12)"}, {ID: "rock-n-roll", Name: "rock-n-roll (5)"}, {ID: "rock (80s)", Name: "rock (80s) (3)"},
 	}
 )
 
@@ -245,7 +246,7 @@ func TestStationListsSortAZ(t *testing.T) {
 	}{
 		{"Favorites", child(t, r, "Favorites"), nil},
 		{"a country's stations", child(t, child(t, browse, "Countries"), "Sweden"), selected},
-		{"a tag's stations", child(t, child(t, browse, "Genres & Tags"), "jazz (40)"), selected},
+		{"a tag's stations", child(t, child(t, browse, "Genres & Tags"), "jazz (100)"), selected},
 		{"radio directory's search", directorySearch(t, prov), selected},
 	}
 	for _, tc := range lists {
@@ -277,28 +278,41 @@ func TestStationListWithoutSelectionHasNoNote(t *testing.T) {
 	}
 }
 
-// Genres & Tags lists its tags A–Z by the label each row shows, count and
-// all, and each row still opens its own tag. Countries keep the browser's
-// order: grouped by region, the provider's order within one.
+// Genres & Tags lists its tags A–Z by name, the label's count left out of
+// the order: tags equal but for case go by exact name, not count, and a
+// name that begins another comes first, a parenthesis in a name included.
+// The labels are as the browser gave them, and each row opens its own tag.
+// Countries keep the browser's order: grouped by region, the provider's
+// order within one.
 func TestRadioCategories(t *testing.T) {
 	prov := &shuffledRadio{fakeProvider: fakeProvider{name: "Radio"}, stations: unsortedStations}
 	browse := child(t, radio(prov, nil), "Browse Stations")
 
 	tags := load(t, child(t, browse, "Genres & Tags"))
-	if got, want := titles(tags), []string{"ambient (300)", "électro (12)", "jazz (40)", "Jazz (50)", "rock (900)"}; !slices.Equal(got, want) {
-		t.Errorf("tags = %q, want %q", got, want)
+	want := []string{
+		"ambient (300)", "électro (12)", "Jazz (20)", "jazz (100)",
+		"rock (90)", "rock (80s) (3)", "rock and roll (50)", "rock-n-roll (5)",
+	}
+	if got := titles(tags); !slices.Equal(got, want) {
+		t.Errorf("tags = %q\nwant %q", got, want)
+	}
+	idOf := map[string]string{}
+	for _, g := range unsortedTags {
+		idOf[g.Name] = g.ID
 	}
 	for _, e := range tags {
-		if e.Title == "jazz (40)" {
+		id := idOf[e.Title]
+		if id == "" || e.Open.Title() != e.Title {
+			t.Errorf("tag row %q opens %q", e.Title, e.Open.Title())
 			continue
 		}
-		id := e.Title[:strings.IndexByte(e.Title, ' ')]
-		if got := trackRows(t, load(t, e.Open)); !slices.Equal(got, []string{"in " + id + " <https://" + id + ">"}) {
+		wantRows := []string{"in " + id + " <https://" + id + ">"}
+		if id == "jazz" {
+			wantRows = stationsAZ
+		}
+		if got := trackRows(t, load(t, e.Open)); !slices.Equal(got, wantRows) {
 			t.Errorf("tag row %q opens %q, want tag %q", e.Title, got, id)
 		}
-	}
-	if e := tags[2]; e.Open.Title() != "jazz (40)" || len(load(t, e.Open)) != len(unsortedStations) {
-		t.Errorf("tag row %q opens %q", e.Title, e.Open.Title())
 	}
 	if !slices.Equal(titles(load(t, child(t, browse, "Genres & Tags"))), titles(tags)) {
 		t.Error("tags reopen in another order")
@@ -311,7 +325,7 @@ func TestRadioCategories(t *testing.T) {
 	if !countries[1].Favorite || countries[1].Section != "Europe" {
 		t.Errorf("Norway = %+v, want a pinned place in Europe", countries[1])
 	}
-	if !slices.Equal(titles(sliceEntries(unsortedTags)), []string{"rock (900)", "ambient (300)", "Jazz (50)", "jazz (40)", "électro (12)"}) {
+	if !slices.Equal(titles(sliceEntries(unsortedTags)), []string{"ambient (300)", "jazz (100)", "rock (90)", "rock and roll (50)", "Jazz (20)", "électro (12)", "rock-n-roll (5)", "rock (80s) (3)"}) {
 		t.Error("listing sorted the browser's own tags")
 	}
 }

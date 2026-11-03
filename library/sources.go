@@ -308,8 +308,8 @@ func genresLevel(prov playlist.Provider, gb provider.GenreBrowser, title string)
 		if err != nil {
 			return nil, err
 		}
-		if _, ok := gb.(namedGenres); ok {
-			genres = sortedGenres(genres)
+		if ng, ok := gb.(namedGenres); ok {
+			genres = sortedGenres(genres, ng)
 		}
 		entries := make([]Entry, len(genres))
 		for i, g := range genres {

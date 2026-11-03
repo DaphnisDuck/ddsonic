@@ -29,8 +29,8 @@ func (orderRadio) BrowseEntries() []provider.BrowseEntry {
 
 type orderTags struct{}
 
-func (orderTags) GenresByName()      {}
-func (orderTags) GenreLabel() string { return "Genres & Tags" }
+func (orderTags) GenreName(g provider.GenreInfo) string { return g.ID }
+func (orderTags) GenreLabel() string                    { return "Genres & Tags" }
 func (orderTags) Genres() ([]provider.GenreInfo, error) {
 	return []provider.GenreInfo{{ID: "rock", Name: "rock (900)"}, {ID: "ambient", Name: "ambient (300)"}, {ID: "jazz", Name: "jazz (40)"}}, nil
 }
