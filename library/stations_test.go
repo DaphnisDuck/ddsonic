@@ -125,7 +125,6 @@ func TestSortedStationsKeepsDuplicatesInArrivalOrder(t *testing.T) {
 type shuffledRadio struct {
 	fakeProvider
 	stations []playlist.Track
-	channels []playlist.PlaylistInfo
 }
 
 var unsortedStations = []playlist.Track{
