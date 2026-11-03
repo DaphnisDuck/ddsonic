@@ -515,7 +515,7 @@ If a common command/action registry shared by hotkeys, the command palette and C
 
 ### Alphabetical Radio Station Sorting
 
-**Status:** post-1.0 UX improvement; unscheduled, not part of the 1.0 release scope. Recorded only: nothing is implemented and current behavior is unchanged.
+**Status:** implemented on a local branch (P-27, 2026-11-03), under review; see [navigation.md](navigation.md) and the `plan.md` Status entry for what sorts and what keeps its order.
 
 Radio station lists currently appear in an unintuitive or effectively arbitrary order. After 1.0, present stations sorted alphabetically by their displayed station name.
 

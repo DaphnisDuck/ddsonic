@@ -28,7 +28,7 @@ Music
   - **Browse Stations** lists the cliamp radio channels and the station directory by country or tag.
 - **Search:** searches everything the catalog holds as you type; `/` opens it from anywhere. See [search.md](search.md). Without a catalog it is the provider's own search (Spotify if configured, else Local).
 
-Lists sort A–Z as names are written ("The Planets" under T), ignoring case, accents and leading punctuation. Albums sort by title; press `o` to sort by artist instead. Radio favorites sort by name; stations under a country or tag keep the directory's most-voted-first order.
+Lists sort A–Z as names are written ("The Planets" under T), ignoring case, accents and leading punctuation. Albums sort by title; press `o` to sort by artist instead. Radio stations sort the same way by the name they show: Favorites, a country's or a tag's stations, and the results of "Search the radio directory". Names in other scripts sort by script (Latin, then Greek, Cyrillic, Arabic, CJK), with no language's own rules; names that differ only in case or accents come in a fixed order. A country, a tag or a directory search still shows the directory's most-voted stations, now A–Z. The cliamp radio channels keep cliamp radio's own order.
 
 Enter on a track replaces the queue with the list it's in and starts at that track, the way an album plays. The library stays on screen.
 

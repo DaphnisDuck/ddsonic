@@ -221,7 +221,8 @@ func (s *catalogView) beyond(q catalog.Query) []Entry {
 	if st, ok := s.radioProv.(stationSearcher); ok {
 		entries = append(entries, Entry{Section: beyondSection, Title: "Search the radio directory for “" + text + "”",
 			Open: TrackLevel("Radio directory", s.radioProv, func(context.Context) ([]playlist.Track, error) {
-				return st.SearchStationTracks(text)
+				tracks, err := st.SearchStationTracks(text)
+				return sortedStations(tracks), err
 			}), Source: catalog.Radio})
 	}
 	return entries

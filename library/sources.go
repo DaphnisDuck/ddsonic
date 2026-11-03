@@ -254,7 +254,7 @@ func radio(prov, channels playlist.Provider) Level {
 	var entries []Entry
 	if fs, ok := prov.(favoriteStations); ok {
 		entries = append(entries, Entry{Title: "Favorites", Open: &starredStationsLevel{funcLevel{"Favorites", func(context.Context) ([]Entry, error) {
-			return trackEntries(sortedByTitle(fs.FavoriteTracks())), nil
+			return trackEntries(sortedStations(fs.FavoriteTracks())), nil
 		}}}})
 	}
 	entries = append(entries, Entry{Title: "Browse Stations", Open: browseStations(prov, channels)})
@@ -290,7 +290,10 @@ func browseStations(prov, channels playlist.Provider) Level {
 	return Menu("Browse Stations", entries...)
 }
 
-// genresLevel lists a GenreBrowser's categories; each opens its stations.
+// genresLevel lists a GenreBrowser's categories; each opens its stations,
+// A–Z. The directory still picks which stations a category shows (its
+// first sort type, most voted for radio); only their order is the
+// library's.
 func genresLevel(prov playlist.Provider, gb provider.GenreBrowser, title string) Level {
 	sort := ""
 	if types := gb.GenreSortTypes(); len(types) > 0 {
@@ -304,7 +307,8 @@ func genresLevel(prov playlist.Provider, gb provider.GenreBrowser, title string)
 		entries := make([]Entry, len(genres))
 		for i, g := range genres {
 			entries[i] = Entry{Title: g.Name, Section: g.Group, Favorite: g.Favorite, Open: TrackLevel(g.Name, prov, func(context.Context) ([]playlist.Track, error) {
-				return gb.GenreTracks(g.ID, sort)
+				tracks, err := gb.GenreTracks(g.ID, sort)
+				return sortedStations(tracks), err
 			})}
 		}
 		return groupBySection(entries), nil
@@ -342,12 +346,4 @@ func local(prov playlist.Provider, indexed ...Entry) Level {
 		entries = append(entries, Entry{Title: "Playlists", Open: playlistsLevel("Playlists", prov, nil, playlistEntry(prov))})
 	}
 	return Menu("Local", entries...)
-}
-
-// sortedByTitle sorts tracks A–Z by title, the way catalog lists sort.
-func sortedByTitle(tracks []playlist.Track) []playlist.Track {
-	slices.SortStableFunc(tracks, func(a, b playlist.Track) int {
-		return strings.Compare(catalog.SortKey(a.Title), catalog.SortKey(b.Title))
-	})
-	return tracks
 }
