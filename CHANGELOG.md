@@ -4,11 +4,6 @@ Notable changes to ddsonic (DaphnisDuck's Music Player). The format follows [Kee
 
 ddsonic is a fork of [cliamp](https://github.com/bjarneo/cliamp). Versions before 0.6 were released as omatunes, and 0.6 up to the candidate 1.0.0-rc.1 as ddmus; their entries below keep the name they were released under.
 
-## [Unreleased]
-
-### Changed
-- Radio stations under a country or a tag, and the results of "Search the radio directory", are listed A–Z by name, as Radio → Favorites already was; they are still the directory's most-voted stations. Names that differ only in case or accents now always come in the same order. The cliamp radio channels keep their order.
-
 ## [1.0.0] - 2026-10-31
 
 The first release for people who don't build from source. 1.0 adds no features to 0.10: it settles the command line, removes what ddsonic doesn't support, and ships a tested Linux build.
