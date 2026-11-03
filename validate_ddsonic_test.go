@@ -275,9 +275,9 @@ func TestCIWorkflowClassifySteps(t *testing.T) {
 			{"a manual run", "workflow_dispatch", "docs/a.md", "both", "full"},
 		} {
 			t.Run(job+", "+tt.name, func(t *testing.T) {
-				f, base := newFixture(t)
+				f, _ := newFixture(t)
 				f.write("tools/ci-classify.sh", readRepo(t, "tools/ci-classify.sh"))
-				base = f.commit("the consumer")
+				base := f.commit("the consumer")
 				f.git("checkout", "-q", "-b", "pr")
 				f.write(tt.path, "changed\n")
 				prHead := f.commit("change")
