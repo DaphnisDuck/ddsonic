@@ -68,6 +68,20 @@ func quiesce(t *testing.T) {
 	}
 }
 
+// waitBuilds waits for the build workers a test let go, and fails the test
+// when one is still running after 10 s: a worker that never ends must fail
+// in seconds, not hold the package until its global timeout.
+func waitBuilds(t *testing.T) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { builds.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a build worker is still running 10 s after its builder was let go")
+	}
+}
+
 // expiredSession is a session whose token has expired: its next use refreshes
 // it, from the stored credential's refresh token.
 func expiredSession() *Session {

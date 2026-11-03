@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -339,8 +340,11 @@ func TestStoredBuildCompletesOnItsDeadline(t *testing.T) {
 	before := mustRead(t, path)
 	writes := countWrites(t)
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
 	var setups atomic.Int32
 	late := tokenSession(nil) // what the held builder reports, after its deadline
+	setupTimeout := sessionSetupTimeout
 	stubSessionSetup(t, 50*time.Millisecond, func(ctx context.Context, _ string) (*Session, error) {
 		if setups.Add(1) == 1 {
 			<-release // ignores its context, as a builder inside librespot can
@@ -348,6 +352,11 @@ func TestStoredBuildCompletesOnItsDeadline(t *testing.T) {
 		}
 		return goodSession(), nil
 	})
+	// However the test ends, the held builder is let go, so its worker ends:
+	// a worker left waiting would hold builds, and the next test's wait, up
+	// to the package's timeout. (Registered after the stub's own cleanup, so
+	// it runs first.)
+	t.Cleanup(letGo)
 	p := New(nil, "client", 320)
 
 	first, second := make(chan error, 1), make(chan error, 1)
@@ -371,15 +380,18 @@ func TestStoredBuildCompletesOnItsDeadline(t *testing.T) {
 		t.Fatalf("after the deadline: phase %d, refused %t, stored build %t, session %t; want the provider free", phase, refused, stored != nil, p.sessionNow() != nil)
 	}
 
-	// The provider builds again while the first builder is still held.
+	// The provider builds again while the first builder is still held. That
+	// build has the production deadline: the 50 ms one is the first build's,
+	// which this test is about, and the next build must not race it.
+	sessionSetupTimeout = setupTimeout
 	if err := returnsWithin(t, 5*time.Second, "the next ensureSession", p.ensureSession); err != nil || setups.Load() != 2 {
 		t.Fatalf("the next ensureSession() = %v after %d setups, want a new build to be taken", err, setups.Load())
 	}
 	taken := p.sessionNow()
 	written := writes.Load()
 
-	close(release) // the held builder reports success now
-	builds.Wait()
+	letGo() // the held builder reports success now
+	waitBuilds(t)
 	if p.sessionNow() != taken {
 		t.Error("the late build replaced the session")
 	}
@@ -402,14 +414,17 @@ func TestLateStoredBuilderSendsNoRefresh(t *testing.T) {
 	sessionSetupTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { sessionSetupTimeout = orig })
 	b.storedGate, b.storedEntered = make(chan struct{}), make(chan struct{}) // held in librespot, before the refresh
+	var gateOnce sync.Once
+	openGate := func() { gateOnce.Do(func() { close(b.storedGate) }) }
+	t.Cleanup(openGate) // however the test ends, the held builder is let go
 	p := New(nil, "client", 320)
 
 	err := returnsWithin(t, 5*time.Second, "ensureSession behind a held builder", p.ensureSession)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("ensureSession() = %v, want the build's deadline", err)
 	}
-	close(b.storedGate)
-	builds.Wait()
+	openGate()
+	waitBuilds(t)
 	if n := h.tokenCalls.Load(); n != 0 {
 		t.Errorf("the late builder sent %d token requests after its build had ended", n)
 	}
