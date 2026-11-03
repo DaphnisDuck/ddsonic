@@ -329,9 +329,9 @@ var (
 // change must never be able to change what a test or a build sees. The scan
 // finds embed patterns, and literal paths given to os.ReadFile, os.Open,
 // os.Stat, os.ReadDir, filepath.Glob and filepath.Join in tests, and checks
-// every tracked file they name.
+// every file they name, tracked or untracked (not ignored).
 func TestReadOrEmbeddedFilesAreCodeOrAbove(t *testing.T) {
-	ls := exec.Command("git", "ls-files", "-z")
+	ls := exec.Command("git", "ls-files", "-z", "-c", "-o", "--exclude-standard")
 	ls.Env = gitEnv()
 	out, err := ls.Output()
 	if err != nil {

@@ -57,14 +57,16 @@ full citations_ddsonic_test.go
 test *_test.go
 
 # code: Go source, and what tests read or Go embeds (testdata, README.md,
-# the embedded themes); the scan in classify_ddsonic_test.go keeps every
-# such file at code or above.
+# the embedded themes, the post-1.0 catalog that citations_ddsonic_test.go
+# reads); the scan in classify_ddsonic_test.go keeps every such file at code
+# or above.
 code *.go
 code */testdata/*
 code testdata/*
 code README.md
 code theme/themes/*
 code internal/worldmap/raster.bin.gz
+code docs/ddsonic/POST-1.0-CATALOG.md
 
 # docs: documentation no test reads, outside the policy documents above.
 docs docs/*.md
