@@ -44,17 +44,28 @@ const FailMessage = "ERROR: [youtube] synthetic: Video unavailable"
 // 2026.08.19 does.
 //
 // The fixture owns the processes its runs make. A run that holds its copy
-// blocks on a child reading the hold pipe, which only the test holds open,
-// so that child cannot outlive the test however its run ends (finished,
-// interrupted, terminated, killed or never stopped). Every run and every
-// child records itself in the registry (its pid and its start time) as its
-// first action, before it touches anything else of the fixture, so the
-// test's teardown can wait until each one has exited (hold_unix.go).
+// blocks on a child that waits for the test's release mark, polling for it
+// (nothing it does blocks on a pipe: no blocking open, no wait for an end
+// of file), so that child cannot outlive the test however its run ends
+// (finished, interrupted, terminated, killed or never stopped): it ends at
+// the mark, when the test's process is gone, or after childPolls looks at the
+// latest. Every run and every child records itself in the registry (its pid
+// and, where it can, its start time) as its first action, before it touches
+// anything else of the fixture, so the test's teardown can wait until each
+// one has exited (hold_unix.go).
 type Copier struct {
 	state, temp string
-	hold, alive *os.File
+	alive       *os.File
 	teardown    sync.Once
 }
+
+// childPoll and childPolls are how often a child looks for the release mark
+// (seconds) and how many times at most: 120 s, a bound for a test whose
+// process outlives its teardown, far beyond any test's own use of a child.
+const (
+	childPoll  = "0.05"
+	childPolls = 2400
+)
 
 // teardownBound is the one deadline of the teardown, from its start to its
 // acceptance: the runs and children end at once when released, so it is
@@ -64,6 +75,7 @@ var teardownBound = 10 * time.Second
 
 const copierScript = `#!/bin/sh
 state=%STATE%
+owner=%OWNER%
 ident() {
 	ID=-
 	s=
@@ -105,13 +117,20 @@ if [ "$mode" = unremovable ]; then
 	finish 0
 fi
 if [ "$mode" != finish ]; then
-	sh -c 's=; { read -r s </proc/self/stat; } 2>/dev/null; set -- $s; printf "child %s %s\n" "$$" "${22:--}" >>"$0/registry"; exec 8<>"$0/alive"; exec cat "$0/hold"' "$state" >/dev/null 2>&1 &
+	sh -c 'o=$1 s=; { read -r s </proc/self/stat; } 2>/dev/null; set -- $s; printf "child %s %s\n" "$$" "${22:--}" >>"$0/registry"; exec 8<>"$0/alive"; n=0; while [ ! -e "$0/released" ] && kill -0 "$o" 2>/dev/null && [ "$n" -lt %POLLS% ]; do sleep %POLL%; n=$((n+1)); done' "$state" "$owner" >/dev/null 2>&1 &
 	child=$!
 	wait "$child"
 fi
 cat "$state/stdout"
 finish 0
 `
+
+// copierFor is the fake for a copier whose state is state, owned by this
+// process.
+func copierFor(state string) string {
+	return strings.NewReplacer("%STATE%", "'"+state+"'", "%OWNER%", strconv.Itoa(os.Getpid()),
+		"%POLLS%", strconv.Itoa(childPolls), "%POLL%", childPoll).Replace(copierScript)
+}
 
 // unrelated is what else the temporary directory holds: things a cleanup by
 // name would take for yt-dlp's or ddsonic's own.
@@ -134,7 +153,7 @@ func InstallCopier(t *testing.T, mode, stdout string) *Copier {
 	for path, content := range map[string]string{
 		filepath.Join(c.state, "stdout"):                 stdout,
 		filepath.Join(c.state, "mode"):                   mode,
-		filepath.Join(root, "bin", "yt-dlp"):             strings.ReplaceAll(copierScript, "%STATE%", "'"+c.state+"'"),
+		filepath.Join(root, "bin", "yt-dlp"):             copierFor(c.state),
 		filepath.Join(c.temp, "unrelated.txt"):           "keep",
 		filepath.Join(c.temp, "yt_dlp-not-ours", "keep"): "keep",
 		filepath.Join(c.temp, likeOurs, "keep"):          "keep",
@@ -174,18 +193,19 @@ func InstallCopier(t *testing.T, mode, stdout string) *Copier {
 // finish (a run still holding its copy then finishes too), waits until no
 // child holds the alive pipe, and then until every run and child in the
 // registry has exited, reading the registry again until it no longer grows.
-// It reports what it could not establish, and an acceptance later than the
-// deadline; it signals nothing and reaps nothing, so a process that is not
-// the fixture's is never touched, and a run's reaping stays with whoever
-// started it. It runs once. It is registered in InstallCopier after the
-// cleanup that restores the directories' modes, so it runs before that and
-// before the directories are removed, and after every cleanup the caller
-// registers after InstallCopier.
+// It reports what it could not establish, with what is still running
+// (stuck), and an acceptance later than the deadline; it signals nothing and
+// reaps nothing, so a process that is not the fixture's is never touched,
+// and a run's reaping stays with whoever started it (a child's with its
+// run, or with the system once the run has gone). It runs once. It is
+// registered in InstallCopier after the cleanup that restores the
+// directories' modes, so it runs before that and before the directories are
+// removed, and after every cleanup the caller registers after InstallCopier.
 func (c *Copier) release(report func(format string, args ...any)) {
 	c.teardown.Do(func() {
 		deadline := time.Now().Add(teardownBound)
 		if err := c.unhold(); err != nil {
-			report("ytdlptest: the hold pipe: %v", err)
+			report("ytdlptest: the release: %v", err)
 		}
 		if err := c.join(deadline); err != nil {
 			report("ytdlptest: %v", err)
