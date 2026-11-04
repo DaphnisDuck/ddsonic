@@ -873,14 +873,14 @@ The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and correc
 - **Duplicates merged:** none.
 - **Flags:** HIST, SEC-SEP.
 
-### R-08 Pre-1.0 adversarial security audit: status unknown
+### R-08 Pre-1.0 adversarial security audit: RESOLVED (historical evidence)
 - **Outcome:** establish whether the required audit ran for v1.0.0. If not, decide how it is handled now.
 - **Source:** plan.md:843 (unchecked: "required, release-blocking, not yet run"); plan.md:870 (2026-10-10, "may not be waived"); RP:252-260.
-- **Status / prior decisions:** plan.md still shows it unchecked. Whether and how it was carried out for v1.0.0 is not recorded in this repository; the owner confirms it.
+- **Status / prior decisions:** **RESOLVED** (2026-11-04) on owner-attested historical evidence. An adversarial audit of the rc.4 candidate (source 1cefaaff, tree 8d90f7fd, binary dbeea486) found A1, untrusted metadata could emit terminal control sequences in human-facing output, and A2, remote playlists could select local filesystem paths. Both were fixed in two remediation cycles, and the post-remediation fixes received an independent Reviewer PASS (recorded by the owner, 2026-10-31 03:42 UTC). The reviewed tree, 3b891f57e7cb590e2fa6af9a801effcd851f9bae, is the shipped v1.0.0 build tree (SOURCE-PROVENANCE.md at v1.0.0: build commit 497f88ef, tree 3b891f57). Publication was a separate owner authorization (2026-10-31). Record gap: the original audit report and a formal gate-closure record remain unavailable; neither is in the repository.
 - **Category:** reliability-security.
 - **Dependencies:** none.
 - **Duplicates merged:** plan.md:819 (the sign-in address in `ddsonic.log` "stays an item for the security audit, with no waiver").
-- **Flags:** OWNER, STALE (or GAP).
+- **Flags:** RESOLVED (2026-11-04; was OWNER, STALE). Record gap: no original audit report or formal gate-closure record in the repository.
 
 ### R-09 Privacy audit of the public source, docs and artifacts
 - **Outcome:** check for personal names, usernames, emails, hostnames, home paths and account or device identifiers in the source, docs, release pages, SBOM, notices, source archive and binary paths.
@@ -1233,7 +1233,7 @@ The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and correc
 5. **M4's "one provider per release, starting with YouTube Music"** (plan.md:80-83) is superseded in substance by the 2026-10-09 order (plan.md:976-979) but still stands in the Milestones text.
 6. **Upstream sync recipe.** plan.md:115 says `git merge upstream/main`, while plan.md:959/989 say to merge upstream's latest release tag, never `main`.
 7. **AUR:** decided as a 1.0 channel (RP:87, 334), prepared but not published. The docs mix "planned" with present-tense mentions (CHANGELOG:21, `commands.go:237`). See D-02, D-03, D-04.
-8. **The pre-1.0 security audit** was "required, release-blocking, may not be waived". It is still unchecked in public plan.md:843, and no record of it was found (R-08).
+8. **The pre-1.0 security audit** was "required, release-blocking, may not be waived". It is still unchecked in public plan.md:843; R-08 is RESOLVED on owner-attested historical evidence (2026-11-04), without the original report or a formal closure record.
 9. **The privacy audit** before publication is recorded as "blocked by a platform denial, unresolved" (releasing.md:42), and the README screenshot shows a local path and a commercial cover (R-09, D-06).
 10. **Status text contradicted by the shipped 1.0.0:** acceptance.md:22/24, the RP gates, plan.md:819-842, and the token-coordinator header (D-13); the stale screenshot provenance (D-06).
 11. **Spotify SDK.** plan.md:770 ("stays at 0.9.1 until upstream moves") is overtaken by the local patched copy (plan.md:849). The regularization choice (E-05) is coupled with the Vorbis dependency work (E-15) and with the separately tracked upstream report (R-06).
@@ -1303,7 +1303,7 @@ The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and correc
 - **macOS (D-09):** whether to pursue R-02/R-03 now, and the condition for restoring CI or shipping a build.
 - **Reliability:** whether the Spotify 1.0 limitations (R-10) and carried findings (R-11) get fixes.
 - **QA policy (R-15, E-04):** evidence age, test accounts, permitted account mutations, waiver recording; which CI guarantees are mandatory per push (E-03).
-- **Security and privacy:** the status of the pre-1.0 adversarial audit (R-08); running the privacy audit (R-09); the screenshot's contents (D-06).
+- **Security and privacy:** running the privacy audit (R-09); the screenshot's contents (D-06).
 - **Release hygiene:** the version-identification fix before the next release (D-07); attestation or a CI-built release for the next release (D-11).
 - **Documentation:**
   - whether to add the CHANGELOG Unreleased entry (D-08);
@@ -1321,5 +1321,5 @@ The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and correc
 
 ## Counts
 
-- **By part:** 45 product (P-01 to P-45), 20 engineering (E-01 to E-20), 15 reliability and security (R-01 to R-15), 18 distribution, docs and infrastructure (D-01 to D-18). 98 items in all, of which 2 are RESOLVED (R-04, D-18).
+- **By part:** 45 product (P-01 to P-45), 20 engineering (E-01 to E-20), 15 reliability and security (R-01 to R-15), 18 distribution, docs and infrastructure (D-01 to D-18). 98 items in all, of which 3 are RESOLVED (R-04, R-08, D-18).
 - **By category field:** feature 32, architecture 15, investigation 14, documentation 12, reliability-security 10, bug 5, distribution 5, infrastructure 5. Where an item names two categories (for example "feature / investigation"), it is counted under the first.
