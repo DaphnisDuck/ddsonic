@@ -221,6 +221,7 @@ screen.
 | `/` | Filter files |
 | `Space` | Select or unselect file/directory |
 | `a` | Select/unselect all visible audio files |
+| `f` | List all files, or only folders and playable audio files (the default; the header shows which) |
 | `R` | Replace the current queue with selected files (confirm when it is non-empty) |
 | `w` | Write selected files to a local playlist |
 | `D` | Add selected folders as live `[[dir]]` sources to the target playlist. If none are selected, add the selected folder or the open directory. The browser stays open. |

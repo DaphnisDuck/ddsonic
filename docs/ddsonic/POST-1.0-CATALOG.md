@@ -534,7 +534,7 @@ The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and correc
 ### P-42 Local > Folders: show playable audio files by default, keep directory navigation
 - **Outcome:** Local's Folders view lists directories and playable audio files by default, without non-audio files such as covers, logs or cue sheets. Directory navigation is unchanged, and a way to show all files could remain.
 - **Source:** owner, from earlier discussions; not previously recorded in the repository. Navigation: `docs/ddsonic/navigation.md:10, 24` ("Folders opens the file browser").
-- **Status / prior decisions:** no record of the request.
+- **Status / prior decisions:** done in this change (2026-11-04), not released: the browser (Folders, and `o`) lists directories and `player.SupportedExts` audio by default, and `f` switches to all files and back for the session; dotfiles stay hidden (`ui/model/filebrowser_audio_ddsonic.go`). Before it, as the `filebrowser.go` lines below cite at d12d47b:
   - Folders opens the inherited file browser (`library/sources.go:336-340`; `ui/model/library_nav.go:662-663`).
   - The browser lists every entry not starting with a dot: directories first, then all files. Audio is only flagged (`ui/model/filebrowser.go:140-181`, `isAudio` from `player.SupportedExts`).
   - Only audio files and directories are actionable (`ui/model/filebrowser.go:393, 454, 517`).
@@ -1291,7 +1291,7 @@ The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and correc
   - how they sit with the website-first constraint and with "fix defects first".
 - **Feature priorities** among P-01 to P-44, including whether YouTube Music v2 or another feature leads, and whether an Apple Music feasibility study may run before the contract.
 - **When P-40 to P-43 are taken up** (none needs a decision now):
-  - the defaults for P-42 (audio-only listing, and whether all files can still be shown);
+  - P-42 is done in this change: audio only by default, `f` for all files;
   - P-43 (what is restored by default, and whether position resume is opt-in);
   - P-40/P-41 (how much alignment is worth against width).
 - **When P-45 is taken up** (no decision needed now): server-side pagination or a local directory cache, and how alphabetical navigation works over a long list.

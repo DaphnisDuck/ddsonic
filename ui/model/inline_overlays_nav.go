@@ -220,7 +220,7 @@ func (m Model) fbHeaderLine() string {
 	if m.fileBrowser.searching {
 		return m.filterPromptHeader("file-browser-search", m.fileBrowser.search)
 	}
-	label := "Files: " + m.fileBrowser.dir
+	label := "Files" + m.fbModeLabel() + ": " + m.fileBrowser.dir // ddsonic: the listing's mode (P-42)
 	if n := len(m.fileBrowser.selected); n > 0 {
 		label += fmt.Sprintf("  [%d selected]", n)
 	}

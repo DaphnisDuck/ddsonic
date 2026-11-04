@@ -114,6 +114,7 @@ func (m *Model) loadFBDir() {
 	m.fileBrowser.searching = false
 	m.fileBrowser.search = ""
 	m.fileBrowser.filtered = nil
+	m.fileBrowser.hidden = 0 // ddsonic
 	clear(m.fileBrowser.selected)
 
 	// Reuse internal memory buffer of m.fileBrowser.entries.
@@ -169,13 +170,17 @@ func (m *Model) loadFBDir() {
 				isDir: true,
 			})
 		} else {
+			isAudio := player.SupportedExts[strings.ToLower(filepath.Ext(name))]
+			if m.fbLeavesOut(isAudio) { // ddsonic: audio only unless all files are shown (P-42)
+				continue
+			}
 			if files == nil {
 				files = make([]fbEntry, 0, 16) // Avoid reallocations
 			}
 			files = append(files, fbEntry{
 				name:    name,
 				path:    filepath.Join(m.fileBrowser.dir, name),
-				isAudio: player.SupportedExts[strings.ToLower(filepath.Ext(name))],
+				isAudio: isAudio,
 			})
 		}
 	}
@@ -373,6 +378,9 @@ func (m *Model) handleFileBrowserKey(msg tea.KeyPressMsg) tea.Cmd {
 			}
 		}
 		m.fbMaybeAdjustScroll(m.fbVisible())
+
+	case "f": // ddsonic: audio only, or all files (P-42)
+		m.fbToggleAllFiles()
 
 	case "~":
 		if cd, _ = os.UserHomeDir(); cd != "" && m.fileBrowser.dir != cd {

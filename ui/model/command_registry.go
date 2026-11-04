@@ -269,6 +269,7 @@ var commandRegistry = []commandSpec{
 	{Mode: commandModeQueue, Keys: []string{"d"}, KeyLabel: "d", Label: "Remove", Destructive: true, ContextHelp: true, Primary: true, Enabled: func(m Model) bool { return m.playlist != nil && m.playlist.QueueLen() > 0 }},
 	{Mode: commandModeQueue, Keys: []string{"c"}, KeyLabel: "c", Label: "Clear", Destructive: true, ContextHelp: true},
 	{Mode: commandModeFileBrowser, Keys: []string{"R"}, KeyLabel: "R", Label: "Replace queue", Destructive: true, ContextHelp: true},
+	{Mode: commandModeFileBrowser, Keys: []string{"f"}, KeyLabel: "f", Label: "All files", LabelFor: fbToggleLabel, ContextHelp: true, Prominent: true}, // ddsonic: P-42
 	{Mode: commandModeNavBrowser, Keys: []string{"R"}, KeyLabel: "R", Label: "Replace queue", Destructive: true, ContextHelp: true, Enabled: func(m Model) bool { return m.navView() == navViewTracks }},
 	{Mode: commandModeLyrics, Keys: []string{"r"}, KeyLabel: "r", Label: "Retry", ContextHelp: true, Primary: true, Enabled: func(m Model) bool { return !m.lyrics.loading && (m.lyrics.err != nil || len(m.lyrics.lines) == 0) }},
 	{Mode: commandModeLyrics, Keys: []string{"[", "]"}, KeyLabel: "[ ]", Label: "Sync offset (−/+250 ms)", ContextHelp: true, Keymap: true, Enabled: func(m Model) bool { return m.lyricsSyncable() && m.lyricsHaveTimestamps() }},

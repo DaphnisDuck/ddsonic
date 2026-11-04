@@ -235,6 +235,8 @@ type fileBrowserState struct {
 	filtered       []int // indices into entries
 	targetPlaylist string
 	confirmReplace bool
+	allFiles       bool // ddsonic: list every file, not only audio (P-42, filebrowser_audio_ddsonic.go)
+	hidden         int  // ddsonic: the files of this directory the audio-only listing leaves out
 }
 
 // navBrowserState holds state for the provider browser overlay.

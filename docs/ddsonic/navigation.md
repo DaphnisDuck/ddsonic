@@ -21,7 +21,7 @@ Music
 - **YouTube Music:** your music playlists and Liked Music. **Albums from tracks** and **Artists from tracks** are read from those tracks in the background: saved YouTube Music Library Albums and followed artists are not synchronized, and an album there holds only the tracks of it you have. See [youtube.md](youtube.md).
 - **Local:**
   - **Albums**, **Artists** and **Genres** come from an index of your music directory: `initial_directory` from config, else `$XDG_MUSIC_DIR`, else `~/Music`. Files are grouped into albums by album tag within a folder (per-disc folders like `CD1` stay one album); an album with several track artists is credited to Various Artists and listed under each of them.
-  - **Folders** opens the file browser.
+  - **Folders** opens the file browser. It lists folders and the audio files ddsonic can play, and leaves out other files such as covers, logs and cue sheets; the header says how many it left out. `f` lists every file, and `f` again only audio, for the rest of the session. Files whose names start with a dot stay hidden either way.
   - **Playlists** are your saved local playlists.
 - **Radio:**
   - **Favorites** are your starred stations. Enter plays one.
