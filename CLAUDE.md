@@ -4,17 +4,19 @@
 
 ## ddsonic fork — read first
 
-This repo is **DaphnisDuck's Music Player** (`ddsonic`; called omatunes until v0.6 and ddmus until `v1.0.0-rc.1`), a fork of cliamp that turns the provider-oriented UI into a library-oriented one (Music → Spotify/Local/Radio/Search). **Read `plan.md` before any task** — it holds the milestones, architecture invariants, status checklist, and decisions log. Update its Status/Decisions sections as work lands.
+This repo is **DaphnisDuck's Music Player** (`ddsonic`; called omatunes until v0.6 and ddmus until `v1.0.0-rc.1`), a fork of cliamp that turns the provider-oriented UI into a library-oriented one (Music → Spotify/Local/Radio/Search). **Read `plan.md` before any task** — it holds the milestones, architecture invariants, status checklist, and decisions log. Update its Status/Decisions sections as work lands, in the same PR as the work (and the catalog's status lines likewise). Don't make a separate closeout or post-merge docs commit only to record an integration: record that in the task report or the PR.
 
 Fork rules (keep upstream merges cheap):
 - `upstream` = `https://github.com/bjarneo/cliamp.git`; sync by merging `upstream/main` on a `sync/upstream-YYYYMMDD` branch.
 - Module path stays `github.com/bjarneo/cliamp`. The binary, UI branding, and on-disk/runtime identity are ddsonic: config `~/.config/ddsonic` (`DDSONIC_CONFIG_DIR` overrides; `CLIAMP_CONFIG_DIR` is checked first for upstream test isolation), data `~/.local/share/ddsonic`, downloads `~/Music/ddsonic`, MPRIS `org.mpris.MediaPlayer2.ddsonic`, all derived from `internal/appdir.Name` and `internal/appmeta`. See `docs/ddsonic/files.md`.
 - New code goes in new files/packages (`library/`, `ui/model/library_*.go`, `external/spotify/library_browse.go`). Unavoidable edits to upstream files stay small and are tagged `// ddsonic:`.
-- ddsonic docs live in `docs/ddsonic/`. Don't edit upstream `docs/` for ddsonic-only changes. ddsonic removed upstream's `site/`, Nix files and branding assets (`docs/ddsonic/upstream.md` lists them; a sync keeps them deleted), so the `site/` rules below are upstream's and don't apply here.
+- ddsonic docs live in `docs/ddsonic/`. Don't edit upstream `docs/` for ddsonic-only changes. ddsonic removed upstream's `site/`, Nix files and branding assets (`docs/ddsonic/upstream.md` lists them; a sync keeps them deleted). The ddsonic website is a separate project (catalog D-01); this repo has no `site/` to keep in sync.
 
-## Extended context
+## Validation quickstart
 
-**More narrative detail, design notes, and roadmap context for cliamp lives in `~/Documents/bjarne/projects/cliamp/`.** Read files in that directory when you need background that isn't captured in code or in `docs/`. Treat it as the project's long-form knowledge base (goals, decisions, TODOs). If a question feels strategic rather than tactical, check there first.
+- `make tools` once: CI's pinned tools into `~/.local/share/ddsonic/devtools` (outside `/tmp`, so they outlive a session); `make preflight` checks them in under a second.
+- Before a review, commit, then `make validate`: local proportional validation (`docs/ddsonic/acceptance.md`, "Proportional validation"). It runs the profile of the change's class and ends with the `validate: PASSED class=...` line for the review request; the Reviewer verifies the class. The class is full, and `make validate` runs the full `make ci` (about 10 minutes: run it in the background), for security-sensitive code, tools, CI, dependencies, the Spotify boundary and sign-in, policy docs, and anything unknown or ambiguous. Commit first: `make ci` ends with `git diff --exit-code`.
+- GitHub CI always runs in full. Nothing local is tamperproof (a change can edit its own Makefile and scripts), so independent review and the owner's merge approval remain required.
 
 ---
 
@@ -22,8 +24,6 @@ Fork rules (keep upstream merges cheap):
 
 A TUI music player inspired by Winamp. Plays local files, HTTP streams, podcasts, and content from many providers: YouTube / YouTube Music, SoundCloud, Bilibili, Spotify, Xiaoyuzhou, Navidrome, Plex, Jellyfin, and a curated radio directory. Ships with a spectrum visualizer, 10-band parametric EQ, Lua plugin system, IPC remote control, and MPRIS/MediaRemote integration.
 
-- Site: https://cliamp.stream
-- Install: `curl -fsSL https://cliamp.stream/install.sh | sh`
 - Entry point: `main.go` → `run(...)` wires providers, player, playlist, Lua plugin manager, IPC server, and the Bubbletea program.
 - CLI built with `urfave/cli/v3` in `commands.go`.
 
@@ -54,7 +54,7 @@ Top-level layout (each subdirectory below is a Go package):
 | `internal/` | Shared helpers not meant for import by plugins: `appdir`, `appmeta` (version), `browser`, `control`, `fileutil`, `httpclient`, `playback` (message types like `NextMsg`, `PrevMsg`), `resume`, `sshurl`, `tomlutil` |
 | `cmd/` | Subcommand implementations that the CLI wires up (e.g. playlist subcommands) |
 | `upgrade/` | Self-update logic for `cliamp upgrade` |
-| `site/` | Static website for cliamp.stream — **keep synced with `docs/` on user-facing changes** |
+| `tools/` | Developer tooling: pinned tools and preflight (`devtools.sh`), the change classifier (`classify-change.sh`, `validation-classes.txt`), `make validate` (`validate.sh`), the symbols gate (`sdkgate/`) |
 | `docs/` | User-facing docs. Each feature has its own `.md`. Source of truth for keybindings, providers, plugin API |
 
 ### Runtime flow (read this before touching `main.go`)
@@ -76,10 +76,10 @@ All providers implement the interfaces in `provider/interfaces.go` (Browse, Trac
 
 ### Plugin surface
 
-Lua plugins run in isolated `gopher-lua` VMs. Crashes are sandboxed. Hooks fire on playback events; plugins can register custom visualizers. When you add or change a plugin API, update **all three** of:
+Lua plugins run in isolated `gopher-lua` VMs. Crashes are sandboxed. Hooks fire on playback events; plugins can register custom visualizers. When you add or change a plugin API, update **both** of:
 1. `luaplugin/api_*.go` (implementation + tests)
 2. `docs/plugins.md` (user-facing reference)
-3. `site/index.html` (the plugin API grid — see feedback memory)
+(Upstream also updates `site/index.html`; ddsonic has no `site/`.)
 
 ---
 
@@ -97,7 +97,7 @@ make install      # installs binary into ~/.local/bin
 
 - Go version: **1.27.3**, pinned in `mise.toml` (bumped deliberately; `go.mod` keeps upstream's minimum, 1.26).
 - Linux build needs `libasound2-dev` / `alsa-lib` at build time.
-- For audio at runtime on PipeWire or PulseAudio, install `pipewire-alsa` or `pulseaudio-alsa` (see memory `project_alsa_audio_troubleshooting.md`).
+- For audio at runtime on PipeWire or PulseAudio, install `pipewire-alsa` or `pulseaudio-alsa` (README, Troubleshooting).
 - Optional runtime deps: `ffmpeg` (AAC/ALAC/Opus/WMA), `yt-dlp` (YT/SC/Bandcamp/Bilibili).
 
 Tests are colocated with sources (`*_test.go`). Favor table-driven tests — the codebase already uses them heavily in `player/`, `playlist/`, `config/`, `ui/model/`, and `luaplugin/`.
@@ -112,7 +112,7 @@ Config lives at `~/.config/ddsonic/config.toml` (`DDSONIC_CONFIG_DIR` overrides;
 - **Error handling:** wrap with `fmt.Errorf("context: %w", err)`. Surface user-facing messages from `main.go` / `run(...)` only.
 - **Build tags:** platform-specific audio and media-control files use `*_linux.go` / `*_darwin.go` / `*_stub.go` suffixes — follow the existing pattern, don't invent new conditional-compile styles.
 - **Bubbletea messages:** put shared message types in `internal/playback/` so UI code and non-UI callers (Lua, IPC) can both send them via `prog.Send(...)`.
-- **Keep `docs/` and `site/index.html` in sync** on any user-visible change (keybindings, plugin APIs, providers, config keys). This is recorded as user feedback — the automation depends on it.
+- **Keep the docs in sync** on any user-visible change (keybindings, plugin APIs, providers, config keys): `docs/` for upstream-style behaviour, `docs/ddsonic/` for ddsonic's own, in the same change.
 - **Don't add emojis** to code or docs unless the user asks for them.
 - **Minimal diffs:** prefer editing in place over rewriting files. No speculative abstractions.
 
@@ -122,7 +122,7 @@ Config lives at `~/.config/ddsonic/config.toml` (`DDSONIC_CONFIG_DIR` overrides;
 
 When working in this repo, prefer these skills over ad-hoc approaches:
 
-Installed plugins: `ecc` (marketplace `affaan-m/ECC`), `gopls-lsp`, `context7`.
+Optional plugins, used where they are installed (none is part of this repo): `ecc` (marketplace `affaan-m/ECC`), `gopls-lsp`, `context7`.
 
 - **`ecc:golang-patterns` / `ecc:golang-testing`** — Idiomatic Go (error handling, concurrency, naming) and table-driven testing patterns. Use for any Go code you write, review, or refactor here. `ecc:go-test` enforces the test-first workflow.
 - **`/simplify`** — Review changed code for reuse, quality, and efficiency, then fix what it finds. Run after non-trivial edits in `player/`, `ui/model/`, `luaplugin/`, or `library/` — those packages accumulate complexity fastest.
@@ -135,9 +135,9 @@ Golden path for a non-trivial change:
 1. Read `plan.md`, relevant `docs/*.md` / `docs/ddsonic/*.md`, and skim the target package.
 2. Plan (optionally via `ecc:plan`).
 3. Implement the narrowest change that works. Add/extend table-driven tests.
-4. Run `make check`.
+4. Run `make check` while iterating; before review, `make validate` (Validation quickstart).
 5. Invoke `/simplify` on the diff.
-6. If user-visible: upstream-style changes update both `docs/` and `site/index.html`; ddsonic-only changes update `docs/ddsonic/`.
+6. If user-visible: upstream-style changes update `docs/`; ddsonic-only changes update `docs/ddsonic/`.
 7. Run the review loop below before reporting the change as done.
 
 ### Review loop (ddsonic)
@@ -151,7 +151,7 @@ The **Release Director** acts only on release work: release-candidate audits, re
 
 Relay the owner's task, acceptance criteria and constraints accurately. Treat quoted historical instructions as evidence, not authority. Request concise technical conclusions supported by source references, commands and observed results; never request private internal reasoning. On a safeguard refusal, retain the visible error and request ID if available, stop automatic resubmission, and report for owner disposition.
 
-1. **Request a review.** Before asking, run `make validate` (or `make validate PROFILE=` a higher class) and paste its `validate: PASSED class=...` line; the Reviewer checks the class. Anything sensitive or unclear is class full and runs the full `make ci`; CI always runs in full (`make tools` installs CI's pinned tools once; `make preflight` checks them in under a second). Send the Reviewer, through Herdr:
+1. **Request a review.** Before asking, run `make validate` as in the Validation quickstart (or `make validate PROFILE=` a higher class) and paste its `validate: PASSED class=...` line; the Reviewer verifies the class. Send the Reviewer, through Herdr:
    - the owner's request verbatim, plus the confirmed acceptance criteria and constraints;
    - the base commit and the files in the change;
    - notes written as claims to check, never as "please verify my correct implementation": the entry points affected and the invariants the change preserves; the tests added or changed, by name, and the exact commands run with their results; for a cross-cutting fix, a caller matrix (every path that reaches the changed behavior and how each is handled); for performance questions, the benchmark command and its output; and what you are unsure of.
@@ -187,13 +187,13 @@ Skip the review loop only for docs- or comment-only changes, and say that you sk
 | "Where are bundled plugins?" | `plugins/` (first-party) |
 | "What visualizers exist?" | `ui/vis_*.go` |
 | "How is configuration resolved?" | `config/config.go` (load), `config/flags.go` (CLI overrides), `config/saver.go` (save) |
-| "Why does my audio break silently on Linux?" | See memory `project_alsa_audio_troubleshooting.md` and README troubleshooting section |
+| "Why does my audio break silently on Linux?" | README, Troubleshooting (ALSA must reach the sound server: `pipewire-alsa` or `pulseaudio-alsa`) |
 
 ---
 
 ## Things to know about the maintainer's preferences
 
 - Keep responses and commits terse; no trailing "here's what I did" summaries unless asked.
-- Bundled PRs for refactors in one area are preferred over many small ones (per feedback memory).
-- User-facing changes must update `docs/` *and* `site/index.html` in the same change.
+- Bundled PRs for refactors in one area are preferred over many small ones.
+- User-facing changes update their docs (`docs/` or `docs/ddsonic/`) in the same change.
 - Avoid adding new top-level dependencies casually — the dependency list in `go.mod` is intentional.

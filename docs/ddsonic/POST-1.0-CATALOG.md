@@ -1124,7 +1124,7 @@ The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and correc
 ### D-14 Agent instructions (`CLAUDE.md`) stale on `site/`
 - **Outcome:** the agent docs stop telling agents to keep `site/index.html` in sync; `site/` was removed on 2026-10-04.
 - **Source:** `CLAUDE.md:57, 82, 115, 140, 198` versus `CLAUDE.md:13`; `docs/ddsonic/releasing.md:43` (agent-docs cleanup).
-- **Status / prior decisions:** agreed and pending.
+- **Status / prior decisions:** done in the agent-guidance refresh (2026-11-04): those lines no longer ask for `site/` (the cited lines were rewritten in place). The rest of the agent-docs cleanup (releasing.md:43) stays open under E-04.
 - **Category:** documentation.
 - **Dependencies:** part of E-04. D-01: the Astro site is a separate project, so the agent docs may need to say how it relates to this repo.
 - **Duplicates merged:** with E-04's agent-docs cleanup.
