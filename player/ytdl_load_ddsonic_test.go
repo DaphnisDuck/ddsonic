@@ -177,6 +177,9 @@ func TestStopCancelsTheDurationProbeOfAYTDLLoad(t *testing.T) {
 	timed(t, "Stop", actsWithin, p.Stop)
 	fake.WaitLive(t, 0, stopsWithin)
 	finished(t, "the load", done)
+	// The probe runs, and is released, on a goroutine of its own that the
+	// load does not wait for: its directory may outlive the load by a moment.
+	fake.WaitNoCopy(t, stopsWithin)
 	fake.RequireNoCopy(t)
 }
 

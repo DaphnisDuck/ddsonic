@@ -806,10 +806,10 @@ The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and correc
 ### R-01 Intermittent Linux player test: `TestStopCancelsTheDurationProbeOfAYTDLLoad`
 - **Outcome:** a deterministic test, or a player fix, so that a stopped load's duration-probe temp directory is gone when the test checks.
 - **Source:** private maintenance records (`player/ytdl_load_ddsonic_test.go:161`).
-- **Status / prior decisions:** open.
+- **Status / prior decisions:** done in this change (2026-11-04), not released: a test defect, not a player one; it also failed once in main CI at 4ddc26f (run 41780688252).
   - Failed 1 in 4 full `-race` runs at commit e3af1044; passed 30/30 alone.
-  - Likely, unverified: the test does not wait for the probe's `release` (`internal/ytdlp/command.go:73-90`).
-  - Decide test vs player first.
+  - Cause, confirmed: the probe runs and is released on a goroutine the load does not wait for (`player/player.go:254`), so its directory can outlive the load's return by a moment; the release still always runs (`internal/ytdlp/command.go:73-90`), and quitting waits for it (`ytdlp.Shutdown`).
+  - Fix: the test waits for the directory to go (`WaitNoCopy`, as the other detached-cleanup tests do) before `RequireNoCopy`; 5/200 failures under load before, 0/200 after.
 - **Category:** reliability-security (bug).
 - **Dependencies:** relates R-02 and R-03.
 - **Duplicates merged:** the macOS occurrence of the same test (R-02 issue 1).
@@ -1301,7 +1301,7 @@ The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and correc
 - **Spotify SDK strategy (E-05)** and the Vorbis dependency direction (E-15).
 - **AUR (D-02):** the packaging decisions; publish or not; then D-03 and D-04 wording.
 - **macOS (D-09):** whether to pursue R-02/R-03 now, and the condition for restoring CI or shipping a build.
-- **Reliability:** test vs player fix for R-01; whether the Spotify 1.0 limitations (R-10) and carried findings (R-11) get fixes.
+- **Reliability:** whether the Spotify 1.0 limitations (R-10) and carried findings (R-11) get fixes.
 - **QA policy (R-15, E-04):** evidence age, test accounts, permitted account mutations, waiver recording; which CI guarantees are mandatory per push (E-03).
 - **Security and privacy:** the status of the pre-1.0 adversarial audit (R-08); running the privacy audit (R-09); the screenshot's contents (D-06).
 - **Release hygiene:** the version-identification fix before the next release (D-07); attestation or a CI-built release for the next release (D-11).
