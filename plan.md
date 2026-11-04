@@ -981,7 +981,7 @@ Provider work, in this order (owner, 2026-10-09; none of it is needed for v1.0.0
 This order is among provider work; the full upstream merge below stays the first 1.1 work.
 
 - [Album Artwork Across More Terminals](docs/ddsonic/POST-1.0-IDEAS.md#album-artwork-across-more-terminals): investigate alternative image libraries and protocol support; consolidates the Sixel/iTerm2/other-terminal idea, with no library change approved.
-- Rename `library.SyncedSource.PartialAlbums` (a small cleanup, with the provider-contract work): it now governs "Albums from tracks" and "Artists from tracks" alike. Left alone in the 1.0 fix: no correctness reason to change reviewed code.
+- Rename `library.SyncedSource.PartialAlbums` (a small cleanup, with the provider-contract work): it now governs "Albums from tracks" and "Artists from tracks" alike. Left alone in the 1.0 fix: no correctness reason to change reviewed code. Done 2026-11-04 (E-14): it is `ListsFromTracks`, with no change of behaviour.
 - `X` in the queue clears the whole queue (Ctrl+Z undoes it); `X` is free once the provider hotkeys go.
 - Broad-prefix search speed (P3), only if it becomes a complaint.
 - Linux arm64, macOS, Homebrew, `.deb`/`.rpm`, once someone can test them.

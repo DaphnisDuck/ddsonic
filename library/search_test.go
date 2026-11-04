@@ -307,7 +307,7 @@ func (n neverFetch) FetchAlbumTracks(context.Context, catalog.Album) ([]catalog.
 
 // A partial source's album (YouTube's: only your tracks of it) opens and
 // plays as it is, never fetched whole.
-func TestPartialAlbums(t *testing.T) {
+func TestListsFromTracks(t *testing.T) {
 	cat, _, _ := newCatalogFixture()
 	album := catalog.Album{ID: 70, Ref: lref3("youtube", "album:chicago/best"), Title: "Best of Chicago", Artist: "Chicago"}
 	cat.albums = append(cat.albums, album)
@@ -316,7 +316,7 @@ func TestPartialAlbums(t *testing.T) {
 	cat.albumTracks[70] = []catalog.Track{beginnings, smile} // not "cached"
 	c := neverFetch{cat, t}
 	yt := SyncedSource{Provider: "youtube", Title: "YouTube Music", Player: &fakeProvider{name: "YouTube Music"},
-		Collections: []string{catalog.CollectionAlbums}, PartialAlbums: true}
+		Collections: []string{catalog.CollectionAlbums}, ListsFromTracks: true}
 
 	albums := load(t, child(t, SyncedMenu(c, yt), AlbumsFromTracks))
 	var row Entry
@@ -405,7 +405,7 @@ func sharedRecording(t *testing.T) (*fakeCatalog, Level) {
 	}
 	sp := &searchable{liveSpotify{fakeProvider: fakeProvider{name: "Spotify"}}}
 	yt := SyncedSource{Provider: catalog.YouTube, Title: "YouTube Music", Player: &fakeProvider{name: "YouTube Music"},
-		Collections: []string{catalog.CollectionLiked}, PartialAlbums: true}
+		Collections: []string{catalog.CollectionLiked}, ListsFromTracks: true}
 	root := Root(Sources{Spotify: sp, Local: &fakeProvider{name: "Local"}, Radio: &directoryRadio{fakeProvider{name: "Radio"}},
 		MusicDir: "/m", Catalog: cat, Synced: append(spotifySynced(sp), yt)})
 	return cat, child(t, root, "Search")

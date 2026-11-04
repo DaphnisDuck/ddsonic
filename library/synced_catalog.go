@@ -36,7 +36,7 @@ type catalogAlbumsLevel struct {
 	order *atomic.Int32 // a catalog.AlbumOrder
 }
 
-// The lists of a source with PartialAlbums are not "Albums" and "Artists":
+// The lists of a source with ListsFromTracks are not "Albums" and "Artists":
 // its saved albums and followed artists are not synced, and the lists must
 // not read as if they were.
 const (
@@ -47,7 +47,7 @@ const (
 	FromTracks = "from tracks"
 )
 
-// tracksList describes a list a PartialAlbums source builds from its
+// tracksList describes a list a ListsFromTracks source builds from its
 // tracks: its title, what the account has that it is not, and its row when
 // empty.
 type tracksList struct {
@@ -102,13 +102,13 @@ type SyncedSource struct {
 	Player playlist.Provider
 	// LikedTitle names the liked list; "Liked Songs" when empty.
 	LikedTitle string
-	// PartialAlbums marks a source whose albums hold only the tracks the
-	// catalog has (YouTube's, derived from enriched tracks): an album opens
-	// and plays as it is, never fetched whole. Its artists are derived the
-	// same way. Its lists are titled AlbumsFromTracks and ArtistsFromTracks
+	// ListsFromTracks marks a source whose album and artist lists are built
+	// from the tracks the catalog has (YouTube's, derived from enriched
+	// tracks): an album holds only those tracks and opens and plays as it
+	// is, never fetched whole, and its artists are derived the same way. Its lists are titled AlbumsFromTracks and ArtistsFromTracks
 	// and carry a note saying so, and its album and artist rows are
 	// labelled FromTracks where sources mix.
-	PartialAlbums bool
+	ListsFromTracks bool
 }
 
 // SyncedMenu returns a synced source's menu, backed by the catalog. It
@@ -119,7 +119,7 @@ func SyncedMenu(cat catalog.Catalog, src SyncedSource) Level {
 	liked := cmp.Or(src.LikedTitle, "Liked Songs")
 	albums, artists := tracksList{title: "Albums"}, tracksList{title: "Artists"}
 	var albumsNote, artistsNote []string
-	if src.PartialAlbums {
+	if src.ListsFromTracks {
 		albums, artists = albumsFromTracks, artistsFromTracks
 		albumsNote, artistsNote = albums.note(src.Title, liked), artists.note(src.Title, liked)
 	}
@@ -150,7 +150,7 @@ type sourceMenu struct {
 func (m *sourceMenu) SourceProvider() string { return m.provider }
 
 func syncedBrowser(cat catalog.Catalog, src SyncedSource) *catalogBrowser {
-	return &catalogBrowser{cat: cat, prov: src.Player, provider: src.Provider, partialAlbums: src.PartialAlbums,
+	return &catalogBrowser{cat: cat, prov: src.Player, provider: src.Provider, listsFromTracks: src.ListsFromTracks,
 		pending: "Syncing your library… (press r to retry if this persists)"}
 }
 
@@ -164,8 +164,8 @@ type catalogBrowser struct {
 	none     string // shown in an empty list after it; "" shows nothing
 	// albumOrder is the Albums list's order, a catalog.AlbumOrder.
 	albumOrder atomic.Int32
-	// partialAlbums: albums are only the catalog's tracks (SyncedSource).
-	partialAlbums bool
+	// listsFromTracks: albums and artists come from the catalog's tracks (SyncedSource).
+	listsFromTracks bool
 }
 
 // albumsList is the albums list, which the UI can reorder.
@@ -264,11 +264,11 @@ func (b *catalogBrowser) albums(ctx context.Context) ([]Entry, error) {
 }
 
 // fromTracksPlaceholder is syncingPlaceholder for a list that a
-// PartialAlbums source builds from its tracks: synced and still empty, it
+// ListsFromTracks source builds from its tracks: synced and still empty, it
 // says that no track read so far has what the list groups by.
 func (b *catalogBrowser) fromTracksPlaceholder(ctx context.Context, entries []Entry, list tracksList) ([]Entry, error) {
 	entries, err := b.syncingPlaceholder(ctx, entries)
-	if err == nil && len(entries) == 0 && b.partialAlbums {
+	if err == nil && len(entries) == 0 && b.listsFromTracks {
 		entries = []Entry{{Title: list.none}}
 	}
 	return entries, err
@@ -280,7 +280,7 @@ func (b *catalogBrowser) albumEntry(a catalog.Album, detail string) Entry {
 		if err != nil {
 			return cachedRows(err)
 		}
-		if !cached && !b.partialAlbums {
+		if !cached && !b.listsFromTracks {
 			return nil, false, nil // the rows were fetched live
 		}
 		return catalogTrackEntries(tracks), true, nil
@@ -290,7 +290,7 @@ func (b *catalogBrowser) albumEntry(a catalog.Album, detail string) Entry {
 		if err != nil {
 			return nil, notInLibrary(err)
 		}
-		if cached || b.partialAlbums {
+		if cached || b.listsFromTracks {
 			return catalogTrackEntries(tracks), nil
 		}
 		// Not cached yet: fetch and cache it, or at least show it live.

@@ -10,7 +10,7 @@ import (
 
 func youtubeSource(cols ...string) SyncedSource {
 	return SyncedSource{Provider: catalog.YouTube, Title: "YouTube Music", Player: &fakeProvider{name: "YouTube Music"},
-		Collections: cols, LikedTitle: "Liked Music", PartialAlbums: true}
+		Collections: cols, LikedTitle: "Liked Music", ListsFromTracks: true}
 }
 
 // A source whose albums and artists come from its tracks (YouTube Music)

@@ -560,14 +560,14 @@ func TestYouTubeListsAreFromTracks(t *testing.T) {
 			t.Errorf("%s menu = %+v (err %v)", s.Provider, entries, err)
 			continue
 		}
-		if s.PartialAlbums != (s.Provider == catalog.YouTube) {
-			t.Errorf("%s: partial albums %v", s.Provider, s.PartialAlbums)
+		if s.ListsFromTracks != (s.Provider == catalog.YouTube) {
+			t.Errorf("%s: lists from tracks %v", s.Provider, s.ListsFromTracks)
 		}
 		for i, e := range entries {
 			note, _ := e.Open.(library.NotedLevel)
 			hasNote := note != nil && len(note.Note()) > 0
-			if e.Title != want[s.Provider][i] || hasNote != s.PartialAlbums {
-				t.Errorf("%s list %d is %q with note %v, want %q with note %v", s.Provider, i, e.Title, hasNote, want[s.Provider][i], s.PartialAlbums)
+			if e.Title != want[s.Provider][i] || hasNote != s.ListsFromTracks {
+				t.Errorf("%s list %d is %q with note %v, want %q with note %v", s.Provider, i, e.Title, hasNote, want[s.Provider][i], s.ListsFromTracks)
 			}
 		}
 	}

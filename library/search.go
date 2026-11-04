@@ -301,11 +301,11 @@ func (s *catalogView) artistRow(a catalog.Artist) (Entry, bool) {
 }
 
 // sourceLabel labels an album's or artist's row with its source. A
-// PartialAlbums source's are not saved albums or followed artists, only
+// ListsFromTracks source's are not saved albums or followed artists, only
 // what its tracks name, and the label says so.
 func (s *catalogView) sourceLabel(provider string) string {
 	label := SourceLabel(provider)
-	if b := s.synced[provider]; b != nil && b.partialAlbums {
+	if b := s.synced[provider]; b != nil && b.listsFromTracks {
 		label = joinDetail(label, FromTracks)
 	}
 	return label
@@ -347,7 +347,7 @@ func (s *catalogView) albumFrom(t catalog.Track) func(ctx context.Context) ([]pl
 		// silently skip the rest. A local album is always whole, and a
 		// partial source's album is all there is.
 		b := s.synced[t.Ref.Provider]
-		if !cached && t.Ref.Provider != catalog.Local && (b == nil || !b.partialAlbums) {
+		if !cached && t.Ref.Provider != catalog.Local && (b == nil || !b.listsFromTracks) {
 			tracks = s.fetchAlbum(ctx, t.AlbumID)
 		}
 		// The track is found by ref, not ID: if a sync replaced the album
