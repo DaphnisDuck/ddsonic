@@ -1,0 +1,57 @@
+name: macOS R-02 diagnostic
+
+# ddsonic: TEMPORARY. The one diagnostic macOS run of the R-02 test-fixture
+# change (Operation Skeleton Key, catalog R-02): it runs the yt-dlp fixture
+# and the player's stop tests on macOS, then the two tests that failed there
+# twenty times more. It runs only on a push to a scratch/r02-macos-fixture-*
+# branch, never on main, a pull request, a tag or a schedule. It validates
+# the fixture only: it is not macOS CI (D-09), and says nothing of ddsonic
+# in use on macOS. Delete this file with the scratch branch; it is not to be
+# merged.
+on:
+  push:
+    branches: ["scratch/r02-macos-fixture-**"]
+
+permissions:
+  contents: read
+
+jobs:
+  r02-fixture:
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.3" # the pinned release toolchain, as in the Linux job
+      - name: Install codec libs
+        run: |
+          brew install flac libvorbis libogg mpg123 pkg-config
+          # Make sure pkg-config resolves the version just poured rather than
+          # a leftover symlink into an older Cellar directory.
+          brew link --overwrite flac libvorbis libogg mpg123
+          pkg-config --libs libmpg123 flac vorbis ogg
+      - name: Discard cached cgo objects
+        # As the removed macOS job did: cached cgo objects can name a
+        # Homebrew Cellar directory that no longer exists.
+        run: go clean -cache
+      - name: Build
+        run: |
+          go version
+          go build -trimpath ./...
+      - name: The yt-dlp fixture and the player's stop tests
+        run: |
+          go test -race -count=1 -v ./internal/ytdlp/...
+          go test -race -count=1 -v -run '^(TestStop|TestRepeatedSkips|TestCopier)' ./player/
+      - name: The two tests that failed on macOS, twenty times
+        if: ${{ !cancelled() }}
+        run: |
+          go test -race -count=20 -v -run '^(TestStopLeavesOtherYTDLRunsAlone|TestRepeatedSkipsDoNotAccumulateYTDLRuns)$' ./player/
+      - name: What is left running
+        if: ${{ always() }}
+        # Anything the tests left behind (the earlier runs ended with an
+        # orphaned cat); bounded, and nothing is stopped here.
+        run: |
+          ps -A -o pid=,ppid=,stat=,command= | grep -E 'yt-dlp|sleep|cat|ffmpeg' | grep -v grep | head -40 || true
