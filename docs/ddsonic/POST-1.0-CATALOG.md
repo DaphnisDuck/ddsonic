@@ -728,7 +728,7 @@ The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and correc
 ### E-14 Rename `library.SyncedSource.PartialAlbums`
 - **Outcome:** a name that covers "Albums from tracks" and "Artists from tracks".
 - **Source:** plan.md:984, 797; IDEAS:161.
-- **Status / prior decisions:** done in this change (2026-11-04), not released: the field is now `library.SyncedSource.ListsFromTracks` (and the private `catalogBrowser.listsFromTracks`, the test `TestListsFromTracks`); a Go-only rename with no change of behaviour, nothing serialized, stored or exposed. Earlier, HIST: left alone in 1.0, with "no correctness reason to change reviewed code".
+- **Status / prior decisions:** done in this change (2026-11-04), not released: the field is now `library.SyncedSource.ListsFromTracks` (and the private `catalogBrowser.listsFromTracks`, the test `TestListsFromTracks`); a Go-only rename with no change of behaviour: nothing persisted, no protocol, config or plugin exposure; only the exported Go identifier of the `library` package changed (code outside the repo that used `PartialAlbums` would no longer compile), and that package makes no stable API promise. Earlier, HIST: left alone in 1.0, with "no correctness reason to change reviewed code".
 - **Category:** architecture (cleanup).
 - **Dependencies:** with E-13 / P-04.
 - **Duplicates merged:** all three sources.

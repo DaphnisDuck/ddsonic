@@ -158,7 +158,7 @@ Followed artists are to be evaluated deliberately, not assumed mandatory.
 
 Partial provider semantics are never shipped silently under the same UI contract as first-class providers.
 
-**Later investigation.** Express the contract in Go provider capabilities, not only in documentation, so UI behavior follows from it; see [Capability-Based Provider Architecture](#capability-based-provider-architecture). A small related cleanup: the internal flag `library.SyncedSource.PartialAlbums` now governs both "Albums from tracks" and "Artists from tracks", so its name misleads (done 2026-11-04, E-14: it is now `ListsFromTracks`). Rename it, or replace it with whatever models derived collections, as part of this work. It was left as it is in the 1.0 fix on purpose: no correctness reason to touch reviewed code.
+**Later investigation.** Express the contract in Go provider capabilities, not only in documentation, so UI behavior follows from it; see [Capability-Based Provider Architecture](#capability-based-provider-architecture). A small related cleanup, done: the flag `library.SyncedSource.PartialAlbums`, which governs both "Albums from tracks" and "Artists from tracks", was renamed `ListsFromTracks` on 2026-11-04 (E-14), after being left alone in the 1.0 fix; this work may still replace it with whatever models derived collections.
 
 Spotify and Local are to be recorded against the contract too, once it exists, so that the baseline describes what ships and not only what is added.
 
