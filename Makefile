@@ -99,13 +99,14 @@ check: fmt vet test
 # validate classifies the change against a freshly fetched main and runs the
 # profile for its class; PROFILE=test|code|full may raise it, never lower it
 # (tools/validate.sh). It prints the class line a review request quotes.
-# The classifier is started in one place, tools/ci-classify.sh, which CI
-# runs too; it is not a Make variable, which a command line could replace.
+# It is a local aid: CI runs every job in full on every event. The
+# classifier is started in one place, tools/change-class.sh; it is not a
+# Make variable, which a command line could replace.
 validate:
 	@MAKE='$(MAKE)' sh tools/validate.sh
 
 # The docs and test profiles. validate-docs needs the base commit, which
-# make validate and CI pass; the citation check is strict, so a missing base
+# make validate passes; the citation check is strict, so a missing base
 # is a failure, never a skip.
 validate-docs: preflight-core fmt-check
 	@expr "$(VALIDATE_BASE)" : '[0-9a-f]\{40,64\}$$' >/dev/null || { echo "validate-docs: VALIDATE_BASE must be a commit ID"; exit 2; }

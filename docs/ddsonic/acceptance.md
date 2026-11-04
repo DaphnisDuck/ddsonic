@@ -6,7 +6,7 @@ This page says how it works. The cases are in [acceptance/cases.yaml](acceptance
 
 ## Three layers, in this order
 
-1. **Automated code validation.** `make ci`: format, vet, staticcheck, govulncheck, the tests with the race detector, the contract gate. In full in CI on every commit on `main`, every release tag and every manual run, and on every pull request commit whose class is full; a pull request commit of a lower class runs that class's profile, and a job that skips anything says so ([Proportional validation](#proportional-validation); a branch's pushes are covered by its pull request). Two parallel jobs: `go` (`make ci-core`, everything but the gate, or the docs profile) and `sdk-contract`; locally, `make tools` once, then `make validate` (the profile of the change's class) or `make ci`.
+1. **Automated code validation.** `make ci`: format, vet, staticcheck, govulncheck, the tests with the race detector, the contract gate. In CI on every pull request commit, every commit on `main` and every release tag (a branch's pushes are covered by its pull request), always in full, as two parallel jobs: `go` (`make ci-core`, everything but the gate) and `sdk-contract`; locally, `make tools` once, then `make ci`, or before a review `make validate`, which runs the local profile of the change's class ([Proportional validation](#proportional-validation)) and is full for anything sensitive or unclear.
 2. **Agent and workflow acceptance.** The scripted cases below, then the manual and live cases an agent can review, against the candidate.
 3. **Human exploratory acceptance.** A person, on the same binary, **after** the agent pass is green.
 
@@ -257,23 +257,23 @@ A case, its runner, a fixture, a semantics row and the harness are what a result
 
 ## Proportional validation
 
-A change is validated in proportion to what it touches. `tools/classify-change.sh` gives it one of four classes, from the rules in `tools/validation-classes.txt`, and each class has a profile:
+This is a local aid for the time before a review. It does not change CI: GitHub runs both jobs, `go` and `sdk-contract`, in full on every pull request commit, every commit on `main` and every release tag.
 
-| Class | What it covers | Profile (`make validate`; CI) |
+`make validate` gives the working tree's change one of four classes, with `tools/classify-change.sh` and the rules in `tools/validation-classes.txt`, against `main` fetched at that moment from the project's repository, and runs that class's profile:
+
+| Class | What it covers | Profile |
 |---|---|---|
-| docs | documentation no test reads | preflight, gofmt, `git diff --check` against the base, the root package's tests with the citation check strict; CI's `go` job runs the same (`make validate-docs`) |
-| test | tests only | preflight, vet, staticcheck, the whole suite under the race detector, shellcheck; CI runs `make ci-core` |
+| docs | documentation no test reads | preflight, gofmt, `git diff --check` against the base, the root package's tests with the citation check strict (`make validate-docs`) |
+| test | tests only | preflight, vet, staticcheck, the whole suite under the race detector, shellcheck (`make validate-test`) |
 | code | Go source and what tests read or embed | `make ci-core`, everything but the contract gate |
 | full | everything else | `make ci`, the contract gate included |
 
-The class of a change is the highest class of its paths. A path no rule names is full, and so is anything the classifier cannot decide safely: a symlink, a submodule, a mode or type change, a binary, a deleted or renamed test, a rename across classes, a name that is not plain UTF-8, an empty diff, a shallow clone, a malformed rule and any error. The build, CI, the classifier and its rules, dependencies, the Spotify boundary and this page are full by rule. The rules and the classifier always come from the base, never from the change being classified.
+The class of a change is the highest class of its paths. A path no rule names is full, and so is anything the classifier cannot decide safely: a symlink, a submodule, a mode or type change, a binary, a deleted or renamed test, a rename across classes, a name that is not plain UTF-8, an empty diff, a shallow clone, a malformed rule and any error. The build, CI, tooling and the classifier with its rules, dependencies, the Spotify boundary, sign-in and the other security-sensitive code, and this page are full by rule, so they always need the full `make ci`. The rules come from the fetched base, not from the change.
 
-What always runs in full: every commit on `main`, every release tag and every manual run, in CI, whatever it contains; the contract gate's scope above (a release candidate, a change at the boundary with go-librespot) is unchanged, since those paths are full.
+`PROFILE=test`, `code` or `full` raises the profile; a lower or unknown one is an error, and nothing runs. After the profile, `make validate` classifies again and fails if the class rose meanwhile. Its last line, `validate: PASSED class=... profile=... base=... head=...`, goes into the review request, and the Reviewer checks the class independently.
 
-**Locally.** `make validate` classifies the working tree against `main`, fetched at that moment from the project's repository, runs its class's profile, then classifies again and fails if the class rose meanwhile. `PROFILE=test`, `code` or `full` raises the profile; a lower or unknown one is an error, and nothing runs. It prints the line a review request quotes, `validate: PASSED class=... profile=... base=... head=...`. `make ci` is unchanged.
+**What it is not.** `make validate` runs the Makefile and scripts of the working tree, which the change itself can edit, so its class line is evidence for the Reviewer, not a control. Nothing here, locally or in CI, is tamperproof against a change that edits its own Makefile, scripts or workflow: such edits are full by rule, and independent review and the owner's approval of the merge remain necessary.
 
-**In CI.** On a pull request, the tested commit is GitHub's merge commit, and its first parent, the base branch as GitHub merged it, is the base: the classifier and rules are that commit's copies (checked out into `.base`, without credentials), and the diff is exactly what the tested commit adds to it. Both jobs always start and report. `go` runs the docs profile for docs and `make ci-core` for any other class. `sdk-contract` runs the gate for full, and for any other class one step, `sdk-contract SKIPPED BY POLICY (class <x>): the contract gate was NOT executed; it runs on every merge to main`, with a notice and a line in the job summary; the job's check still shows as passed. An empty or unexpected class runs everything. Each job's summary records the class, the tested commit, the base and the pull request's head.
-
-**Residual risk.** A lower profile can miss what only the skipped steps would find, for example a regression across components that the contract gate or a skipped test would have caught. A pull request runs its own copy of the workflow (`pull_request`, not `pull_request_target`), so it can change these conditions or the profiles; the base's classifier makes `.github/` full, but only a workflow that asks it is bound by it. Edits to the workflow, the Makefile or `tools/` are full by rule and need the Reviewer and the owner. The backstop is the full run on `main` after every merge, which no pull request can turn off.
+**Residual risk.** A lower local profile can miss what only the skipped steps would find, for example a regression across components that the contract gate would have caught; CI's full run of the pull request, and of `main` after the merge, is where that shows.
 
 **If `main` is red after a merge:** no further merges until it is green; find the pull request that caused it; the owner decides between a revert and a fix forward; record it as a defect, with the run; report it. No silent re-run: a re-run is part of that record.

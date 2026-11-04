@@ -1,11 +1,11 @@
 #!/bin/sh
 # ddsonic: the one consumer of tools/classify-change.sh (docs/ddsonic/
-# acceptance.md, "Proportional validation"). make validate (tools/validate.sh)
-# and CI run it; it starts the classifier that sits next to it in its
-# supported way, with a clean environment, in the current repository, and
-# passes on its arguments:
+# acceptance.md, "Proportional validation"), for local use: make validate
+# (tools/validate.sh) runs it. It starts the classifier that sits next to it
+# in its supported way, with a clean environment, in the current repository,
+# and passes on its arguments:
 #
-#   sh tools/ci-classify.sh [classifier arguments]
+#   sh tools/change-class.sh [classifier arguments]
 #
 # It prints the classifier's output with two guarantees: the first line is
 # exactly docs, test, code or full, and the second starts with "# ". The

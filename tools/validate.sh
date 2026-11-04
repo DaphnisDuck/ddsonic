@@ -1,7 +1,7 @@
 #!/bin/sh
 # ddsonic: make validate (docs/ddsonic/acceptance.md, "Proportional
 # validation"). It classifies the working tree against main, fetched now from
-# the project's repository (tools/ci-classify.sh, with no arguments), runs the
+# the project's repository (tools/change-class.sh, with no arguments), runs the
 # profile for that class, classifies again, and prints the class line to
 # paste into a review request:
 #
@@ -32,7 +32,7 @@ rank() {
 # classify prints the class, exactly one of the four words, then the
 # description line, then the classifier's path lines.
 classify() {
-	out=$(sh "$dir/ci-classify.sh")
+	out=$(sh "$dir/change-class.sh")
 	class=$(printf '%s\n' "$out" | sed -n 1p)
 	case $class in docs | test | code | full) ;; *) class=full ;; esac
 	meta=$(printf '%s\n' "$out" | sed -n 2p)

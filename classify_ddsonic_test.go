@@ -3,8 +3,8 @@ package main
 // ddsonic: tests of tools/classify-change.sh, the classifier of proportional
 // validation (docs/ddsonic/acceptance.md). Each case builds a repository in
 // a temporary directory: a base commit carrying the real rules file, then a
-// change, and classifies it with the base's rules (--rules-from), as CI and
-// make validate do. The classifier must fail closed: what it cannot decide
+// change, and classifies it with the base's rules (--rules-from), as make
+// validate does. The classifier must fail closed: what it cannot decide
 // safely is full.
 
 import (
@@ -95,7 +95,7 @@ func newFixture(t *testing.T) (*fixture, string) {
 }
 
 // The ways a caller can start the classifier. supported is the one make
-// validate and CI use (the usage text and tools/ci-classify.sh);
+// validate uses (the usage text and tools/change-class.sh);
 // bashP and direct are also supported; plainBash is not, and must classify
 // nothing.
 const (
@@ -247,7 +247,7 @@ func TestClassifyChange(t *testing.T) {
 // A change that loosens the rules is classified by the base's rules: by
 // default, with --base alone, the rules come from that same commit, and the
 // "# " line says so. Asking for the change's own rules is refused; only the
-// dev-mode rules file, which make validate and CI never pass, would let the
+// dev-mode rules file, which make validate never passes, would let the
 // change's rules classify it, and the "# " line says that too.
 func TestClassifyChangeUsesTheBaseRules(t *testing.T) {
 	f, base := newFixture(t)
@@ -785,7 +785,7 @@ func TestClassifyChangeWorkingTree(t *testing.T) {
 // The classifier, its rules and these tests are full by their own rules.
 func TestClassifierFilesAreFull(t *testing.T) {
 	_, rest := classify(t, ".", nil, "--rules", "tools/validation-classes.txt", "--paths",
-		"tools/classify-change.sh", "tools/ci-classify.sh", "tools/validate.sh", "tools/validation-classes.txt", "classify_ddsonic_test.go", "citations_ddsonic_test.go", "validate_ddsonic_test.go", ".github/workflows/ci.yml", "Makefile")
+		"tools/classify-change.sh", "tools/change-class.sh", "tools/validate.sh", "tools/validation-classes.txt", "classify_ddsonic_test.go", "citations_ddsonic_test.go", "validate_ddsonic_test.go", ".github/workflows/ci.yml", "Makefile")
 	for _, line := range strings.Split(strings.TrimSpace(rest), "\n") {
 		if f := strings.Split(line, "\t"); len(f) < 2 || f[1] != "full" {
 			t.Errorf("not full: %q", line)

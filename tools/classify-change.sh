@@ -22,7 +22,7 @@
 #   tools/classify-change.sh ARGS      (its #!/bin/bash -p line; best with env -i)
 #   /bin/bash -p tools/classify-change.sh ARGS
 #
-# make validate and CI use the first, through tools/ci-classify.sh. It
+# make validate uses the first, through tools/change-class.sh. It
 # is also the only one immune to an exported FUNCNAME or
 # BASH_EXECUTION_STRING: bash -p imports those, and the script then takes
 # the start for an embedded one and prints no class (full, never a
@@ -47,7 +47,7 @@
 #          any other commit is full. With --paths, the commit to read the rules
 #          from.
 # --rules FILE  dev mode: rules from a file, reported as such on the "# "
-#          line. make validate and CI never use it.
+#          line. make validate never uses it.
 # --paths  last: everything after it is a path to classify by the rules alone
 #          (one line each, no overall class); an option after it is full.
 #
