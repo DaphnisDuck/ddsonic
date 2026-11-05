@@ -615,6 +615,7 @@ The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and correc
   - Deferred follow-ups of E-03b, tracked, not fixed:
     - a milder 50 ms timing race at `external/spotify/session_setup_ddsonic_test.go:80-89` (not the same failure);
     - the package's 17 other unbounded `builds`/`tails` waits, deliberately not changed.
+    - an intermittent `TestAcceptanceSpotifySavedAlbumTransition` failure (`acceptance_spotify_ddsonic_test.go:341`, "the account was read without a refresh"; the case is referenced at `docs/ddsonic/acceptance/cases.yaml:261`): one failure during a local `make validate` on 2026-11-04, and 20 of 20 isolated `-race` reruns passed. A plausible but unconfirmed explanation is that the catalog Filler (`main_catalog.go:432-434`; `catalogsync/filler.go:141-227`) makes an asynchronous account read after the refresh returns, which the test counts as an unrefreshed read. No production defect is demonstrated; not investigated further; low priority; no remediation is authorized.
 - **Category:** infrastructure.
 - **Dependencies:** E-05 (the SDK strategy changes what the gate must prove).
 - **Duplicates merged:** none.
