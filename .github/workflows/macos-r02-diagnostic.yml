@@ -8,6 +8,10 @@ name: macOS R-02 diagnostic
 # the fixture only: it is not macOS CI (D-09), and says nothing of ddsonic
 # in use on macOS. Delete this file with the scratch branch; it is not to be
 # merged.
+#
+# It runs on the Intel (x64) runner, macos-26-intel: both Arm64 attempts
+# (run 41897331000, attempts 1 and 2) never acquired a runner. Intel results
+# do not establish Intel application support, nor Apple Silicon behaviour.
 on:
   push:
     branches: ["scratch/r02-macos-fixture-**"]
@@ -17,7 +21,7 @@ permissions:
 
 jobs:
   r02-fixture:
-    runs-on: macos-26
+    runs-on: macos-26-intel
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
