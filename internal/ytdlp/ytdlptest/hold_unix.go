@@ -7,44 +7,41 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 )
 
-// own makes the hold and alive pipes (FIFOs in the state directory) and
-// opens them: the hold pipe for reading and writing, so that the test is a
-// writer of it and a child reading it waits for as long as the test holds
-// it open; the alive pipe for reading, without blocking, so that the test
-// can tell when no child holds it any more. Both are closed on exec, so no
-// process the test starts inherits them.
+// own makes the alive pipe (a FIFO in the state directory) and opens it for
+// reading, without blocking, so that the test can tell when no child holds
+// it any more. It is closed on exec, so no process the test starts inherits
+// it. A child opens it for reading and writing, which does not wait for
+// another end (POSIX leaves that open unspecified; Linux documents it, and
+// macOS is expected to behave the same).
 func (c *Copier) own() error {
-	for _, name := range []string{"hold", "alive"} {
-		if err := syscall.Mkfifo(filepath.Join(c.state, name), 0o600); err != nil {
-			return fmt.Errorf("ytdlptest: the %s pipe: %w", name, err)
-		}
-	}
-	hold, err := os.OpenFile(filepath.Join(c.state, "hold"), os.O_RDWR, 0)
-	if err != nil {
-		return fmt.Errorf("ytdlptest: the hold pipe: %w", err)
+	if err := syscall.Mkfifo(filepath.Join(c.state, "alive"), 0o600); err != nil {
+		return fmt.Errorf("ytdlptest: the alive pipe: %w", err)
 	}
 	alive, err := os.OpenFile(filepath.Join(c.state, "alive"), os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		_ = hold.Close()
 		return fmt.Errorf("ytdlptest: the alive pipe: %w", err)
 	}
-	c.hold, c.alive = hold, alive
+	c.alive = alive
 	return nil
 }
 
-// unhold releases the children. The two pipes' names are removed first, so
-// that a child started from now on finds nothing to open (it has registered
-// already, and exits at once); then the hold pipe is closed, so that every
-// child reading it reaches its end and exits.
+// unhold releases the children. The release mark is made first, so that
+// every child sees it at its next look (within childPoll) and exits; then
+// the alive pipe's name is removed, so that a child started from now on
+// finds nothing to open and exits at once (it has registered already). A
+// child never blocks on anything the test holds, so no order of these
+// steps against a child's own can leave it waiting (R-02).
 func (c *Copier) unhold() error {
-	return errors.Join(os.Remove(filepath.Join(c.state, "hold")), os.Remove(filepath.Join(c.state, "alive")), c.hold.Close())
+	if err := os.WriteFile(filepath.Join(c.state, "released"), nil, 0o600); err != nil {
+		return errors.Join(fmt.Errorf("the release mark: %w", err), os.Remove(filepath.Join(c.state, "alive")))
+	}
+	return os.Remove(filepath.Join(c.state, "alive"))
 }
 
 // join waits, until deadline, until no child holds the alive pipe: a read
@@ -98,7 +95,7 @@ func (c *Copier) join(deadline time.Time) error {
 			if errors.Is(readErr, syscall.EINTR) {
 				return fmt.Errorf("the alive pipe could not be read before the deadline, %v after it was released: %w", bound, readErr)
 			}
-			return fmt.Errorf("a child of a run of the fake yt-dlp still holds the alive pipe %v after it was released", bound)
+			return fmt.Errorf("a child of a run of the fake yt-dlp still holds the alive pipe %v after it was released; %s", bound, c.stuck())
 		}
 		time.Sleep(min(2*time.Millisecond, time.Until(deadline)))
 	}
@@ -118,8 +115,8 @@ type registered struct {
 }
 
 // registry reads every run and child that recorded itself. Each one writes
-// its line as its first action, before it opens the alive pipe or blocks
-// on the hold pipe, so a process of the fixture that could still run is
+// its line as its first action, before it opens the alive pipe or waits
+// for the release mark, so a process of the fixture that could still run is
 // there. A registry that does not exist means that nothing ran; any other
 // failure, or a line that is not "run|child PID START", is an error.
 func (c *Copier) registry() ([]registered, error) {
@@ -164,18 +161,18 @@ func (c *Copier) registry() ([]registered, error) {
 //   - a /proc scan for every live process of this user whose command line
 //     names this copier's own root (its unique temporary directory): the
 //     runs' shells, a child the shell has forked and that has not recorded
-//     itself yet, the child, its cat, the run's mkdir and cat. Nothing else
-//     names that directory.
+//     itself yet, the child, the run's mkdir and cat. Nothing else names
+//     that directory. (The child's sleep names nothing; the child waits for
+//     each one, so none outlasts it.)
 //
-// Elsewhere there is no /proc, and the teardown rests on join (the children
-// have closed the alive pipe), without an exit proof. A /proc read that
-// fails, a registered process without a start time, or one still running at
-// the deadline is reported, never taken for "exited". An observation made
-// after the deadline is refused by release's final check, against the same
-// deadline.
+// Elsewhere there is no /proc, and awaitListed gives the exit proof from
+// ps instead. A /proc read that fails, a registered process without a start
+// time, or one still running at the deadline is reported, never taken for
+// "exited". An observation made after the deadline is refused by release's
+// final check, against the same deadline.
 func (c *Copier) awaitRegistered(deadline time.Time) error {
-	if runtime.GOOS != "linux" {
-		return nil
+	if !procProof {
+		return c.awaitListed(deadline)
 	}
 	done := map[registered]bool{}
 	seen := -1
@@ -206,7 +203,7 @@ func (c *Copier) awaitRegistered(deadline time.Time) error {
 			done[r] = true
 		}
 		if len(running) > 0 && time.Now().After(deadline) {
-			return fmt.Errorf("%s still running when the teardown's deadline ended", strings.Join(running, ", "))
+			return fmt.Errorf("%s still running when the teardown's deadline ended; %s", strings.Join(running, ", "), c.stuck())
 		}
 		if len(running) == 0 && len(rs) == seen {
 			return nil

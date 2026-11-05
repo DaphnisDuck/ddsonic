@@ -69,6 +69,11 @@ func TestCopierTeardownReportsWhatItCannotEstablish(t *testing.T) {
 		if !strings.Contains(strings.Join(r, " "), "still holds the alive pipe") {
 			t.Errorf("the teardown reported %q, want that something still holds the alive pipe", r)
 		}
+		// It says what of the fixture ps still lists (R-02): here nothing,
+		// as the holder is neither registered nor names the fixture.
+		if !strings.Contains(strings.Join(r, " "), "ps lists no process of the fixture") {
+			t.Errorf("the teardown reported %q, want what ps still lists", r)
+		}
 	})
 	t.Run("a read that fails", func(t *testing.T) {
 		c := InstallCopier(t, Hang, "")
@@ -102,15 +107,26 @@ func TestCopierTeardownReportsWhatItCannotEstablish(t *testing.T) {
 			t.Errorf("the teardown reported %q, want the unexpected data", r)
 		}
 	})
-	t.Run("the hold pipe already gone", func(t *testing.T) {
+	t.Run("the release mark cannot be made", func(t *testing.T) {
 		c := InstallCopier(t, Hang, "")
-		if err := os.Remove(filepath.Join(c.state, "hold")); err != nil {
+		if err := os.Mkdir(filepath.Join(c.state, "released"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		var r recorder
 		c.release(r.report)
-		if len(r) != 1 || !strings.Contains(r[0], "the hold pipe:") {
-			t.Errorf("the teardown reported %q, want the hold pipe's failure", r)
+		if len(r) != 1 || !strings.Contains(r[0], "the release mark:") {
+			t.Errorf("the teardown reported %q, want the release mark's failure", r)
+		}
+	})
+	t.Run("the alive pipe already gone", func(t *testing.T) {
+		c := InstallCopier(t, Hang, "")
+		if err := os.Remove(filepath.Join(c.state, "alive")); err != nil {
+			t.Fatal(err)
+		}
+		var r recorder
+		c.release(r.report)
+		if len(r) != 1 || !strings.Contains(r[0], "the release:") {
+			t.Errorf("the teardown reported %q, want the release's failure", r)
 		}
 	})
 	t.Run("an unreadable registry", func(t *testing.T) {
@@ -220,7 +236,7 @@ func TestCopierTeardownReportsWhatItCannotEstablish(t *testing.T) {
 
 // Every process of the fake records itself before it touches anything else
 // of the fixture: the run before anything (copy, pids, mode), the child
-// before it opens the alive pipe or blocks on the hold pipe; and no run
+// before it opens the alive pipe or waits for the release mark; and no run
 // holds the alive pipe, so a process the run starts does not inherit it
 // before it has recorded itself. (The order the teardown's admission rests
 // on, read from the script itself.)
@@ -240,13 +256,18 @@ func TestCopierScriptRegistersBeforeItHoldsAnything(t *testing.T) {
 		}
 	}
 	child := at(`printf "child %s %s\n" "$$" "${22:--}" >>"$0/registry"`)
-	for _, later := range []string{`exec 8<>"$0/alive"`, `exec cat "$0/hold"`} {
+	for _, later := range []string{`exec 8<>"$0/alive"`, `while [ ! -e "$0/released" ]`} {
 		if at(later) < child {
 			t.Errorf("the child does %q before it records itself", later)
 		}
 	}
 	if strings.Count(s, "8<>") != 1 {
 		t.Errorf("the script opens the alive pipe %d times, want once (the child's own)", strings.Count(s, "8<>"))
+	}
+	// R-02: the child waits on nothing the test holds: no pipe but alive,
+	// which it opens for reading and writing (an open that does not wait).
+	if strings.Contains(s, "hold") || strings.Contains(s, "exec cat") {
+		t.Error("the child blocks on a pipe; it may only poll for the release mark")
 	}
 	if strings.Contains(s, `kill "$child"`) {
 		t.Error("the run signals its child; nothing may stop a child before it has recorded itself")
