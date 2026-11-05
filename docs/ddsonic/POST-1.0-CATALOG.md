@@ -886,7 +886,7 @@ The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and correc
 ### R-09 Privacy audit of the public source, docs and artifacts
 - **Outcome:** check for personal names, usernames, emails, hostnames, home paths and account or device identifiers in the source, docs, release pages, SBOM, notices, source archive and binary paths.
 - **Source:** `docs/ddsonic/releasing.md:42` ("Status (2026-10-19): no audit has been done; the assignment to run it is blocked by a platform denial, unresolved"). The README screenshot is part of the check (D-06).
-- **Status / prior decisions:** blocked, unresolved.
+- **Status / prior decisions:** **DISPOSITIONED** (owner, 2026-11-05). A read-only audit of the public source and docs, the release pages, the SBOM and notices, the source and binary archives, the binary's embedded paths and the public Git history found no live secret and no urgent exposure; the evidence is kept privately in `skeleton-key/R-09/FINDINGS.md`. The owner accepted its two findings: a historical commit identity in public Git history (no history rewrite and no change to commit metadata), and the README screenshot's visible data, a local library mount path and the album being played (no replacement, redaction or release-asset change; not to be reopened without materially new evidence). Image-provenance metadata (C2PA) embedded in some branding images needs no action. The earlier "platform denial" (2026-10-19) no longer blocks; what it was is unverified.
 - **Category:** reliability-security.
 - **Dependencies:** D-06 (the screenshot).
 - **Duplicates merged:** none.
@@ -1038,7 +1038,7 @@ The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and correc
   - private maintenance records note that the image now shows v1.0.0, that the release archive keeps the earlier image, and the `Ctrl+I Metadata` key-bar question (P-02).
 - **Status / prior decisions:** **STALE** (verified at efbc1eba: both lines still name `2bcd0e5`).
 - **Category:** documentation.
-- **Dependencies:** R-09 (privacy), P-02.
+- **Dependencies:** R-09 (privacy; dispositioned 2026-11-05: the owner accepted the image's visible data), P-02.
 - **Duplicates merged:** both lines and both records.
 - **Flags:** STALE, OWNER.
 

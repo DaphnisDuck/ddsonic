@@ -37,9 +37,9 @@ The checklist is now [Release Acceptance](acceptance.md), and it runs on the can
 
 ### Before anything is made public
 
-These checks are mandatory before a release, a source archive or the repository is made public. Neither is done yet.
+These checks are mandatory before a release, a source archive or the repository is made public. The privacy audit was done on 2026-11-05 (its status is below); the agent docs cleanup is still pending.
 
-- **Privacy:** check for personal names, usernames, email addresses, machine hostnames, home-directory paths and private account or device identifiers in the public source and docs, the release pages, the generated SBOM and notices, the source archive, and the paths embedded in the binary. Exposure in Git history is a separate question: history is not rewritten without the owner's approval. Status (2026-10-19): no audit has been done; the assignment to run it is blocked by a platform denial, unresolved.
+- **Privacy:** check for personal names, usernames, email addresses, machine hostnames, home-directory paths and private account or device identifiers in the public source and docs, the release pages, the generated SBOM and notices, the source archive, and the paths embedded in the binary. Exposure in Git history is a separate question: history is not rewritten without the owner's approval. Status (2026-11-05): a read-only audit of these places and of the public Git history found no live secret and no urgent exposure, and the owner accepted what it found (catalog R-09). The earlier note (2026-10-19) that the audit was blocked by a platform denial no longer applies; what that denial was is unverified.
 - **Agent docs cleanup** (agreed, pending): one canonical, concise set of agent instructions; a practical checklist; a prioritized backlog; history archived. Retire the PV-5/AUTH-PV5 requirements still written as active, keeping their historical evidence. Progress reports stay light, with full technical handoffs for ChatGPT and a clear summary for people. Tracked here only; not started.
 
 ## A dry run on your machine
