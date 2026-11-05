@@ -535,9 +535,9 @@ Radio station lists currently appear in an unintuitive or effectively arbitrary 
 
 **Status:** LOW; post-1.0, as the owner deferred it earlier. Recorded only: no investigation or engineering now, and it does not reopen `v1.0.0-rc.4`.
 
-Owner-reported: after a manual switch to a new track, playback starts, drops briefly (under a second), then resumes. The owner has since seen the same on Spotify pause and resume, including after a pause of 10-15 seconds, and on local-file pause and resume. YouTube Music and radio have not been tested.
+Owner-reported, first seen around the 0.8-0.9 releases: after a manual switch to a new track, playback starts, drops briefly (under a second), then resumes. The owner has since seen the same on Spotify pause and resume, including after a pause of 10-15 seconds, and on local-file pause and resume. Spotify and local files are implicated; YouTube Music was discussed but is not conclusively established, and radio has not been tested. An earlier observation weakened the explanation that the speaker was waking up. Buffering, playback-state transitions or the track handoff are suspected; no root cause is established.
 
-A shared cause in the playback pipeline is suspected, not established.
+2026-11-04: after seeing them on Titan (Linux), the owner reproduced both symptoms on a physical Mac running the published v1.0.0. Symptom 1 is a stutter, play-silence-play, on pause and resume, including after pauses of about 10-15 seconds. Symptom 2 is a fraction of the outgoing track playing briefly after another track is selected manually. Which providers reproduced each symptom on macOS is not identified, and the two symptoms are not assumed to share a root cause. An audio-configuration cause specific to Titan is now less likely; behaviour shared by the application or its dependencies is the stronger line of inquiry. The status stays LOW, with no investigation now.
 
 ---
 
