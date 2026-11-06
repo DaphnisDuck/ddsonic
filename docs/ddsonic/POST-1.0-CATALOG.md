@@ -962,8 +962,8 @@ The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and correc
   - The owed live and platform acceptance is done or explicitly retired: browser sign-in in Kitty, Ghostty and tmux; LIVE-SPOT-001 in a fresh home; real librespot recovery and teardown.
   - The known gaps get cases or explicit waivers: setup and upgrade from 0.10, degraded states, Spotify playlist and Artist transitions, YouTube OAuth mode, Local Artists and Genres, artwork, lyrics, queue keys, EQ, terminal sizes, macOS, and the binary lane not in CI.
   - The evidence policy is decided: evidence age, test accounts, permitted account mutations, waiver recording.
-- **Source:** `docs/ddsonic/acceptance.md:140-147, 228-248`; plan.md:809, 877, 869; `releases/v1.0.0-rc.3.md:103` (Gate C hands-on scenarios waived).
-- **Status / prior decisions:** HIST: the evidence policy was "Not decided, and not to be assumed" (plan.md:877).
+- **Source:** `docs/ddsonic/acceptance.md:140-147, 228-248`; plan.md:809, 877, 869; `releases/v1.0.0-rc.3.md:105` (Gate C hands-on scenarios waived).
+- **Status / prior decisions:** **DISPOSITIONED** (owner, 2026-11-06), after a read-only investigation whose evidence is kept privately in `skeleton-key/R-15/FINDINGS.md`. The three owed live checks (browser sign-in in Kitty, Ghostty and tmux; LIVE-SPOT-001 in a fresh home; real librespot recovery and teardown) are carried forward to the next applicable release candidate: they are not completed, not retired and not waived. No live acceptance against the published v1.0.0 is authorized. The MP3 and Vorbis measurements stay owner exceptions (2026-10-30), not measured passes, and the Gate C hands-on waiver stays scoped to rc.3. Evidence age, test accounts and permitted account mutations stay with E-04, with the current defaults unchanged; the stale pre-1.0 wording in `docs/ddsonic/acceptance.md:145-146` and `docs/ddsonic/release-plan.md:244` stays with D-13 and R-07. HIST: the evidence policy was "Not decided, and not to be assumed" (plan.md:877).
 - **Category:** reliability-security (QA).
 - **Dependencies:** E-04 (proportional QA).
 - **Duplicates merged:** the listed sources.
@@ -1203,7 +1203,7 @@ The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and correc
 | R-08 security audit | plan.md:819, 843, 870; RP:252-260 |
 | R-10 Spotify limitations | CHANGELOG:44-48; catalog.md:49-51; plan.md:829, 837, 856, 860-861, 865; rc.1:107 |
 | R-11 carried findings | rc.1:109-115; rc.2:81; rc.3:95, 97; plan.md:795, 1002; IDEAS:733 |
-| R-15 acceptance | acceptance.md:140-147, 228-248; plan.md:809, 869, 877; rc.3:103 |
+| R-15 acceptance | acceptance.md:140-147, 228-248; plan.md:809, 869, 877; rc.3:105 |
 | D-01 website | RP:161-170, 216, 235, 337; plan.md:774, 785, 788, 791-796, 955, 964; rc.1:123; rc.2:87; rc.3:106; upstream.md:48-53; releasing.md:63, 77; README:194 |
 | D-02 AUR | the prepared package (private records); releasing.md:35; RP:87, 334; plan.md:951, 791-796; README:11, 80, 212; SECURITY:17; CHANGELOG:12, 16-17, 42; the 1.0.0 release notes |
 | D-06 screenshot | plan.md:794; RP:143; private records |
