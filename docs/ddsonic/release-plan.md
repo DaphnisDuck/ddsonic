@@ -2,7 +2,7 @@
 
 Oct 1, 2026 · @Steve
 
-> **Renamed on 2026-10-04.** This plan was written and approved while the project was called ddmus, and `v1.0.0-rc.1` was published under that name. It still directs the work to 1.0, so it now uses the name 1.0 ships with, ddsonic, including in decisions dated before the rename.
+> **Historical record.** This is the 1.0 release plan, completed with `v1.0.0` on 2026-10-31, and kept as written. It is not the current roadmap: current plans, platform targets and decisions live on [GitHub issues](https://github.com/DaphnisDuck/ddsonic/issues) and the owner's Project (macOS: [#88](https://github.com/DaphnisDuck/ddsonic/issues/88); other platforms: [#89](https://github.com/DaphnisDuck/ddsonic/issues/89)). It was written while the project was called ddmus and uses the name ddsonic throughout, including in decisions dated before the rename on 2026-10-04.
 
 ddsonic is feature-complete for 1.0. This plan proves, packages, documents and releases what is built. Nothing here starts until you approve it. Revised after Codex's independent review: its corrections are applied throughout.
 

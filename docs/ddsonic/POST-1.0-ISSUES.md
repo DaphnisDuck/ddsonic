@@ -68,7 +68,7 @@ Archiving is not a redaction. Earlier versions of these files stay in the Git hi
 | E-11 | [#74](https://github.com/DaphnisDuck/ddsonic/issues/74) |
 | E-12 | [#32](https://github.com/DaphnisDuck/ddsonic/issues/32) |
 | E-13 | [#100](https://github.com/DaphnisDuck/ddsonic/issues/100) |
-| E-14 | no issue |
+| E-14 | [#110](https://github.com/DaphnisDuck/ddsonic/issues/110) (closed) |
 | E-15 | no issue |
 | E-16 | [#75](https://github.com/DaphnisDuck/ddsonic/issues/75) |
 | E-17 | [#76](https://github.com/DaphnisDuck/ddsonic/issues/76) |
