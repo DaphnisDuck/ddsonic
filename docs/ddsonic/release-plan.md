@@ -303,7 +303,7 @@ Required, decided by the owner on 2026-10-10. It has not been run: nothing here 
 
 ## Post-1.0 backlog
 
-Historical freeze-time inventory: these items were transferred to [plan.md](../../plan.md#post-10-backlog). Unscheduled ideas are now consolidated in [Post-1.0 Ideas and Investigations](POST-1.0-IDEAS.md); maintain those canonical records rather than extending this historical table. Nothing here is built before 1.0.
+Historical freeze-time inventory: these items were transferred to [plan.md](../../plan.md#post-10-backlog). The backlog is now GitHub Issues ([where each earlier entry went](POST-1.0-ISSUES.md)); this table is history and is not extended. Nothing here is built before 1.0.
 
 | Idea | Notes |
 | --- | --- |

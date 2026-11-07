@@ -4,7 +4,7 @@
 
 ## ddsonic fork — read first
 
-This repo is **DaphnisDuck's Music Player** (`ddsonic`; called omatunes until v0.6 and ddmus until `v1.0.0-rc.1`), a fork of cliamp that turns the provider-oriented UI into a library-oriented one (Music → Spotify/Local/Radio/Search). **Read `plan.md` before any task** — it holds the milestones, architecture invariants, status checklist, and decisions log. Update its Status/Decisions sections as work lands, in the same PR as the work (and the catalog's status lines likewise). Don't make a separate closeout or post-merge docs commit only to record an integration: record that in the task report or the PR.
+This repo is **DaphnisDuck's Music Player** (`ddsonic`; called omatunes until v0.6 and ddmus until `v1.0.0-rc.1`), a fork of cliamp that turns the provider-oriented UI into a library-oriented one (Music → Spotify/Local/Radio/Search). **Read `plan.md` before any task** — it holds the milestones, architecture invariants, status checklist, and decisions log. Update its Status/Decisions sections as work lands, in the same PR as the work. The backlog is GitHub Issues and the owner's Project: new work gets an issue and is referred to by its issue number, and no new P-/E-/R-/D- catalog ID is assigned; `docs/ddsonic/POST-1.0-CATALOG.md` and `docs/ddsonic/POST-1.0-IDEAS.md` are archives and are not updated. Don't make a separate closeout or post-merge docs commit only to record an integration: record that in the task report or the PR.
 
 Fork rules (keep upstream merges cheap):
 - `upstream` = `https://github.com/bjarneo/cliamp.git`; sync by merging `upstream/main` on a `sync/upstream-YYYYMMDD` branch.

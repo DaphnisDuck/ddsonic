@@ -193,7 +193,7 @@ Their pages on other providers, plugins, headless mode and keybindings describe 
 
 ddsonic 1.0.0, its first stable release, was released on 2026-10-31; its [release page](https://github.com/DaphnisDuck/ddsonic/releases/tag/v1.0.0) has the notes, the known limitations and the files. Release candidates and releases are listed on the [Releases](https://github.com/DaphnisDuck/ddsonic/releases) page, and [CHANGELOG.md](CHANGELOG.md) says what each changes. A ddsonic website is not launched yet; this repository is the project's home. From 1.0 on, a newer 1.x opens the config and catalog of an older one; going back to an older version is not supported. The catalog (`~/.local/share/ddsonic/library.db`) can always be deleted and rebuilt by a sync; your sign-ins and settings live in `~/.config/ddsonic`.
 
-ddsonic is maintained by one person. Bug reports are welcome in [Issues](https://github.com/DaphnisDuck/ddsonic/issues).
+ddsonic is maintained by one person. Bug reports are welcome in [Issues](https://github.com/DaphnisDuck/ddsonic/issues), which is also where planned and proposed work is tracked.
 
 ## Lineage and thanks
 
