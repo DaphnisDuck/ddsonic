@@ -16,8 +16,8 @@ config.backup.toml
 /gui/
 coverage.out
 
-# Claude Code local settings
-.claude/settings.local.json
+# Claude Code local directory (settings, commands); root CLAUDE.md stays tracked
+.claude/
 
 # Local project brief, kept out of the repo
 /prompt.txt
