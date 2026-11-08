@@ -133,7 +133,14 @@ got=$("$work/ddsonic" --version)
 # the generic "/Users/" count is reported for review, not failed on.
 privacy() { # file
 	n=0
-	for value in "$HOME" "$(id -un)" "$(scutil --get LocalHostName 2>/dev/null || true)" \
+	account=$(id -un)
+	# On GitHub's hosted runners the account is the generic "runner", which
+	# names no one and is a common word in Go code (regexp2's runner.go); the
+	# home directory, checked below, still covers it there.
+	if [ "${GITHUB_ACTIONS:-}" = true ] && [ "$account" = runner ]; then
+		account=
+	fi
+	for value in "$HOME" "$account" "$(scutil --get LocalHostName 2>/dev/null || true)" \
 		"$(scutil --get ComputerName 2>/dev/null || true)" "$(hostname -s)"; do
 		[ -n "$value" ] || continue
 		c=$(strings -a "$1" | grep -c -F -- "$value" || true)
