@@ -1,6 +1,6 @@
 # Releasing ddsonic
 
-ddsonic releases one build: Linux x86-64, from the pinned environment in `packaging/Dockerfile`. The executable is GPL-3.0 (it links go-librespot); ddsonic's source is MIT.
+ddsonic's release build is Linux x86-64, from the pinned environment in `packaging/Dockerfile`. v1.0.0 also has a provisional macOS ARM64 file set, built on an Apple Silicon Mac with `packaging/darwin-arm64` ([macos-arm64-validation.md](macos-arm64-validation.md)). The executable is GPL-3.0 (it links go-librespot); ddsonic's source is MIT.
 
 ## What a release holds
 
