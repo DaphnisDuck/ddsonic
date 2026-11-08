@@ -103,17 +103,18 @@ Each step is shown to the owner with its exact text and is run only after the ow
 
 **How the steps are written:**
 - All files go under one new work directory, which step 2 creates with `mktemp -d` under `/tmp`. That keeps the user's name out of paths, and nothing that existed before is reused or removed. Step 2 writes a marker file into it and records its path in `~/ddsonic-arm64-workdir.txt`. Step 12 removes only that recorded directory, and only after checking it.
-- Nothing is piped into `tee`. Each command that builds or tests writes its output to a log file. Its exit status is captured right after it, appended to the log and printed. A non-zero status means: stop, record it, and report. The next step is not run on the strength of output that merely looks right.
+- Nothing is piped into `tee`. Each command that builds or tests writes its output to a log file. Its exit status is captured right after it, appended to the log and printed.
+- Within a step, every command that depends on an earlier one runs only if that one succeeded. A failure ends the step with a `STOP:` line, and nothing later in the step runs. A `STOP:` line, or a non-zero exit where the step expects 0, means: record it, report it, and do not go on to the next step.
 
 `<tooling-commit>` is the reviewed commit that holds `packaging/darwin-arm64/`. The owner's approval names it exactly. `<fixture-commit>` is the commit the corrected fixtures come from; the proposal is `7d7a643369086f4936c2566bba581c8d86a858ed`, the commit they were checked at.
 
-**Step 0. Record the environment.** Read-only: it installs nothing, and stops at the first missing prerequisite.
+**Step 0. Record the environment.** Read-only: it installs nothing, and reports what is missing.
 ```sh
 sw_vers; uname -m; sysctl -n sysctl.proc_translated
 if xcode-select -p >/dev/null 2>&1; then
   xcode-select -p; clang --version | head -n 1; xcrun --show-sdk-version; git --version
 else
-  echo "Command Line Tools: not installed. Stop here."
+  echo "STOP: Command Line Tools are not installed (step 1)"
 fi
 for t in curl shasum tar pkg-config jq; do command -v "$t" >/dev/null 2>&1 && echo "found: $t" || echo "missing: $t"; done
 ```
@@ -147,15 +148,18 @@ fi
 2b, Go and the repository, only inside that directory:
 ```sh
 if [ -n "$W" ] && [ "$(cat "$W/.ddsonic-arm64-workdir" 2>/dev/null)" = "$W" ]; then
-  mkdir "$W/records" && ls -A "${TMPDIR:-/tmp}" | wc -l > "$W/records/tmpdir-before.txt"
-  curl -fsSL -o "$W/go.tgz" https://go.dev/dl/go1.27.3.darwin-arm64.tar.gz
-  echo "dd3908cf20959d798c1e06ebe5b72213f0505ce01373b40ce3110975a6cd99c2  $W/go.tgz" | shasum -a 256 -c - \
-    && tar -C "$W" -xzf "$W/go.tgz"
-  export PATH="$W/go/bin:$PATH" GOPATH="$W/gopath" GOCACHE="$W/gocache" GOTOOLCHAIN=local
-  go version
-  git clone https://github.com/DaphnisDuck/ddsonic.git "$W/ddsonic" \
-    && git -C "$W/ddsonic" checkout --detach <tooling-commit> \
-    && git -C "$W/ddsonic" rev-parse v1.0.0 'v1.0.0^{commit}'
+  mkdir "$W/records" \
+  && ls -A "${TMPDIR:-/tmp}" | wc -l > "$W/records/tmpdir-before.txt" \
+  && curl -fsSL -o "$W/go.tgz" https://go.dev/dl/go1.27.3.darwin-arm64.tar.gz \
+  && echo "dd3908cf20959d798c1e06ebe5b72213f0505ce01373b40ce3110975a6cd99c2  $W/go.tgz" | shasum -a 256 -c - \
+  && tar -C "$W" -xzf "$W/go.tgz" \
+  && export PATH="$W/go/bin:$PATH" GOPATH="$W/gopath" GOCACHE="$W/gocache" GOTOOLCHAIN=local \
+  && [ "$(go env GOVERSION) $(go env GOHOSTOS)/$(go env GOHOSTARCH)" = "go1.27.3 darwin/arm64" ] \
+  && git clone https://github.com/DaphnisDuck/ddsonic.git "$W/ddsonic" \
+  && git -C "$W/ddsonic" checkout --detach <tooling-commit> \
+  && [ "$(git -C "$W/ddsonic" rev-parse v1.0.0 'v1.0.0^{commit}' | tr '\n' ' ')" = "79ba942dfcdc12a1ad6a02f886b86d5a24e563bc 9ae61bcf6604e032b6e690394d10cb0bade80543 " ] \
+  && echo "step 2b: ok" \
+  || echo "STOP: step 2b failed; the output above shows where"
 else
   echo "STOP: no recorded work directory in this shell"
 fi
@@ -163,8 +167,7 @@ fi
 - **Purpose:** a new, empty work directory; an isolated Go of the pinned version; and the tooling with the tag.
 - **Expected:**
   - 2a prints `work directory: /tmp/ddsonic-arm64.…`;
-  - 2b prints no STOP line, the checksum line says OK, and `go version go1.27.3 darwin/arm64`;
-  - the last line prints `79ba942dfcdc12a1ad6a02f886b86d5a24e563bc` and `9ae61bcf6604e032b6e690394d10cb0bade80543`.
+  - 2b prints the checksum line `OK` and then `step 2b: ok`. That last line appears only if every command succeeded, including two comparisons: Go is `go1.27.3` for `darwin/arm64`, and the tag resolves to `79ba942dfcdc12a1ad6a02f886b86d5a24e563bc` and `9ae61bcf6604e032b6e690394d10cb0bade80543`.
 
   `release.sh` and `test-tree.sh` also refuse any other values themselves (`packaging/darwin-arm64/sources.txt`).
 - **Risk:** low. About 80 MB is downloaded. Nothing is installed outside `$W` except the one-line `~/ddsonic-arm64-workdir.txt`. If 2a prints STOP, an earlier run was not cleaned up: report it, and do not remove anything by hand.
@@ -185,13 +188,18 @@ s=$?; echo "exit $s" >> "$W/records/codecs.log"; echo "codecs: exit $s"; tail -n
 
 **Step 4. Original tests.**
 ```sh
-(cd "$W/ddsonic" && sh packaging/darwin-arm64/test-tree.sh v1.0.0 "$W/t-original"); echo "test-tree: exit $?"
-(cd "$W/t-original" && PKG_CONFIG_LIBDIR="$W/codecs/lib/pkgconfig" CGO_ENABLED=1 go test -count=1 -race ./...) > "$W/records/tests-original.txt" 2>&1
-s=$?; echo "exit $s" >> "$W/records/tests-original.txt"; echo "go test: exit $s"
-grep -E '^(ok|FAIL|---|panic)' "$W/records/tests-original.txt"
+if (cd "$W/ddsonic" && sh packaging/darwin-arm64/test-tree.sh v1.0.0 "$W/t-original") > "$W/records/t-original-tree.log" 2>&1; then
+  echo "test-tree: exit 0" >> "$W/records/t-original-tree.log"; tail -n 12 "$W/records/t-original-tree.log"
+  (cd "$W/t-original" && PKG_CONFIG_LIBDIR="$W/codecs/lib/pkgconfig" CGO_ENABLED=1 go test -count=1 -race ./...) > "$W/records/tests-original.txt" 2>&1
+  s=$?; echo "exit $s" >> "$W/records/tests-original.txt"; echo "go test: exit $s"
+  grep -E '^(ok|FAIL|---|panic)' "$W/records/tests-original.txt"
+else
+  s=$?; echo "test-tree: exit $s" >> "$W/records/t-original-tree.log"; tail -n 12 "$W/records/t-original-tree.log"
+  echo "STOP: the test tree was not prepared (exit $s); no tests were run"
+fi
 ```
 - **Purpose:** the baseline, with the same `go test` flags as CI (`-count=1 -race`).
-- **Expected:** `test-tree: exit 0`, then per-package results. Failures in some player cleanup tests are possible; they are recorded, not fixed. A non-zero `go test` exit is a result here, not a reason to stop. A non-zero `test-tree` exit is a reason to stop.
+- **Expected:** the tree log ends `test-tree: exit 0`, then come the per-package results. Failures in some player cleanup tests are possible; they are recorded, not fixed. A non-zero `go test` exit is a result here, not a reason to stop. If the tree cannot be prepared, no test runs, and the step ends with `STOP:`.
 - **Risk:**
   - It downloads the Go modules the tag's `go.sum` pins, into `$W/gopath`.
   - Tests start helper processes and may leave temporary files under `$TMPDIR` when they fail.
@@ -200,13 +208,18 @@ grep -E '^(ok|FAIL|---|panic)' "$W/records/tests-original.txt"
 
 **Step 5. Corrected-fixture tests.**
 ```sh
-(cd "$W/ddsonic" && sh packaging/darwin-arm64/test-tree.sh v1.0.0 "$W/t-fixtures" <fixture-commit>); echo "test-tree: exit $?"
-(cd "$W/t-fixtures" && PKG_CONFIG_LIBDIR="$W/codecs/lib/pkgconfig" CGO_ENABLED=1 go test -count=1 -race ./...) > "$W/records/tests-fixtures.txt" 2>&1
-s=$?; echo "exit $s" >> "$W/records/tests-fixtures.txt"; echo "go test: exit $s"
-grep -E '^(ok|FAIL|---|panic)' "$W/records/tests-fixtures.txt"
+if (cd "$W/ddsonic" && sh packaging/darwin-arm64/test-tree.sh v1.0.0 "$W/t-fixtures" <fixture-commit>) > "$W/records/t-fixtures-tree.log" 2>&1; then
+  echo "test-tree: exit 0" >> "$W/records/t-fixtures-tree.log"; tail -n 12 "$W/records/t-fixtures-tree.log"
+  (cd "$W/t-fixtures" && PKG_CONFIG_LIBDIR="$W/codecs/lib/pkgconfig" CGO_ENABLED=1 go test -count=1 -race ./...) > "$W/records/tests-fixtures.txt" 2>&1
+  s=$?; echo "exit $s" >> "$W/records/tests-fixtures.txt"; echo "go test: exit $s"
+  grep -E '^(ok|FAIL|---|panic)' "$W/records/tests-fixtures.txt"
+else
+  s=$?; echo "test-tree: exit $s" >> "$W/records/t-fixtures-tree.log"; tail -n 12 "$W/records/t-fixtures-tree.log"
+  echo "STOP: the test tree was not prepared (exit $s); no tests were run"
+fi
 ```
 - **Purpose:** the same production code, with corrected test fixtures.
-- **Expected:** `test-tree: exit 0` after `FIXTURE-OVERLAY.txt` is printed with nine files, then per-package results.
+- **Expected:** the tree log shows `FIXTURE-OVERLAY.txt` with nine files and ends `test-tree: exit 0`, then come the per-package results. As in step 4, a tree that cannot be prepared ends the step with `STOP:` and no tests.
 - **Risk:** as in step 4.
 
 **Step 6. Targeted reruns.** Only for failures from steps 4 and 5; at most three per test. Each rerun is one approved command, with the tree, package and test name filled in:
@@ -235,20 +248,31 @@ s=$?; echo "exit $s" >> "$W/records/build-1.log"; echo "build: exit $s"; tail -n
 ```sh
 (cd "$W/ddsonic" && sh packaging/darwin-arm64/release.sh v1.0.0 "$W/codecs" "$W/out2") > "$W/records/build-2.log" 2>&1
 s=$?; echo "exit $s" >> "$W/records/build-2.log"; echo "build 2: exit $s"
-diff "$W/out/SHA256SUMS-darwin-arm64" "$W/out2/SHA256SUMS-darwin-arm64" && echo "same bytes"
+if [ "$s" = 0 ] && [ "$(tail -n 1 "$W/records/build-1.log")" = "exit 0" ]; then
+  diff "$W/out/SHA256SUMS-darwin-arm64" "$W/out2/SHA256SUMS-darwin-arm64" && echo "same bytes" || echo "different bytes: record the difference"
+else
+  echo "STOP: a build did not exit 0; nothing was compared"
+fi
 ```
 - **Purpose:** whether two builds on the same machine and tooling give the same files.
-- **Expected:** `build 2: exit 0`, then "same bytes" or a recorded difference to look into. Either result is recorded as found; neither makes the build reproducible from the tag alone.
+- **Expected:** `build 2: exit 0`, then "same bytes" or "different bytes". The comparison runs only if both builds exited 0. Either result is recorded as found; neither makes the build reproducible from the tag alone.
 - **Risk:** low.
 
-**Step 9. Checks on the files.** Read-only, apart from extracting into `$W/x`.
+**Step 9. Checks on the files.** Read-only, apart from extracting into `$W/x`, and only after the checksums match.
 ```sh
-(cd "$W/out" && shasum -a 256 -c SHA256SUMS-darwin-arm64); echo "checksums: exit $?"
-mkdir "$W/x" && tar -xzf "$W/out/ddsonic-1.0.0-darwin-arm64.tar.gz" -C "$W/x"
-B="$W/x/ddsonic-1.0.0-darwin-arm64/ddsonic"
-"$B" --version; lipo -archs "$B"; otool -L "$B"; codesign -dv "$B" 2>&1 | grep -E '^(Signature|Format|CodeDirectory)'; vtool -show-build "$B" | grep -E 'minos|sdk'
-for f in "$B" "$W/out/"*; do printf '%s ' "${f##*/}"; strings -a "$f" | grep -c -F -e "$HOME" -e "$(id -un)" -e "$(scutil --get LocalHostName)" -e "$(scutil --get ComputerName)"; done
-cat "$W/records/tmpdir-before.txt"; ls -A "${TMPDIR:-/tmp}" | wc -l
+if (cd "$W/out" && shasum -a 256 -c SHA256SUMS-darwin-arm64); then
+  echo "checksums: ok"
+  if mkdir "$W/x" && tar -xzf "$W/out/ddsonic-1.0.0-darwin-arm64.tar.gz" -C "$W/x"; then
+    B="$W/x/ddsonic-1.0.0-darwin-arm64/ddsonic"
+    "$B" --version; lipo -archs "$B"; otool -L "$B"; codesign -dv "$B" 2>&1 | grep -E '^(Signature|Format|CodeDirectory)'; vtool -show-build "$B" | grep -E 'minos|sdk'
+    for f in "$B" "$W/out/"*; do printf '%s ' "${f##*/}"; strings -a "$f" | grep -c -F -e "$HOME" -e "$(id -un)" -e "$(scutil --get LocalHostName)" -e "$(scutil --get ComputerName)"; done
+    cat "$W/records/tmpdir-before.txt"; ls -A "${TMPDIR:-/tmp}" | wc -l
+  else
+    echo "STOP: the archive could not be extracted"
+  fi
+else
+  echo "STOP: the checksums do not match; the files are not extracted or run"
+fi
 ```
 - **Purpose:**
   - checksums;
@@ -259,7 +283,7 @@ cat "$W/records/tmpdir-before.txt"; ls -A "${TMPDIR:-/tmp}" | wc -l
   - the minimum macOS version;
   - the privacy scan;
   - the temporary directory's entry count, before step 4 and now.
-- **Expected:** `checksums: exit 0`, and every privacy count `0`. The privacy loop prints counts only, never the matched values. The two `$TMPDIR` counts are recorded as found.
+- **Expected:** `checksums: ok`, and every privacy count `0`. Nothing is extracted or run unless every checksum matches. The privacy loop prints counts only, never the matched values. The two `$TMPDIR` counts are recorded as found.
 - **Limits:** the `$TMPDIR` count is coarse. Other programs also use that directory, so a difference cannot be attributed to the tests or the build; it is a prompt to look, not a result.
 - **Risk:** none.
 
@@ -267,10 +291,15 @@ cat "$W/records/tmpdir-before.txt"; ls -A "${TMPDIR:-/tmp}" | wc -l
 
 **Step 11. Gatekeeper behaviour with a synthetic quarantine attribute** (on a copy).
 ```sh
-cp "$W/out/ddsonic-1.0.0-darwin-arm64.tar.gz" "$W/q.tar.gz"
-xattr -w com.apple.quarantine "0083;$(printf %x "$(date +%s)");Safari;" "$W/q.tar.gz"
-mkdir "$W/q" && tar -xzf "$W/q.tar.gz" -C "$W/q" && xattr -l "$W/q/ddsonic-1.0.0-darwin-arm64/ddsonic"
-spctl --assess --type execute -vv "$W/q/ddsonic-1.0.0-darwin-arm64/ddsonic"; "$W/q/ddsonic-1.0.0-darwin-arm64/ddsonic" --version
+Q="$W/q/ddsonic-1.0.0-darwin-arm64/ddsonic"
+if (cd "$W/out" && shasum -a 256 -c -s SHA256SUMS-darwin-arm64) \
+   && cp "$W/out/ddsonic-1.0.0-darwin-arm64.tar.gz" "$W/q.tar.gz" \
+   && xattr -w com.apple.quarantine "0083;$(printf %x "$(date +%s)");Safari;" "$W/q.tar.gz" \
+   && mkdir "$W/q" && tar -xzf "$W/q.tar.gz" -C "$W/q"; then
+  xattr -l "$Q"; spctl --assess --type execute -vv "$Q"; "$Q" --version
+else
+  echo "STOP: the checked copy could not be prepared; nothing was run"
+fi
 ```
 - **Purpose:** what macOS does with this binary when a quarantine attribute, written by hand, is present on its archive. Three things are recorded: whether this `tar` passes the attribute on, what `spctl` reports, and what happens when the binary is run.
 - **Limits:** the attribute is synthetic. This step does not show how a browser sets the attribute, or whether a browser download, or another extraction tool such as Archive Utility, passes it on. Nothing about a real download is concluded from it.
@@ -279,20 +308,28 @@ spctl --assess --type execute -vv "$W/q/ddsonic-1.0.0-darwin-arm64/ddsonic"; "$W
 
 **Step 12. Cleanup**, after the records are copied to the owner's private evidence location. It removes only the recorded work directory, and only if every check passes:
 ```sh
-W="$(cat ~/ddsonic-arm64-workdir.txt)"
-if [ -n "$W" ] && case "$W" in /tmp/ddsonic-arm64.*) true ;; *) false ;; esac \
-   && [ -d "$W" ] && [ ! -L "$W" ] && [ -O "$W" ] \
-   && [ "$(cat "$W/.ddsonic-arm64-workdir" 2>/dev/null)" = "$W" ]; then
-  chmod -R u+w -- "$W" && rm -rf -- "$W" && rm -f ~/ddsonic-arm64-workdir.txt && echo "removed $W"
+W="$(cat ~/ddsonic-arm64-workdir.txt 2>/dev/null)"; P=""
+case "${W#/tmp/}" in
+  ddsonic-arm64.[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9])
+    [ "/tmp/${W#/tmp/}" = "$W" ] && [ -d "$W" ] && [ ! -L "$W" ] && [ -O "$W" ] \
+      && [ "$(cat "$W/.ddsonic-arm64-workdir" 2>/dev/null)" = "$W" ] \
+      && P="$(cd -P -- "$W" && pwd -P)" \
+      && [ "$P" = "$(cd -P /tmp && pwd -P)/${W#/tmp/}" ] || P="" ;;
+esac
+if [ -n "$P" ]; then
+  chmod -R u+w -- "$P" && rm -rf -- "$P" && rm -f ~/ddsonic-arm64-workdir.txt && echo "removed $W"
 else
-  echo "REFUSED: $W is not the recorded work directory"
+  echo "REFUSED: '$W' is not the recorded work directory; nothing was removed"
 fi
 ```
 - **Purpose:** remove the work directory and its record. `chmod` first, because Go's module cache is read-only.
-- **The checks:**
-  - the path is non-empty, absolute, and the `mktemp` pattern from step 2;
-  - it is a real directory, not a symlink, and owned by the user;
-  - its marker file holds that same path.
+- **The checks:** all must hold before anything is removed.
+  - The recorded path is exactly `/tmp/` plus a name of the form `ddsonic-arm64.` and eight letters or digits, the `mktemp` pattern from step 2. A slash, `.` or `..` anywhere in the name fails this.
+  - It is a directory, not a symlink, and owned by the user.
+  - Its marker file holds that same path.
+  - Its physical path (`cd -P`, `pwd -P`) is the physical `/tmp` plus that name. That rules out a symlinked ancestor, and allows macOS's own `/tmp` → `/private/tmp`.
+
+  The physical path is what is removed.
 - **Expected:** `removed /tmp/ddsonic-arm64.…`.
 - **Risk:** low. On REFUSED, nothing is removed; report it.
 
