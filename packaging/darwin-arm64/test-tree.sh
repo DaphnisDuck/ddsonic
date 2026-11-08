@@ -45,7 +45,13 @@ helper=internal/ytdlp/ytdlptest
 fail() { echo "test-tree: $*" >&2; exit 1; }
 
 repo=$(git rev-parse --show-toplevel)
+here=$(cd "$(dirname "$0")" && pwd -P)
+# The tag must match its pinned line in sources.txt, as for release.sh.
+pinned=$(awk -v v="$version" '$1 == v { print $2, $3 }' "$here/sources.txt")
+[ -n "$pinned" ] || fail "$version is not pinned in $here/sources.txt"
+tagobj=$(git -C "$repo" rev-parse --verify "refs/tags/$version") || fail "no tag $version"
 commit=$(git -C "$repo" rev-parse --verify "refs/tags/$version^{commit}") || fail "no tag $version"
+[ "$tagobj $commit" = "$pinned" ] || fail "tag $version is $tagobj -> $commit; sources.txt pins $pinned"
 if [ -e "$dir" ] && [ -n "$(ls -A "$dir")" ]; then
 	fail "$dir is not empty"
 fi

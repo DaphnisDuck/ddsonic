@@ -6,7 +6,9 @@
 #
 # Run it from a clean checkout of this repository's tooling that also has the
 # release tag. <codec-prefix> is what packaging/darwin-arm64/codecs.sh built;
-# <out> must not exist yet, or be empty. It writes four files to <out>:
+# <out> must not exist yet, or be empty. The files are staged and moved into
+# <out> only when every check has passed; on failure <out> stays empty. The
+# version must be pinned in sources.txt. It writes four files to <out>:
 #
 #   ddsonic-<v>-darwin-arm64.tar.gz                  the binary and its papers
 #   ddsonic-<v>-darwin-arm64-sbom.cdx.json           CycloneDX SBOM
@@ -47,6 +49,9 @@ if [ -e "$out" ] && [ -n "$(ls -A "$out")" ]; then
 fi
 mkdir -p "$out"
 out=$(cd "$out" && pwd -P)
+# Outputs are staged in the work directory and moved into <out> only when
+# every check has passed, so a failed build leaves <out> empty.
+final=$out
 
 # The tooling: this checkout, which must be clean, so its commit names it.
 here=$(cd "$(dirname "$0")" && pwd -P)
@@ -54,8 +59,13 @@ repo=$(git -C "$here" rev-parse --show-toplevel)
 [ -z "$(git -C "$repo" status --porcelain)" ] || fail "the tooling checkout $repo has uncommitted changes"
 tooling=$(git -C "$repo" rev-parse --verify 'HEAD^{commit}')
 
-# The source: the release tag's commit, resolved once.
+# The source: the release tag, which must match its pinned line in
+# sources.txt (tag object and peeled commit), resolved once.
+pinned=$(awk -v v="$version" '$1 == v { print $2, $3 }' "$here/sources.txt")
+[ -n "$pinned" ] || fail "$version is not pinned in $here/sources.txt"
+tagobj=$(git -C "$repo" rev-parse --verify "refs/tags/$version") || fail "no tag $version in $repo"
 commit=$(git -C "$repo" rev-parse --verify "refs/tags/$version^{commit}") || fail "no tag $version in $repo"
+[ "$tagobj $commit" = "$pinned" ] || fail "tag $version is $tagobj -> $commit; sources.txt pins $pinned"
 epoch=$(git -C "$repo" log -1 --format=%ct "$commit")
 name="ddsonic-${version#v}"
 bin="$name-darwin-arm64"
@@ -68,6 +78,8 @@ want_go="go$(git -C "$repo" show "$commit:mise.toml" | awk -F'"' '$1 ~ /^go *= *
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+out="$work/out"
+mkdir "$out"
 tree="$work/$name-source"
 mkdir -p "$tree"
 git -C "$repo" archive --format=tar "$commit" | tar -x -C "$tree"
@@ -186,5 +198,7 @@ done
 
 cd "$out"
 shasum -a 256 "$bin.tar.gz" "$bin-sbom.cdx.json" "$bin-THIRD_PARTY_NOTICES.txt" > SHA256SUMS-darwin-arm64
+shasum -a 256 -c -s SHA256SUMS-darwin-arm64 || fail "the staged files do not match their checksums"
+mv "$bin.tar.gz" "$bin-sbom.cdx.json" "$bin-THIRD_PARTY_NOTICES.txt" SHA256SUMS-darwin-arm64 "$final/"
 cat "$work/$bin/RELEASE-MANIFEST.json"
-cat SHA256SUMS-darwin-arm64
+cat "$final/SHA256SUMS-darwin-arm64"

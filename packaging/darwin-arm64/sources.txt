@@ -1,0 +1,6 @@
+# ddsonic: the release tags packaging/darwin-arm64 may build or test, each
+# pinned to its tag object and the commit it peels to. release.sh and
+# test-tree.sh refuse a version not listed here, and a tag that does not
+# match its line, so a moved or substituted tag cannot build under the label.
+# Fields: version, tag object, commit.
+v1.0.0 79ba942dfcdc12a1ad6a02f886b86d5a24e563bc 9ae61bcf6604e032b6e690394d10cb0bade80543
