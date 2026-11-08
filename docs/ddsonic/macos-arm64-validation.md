@@ -111,16 +111,19 @@ Each step is shown to the owner with its exact text and is run only after the ow
 **Step 0. Record the environment.** Read-only: it installs nothing, and reports what is missing.
 ```sh
 sw_vers; uname -m; sysctl -n sysctl.proc_translated
+missing=""
 if xcode-select -p >/dev/null 2>&1; then
   xcode-select -p; clang --version | head -n 1; xcrun --show-sdk-version; git --version
 else
-  echo "STOP: Command Line Tools are not installed (step 1)"
+  missing="$missing command-line-tools"
 fi
-for t in curl shasum tar pkg-config jq; do command -v "$t" >/dev/null 2>&1 && echo "found: $t" || echo "missing: $t"; done
+for t in curl shasum tar pkg-config jq; do command -v "$t" >/dev/null 2>&1 && echo "found: $t" || missing="$missing $t"; done
+[ "$(uname -m)" = arm64 ] && [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" != 1 ] || missing="$missing native-arm64-shell"
+if [ -z "$missing" ]; then echo "step 0: ok"; else echo "STOP: missing:$missing (step 1)"; fi
 ```
 - **Purpose:** the record's environment lines, and the prerequisites.
 - **Prerequisites:** none. `clang`, `xcrun` and `git` run only when the Command Line Tools are present, because without them those commands can offer to install them.
-- **Expected:** `arm64`, `0` (not translated), a Command Line Tools path, and a list of found or missing tools.
+- **Expected:** `arm64`, `0` (not translated), a Command Line Tools path, the tools found, and last `step 0: ok`. Anything missing ends with `STOP: missing: …` instead.
 - **Risk:** none. Do not paste output that includes the machine's name.
 
 **Step 1. Installs, only what step 0 found missing.** Each line is a separate approval and runs only if needed:
@@ -173,17 +176,22 @@ fi
 - **Risk:** low. About 80 MB is downloaded. Nothing is installed outside `$W` except the one-line `~/ddsonic-arm64-workdir.txt`. If 2a prints STOP, an earlier run was not cleaned up: report it, and do not remove anything by hand.
 - **In a new shell,** before any later step, restore the variables:
   ```sh
-  export W="$(cat ~/ddsonic-arm64-workdir.txt)"
-  export PATH="$W/go/bin:$PATH" GOPATH="$W/gopath" GOCACHE="$W/gocache" GOTOOLCHAIN=local
+  export W="$(cat ~/ddsonic-arm64-workdir.txt 2>/dev/null)"
+  if [ -n "$W" ] && [ "$(cat "$W/.ddsonic-arm64-workdir" 2>/dev/null)" = "$W" ]; then
+    export PATH="$W/go/bin:$PATH" GOPATH="$W/gopath" GOCACHE="$W/gocache" GOTOOLCHAIN=local && echo "restored: $W"
+  else
+    echo "STOP: no recorded work directory"
+  fi
   ```
 
 **Step 3. Codec libraries.**
 ```sh
 (cd "$W/ddsonic" && sh packaging/darwin-arm64/codecs.sh "$W/codecs") > "$W/records/codecs.log" 2>&1
-s=$?; echo "exit $s" >> "$W/records/codecs.log"; echo "codecs: exit $s"; tail -n 8 "$W/records/codecs.log"
+s=$?; echo "exit $s" >> "$W/records/codecs.log"; tail -n 8 "$W/records/codecs.log"
+if [ "$s" = 0 ]; then echo "step 3: ok"; else echo "STOP: the codec build failed (exit $s)"; fi
 ```
 - **Purpose:** static arm64 codec libraries for the build and for the tests.
-- **Expected:** `codecs: exit 0`, and the log's end lists `codecs.txt`'s four lines.
+- **Expected:** the log's end lists `codecs.txt`'s four lines, then `step 3: ok`.
 - **Risk:** it downloads about 3 MB from xiph.org and mpg123.de and compiles for a few minutes. This recipe has not run on arm64 before, so a configure or compile failure is possible. On a non-zero exit: stop and report, with no retries and no changes.
 
 **Step 4. Original tests.**
@@ -191,8 +199,9 @@ s=$?; echo "exit $s" >> "$W/records/codecs.log"; echo "codecs: exit $s"; tail -n
 if (cd "$W/ddsonic" && sh packaging/darwin-arm64/test-tree.sh v1.0.0 "$W/t-original") > "$W/records/t-original-tree.log" 2>&1; then
   echo "test-tree: exit 0" >> "$W/records/t-original-tree.log"; tail -n 12 "$W/records/t-original-tree.log"
   (cd "$W/t-original" && PKG_CONFIG_LIBDIR="$W/codecs/lib/pkgconfig" CGO_ENABLED=1 go test -count=1 -race ./...) > "$W/records/tests-original.txt" 2>&1
-  s=$?; echo "exit $s" >> "$W/records/tests-original.txt"; echo "go test: exit $s"
+  s=$?; echo "exit $s" >> "$W/records/tests-original.txt"
   grep -E '^(ok|FAIL|---|panic)' "$W/records/tests-original.txt"
+  echo "step 4: tests ran; go test exit $s (a result to record, not a pass)"
 else
   s=$?; echo "test-tree: exit $s" >> "$W/records/t-original-tree.log"; tail -n 12 "$W/records/t-original-tree.log"
   echo "STOP: the test tree was not prepared (exit $s); no tests were run"
@@ -211,8 +220,9 @@ fi
 if (cd "$W/ddsonic" && sh packaging/darwin-arm64/test-tree.sh v1.0.0 "$W/t-fixtures" <fixture-commit>) > "$W/records/t-fixtures-tree.log" 2>&1; then
   echo "test-tree: exit 0" >> "$W/records/t-fixtures-tree.log"; tail -n 12 "$W/records/t-fixtures-tree.log"
   (cd "$W/t-fixtures" && PKG_CONFIG_LIBDIR="$W/codecs/lib/pkgconfig" CGO_ENABLED=1 go test -count=1 -race ./...) > "$W/records/tests-fixtures.txt" 2>&1
-  s=$?; echo "exit $s" >> "$W/records/tests-fixtures.txt"; echo "go test: exit $s"
+  s=$?; echo "exit $s" >> "$W/records/tests-fixtures.txt"
   grep -E '^(ok|FAIL|---|panic)' "$W/records/tests-fixtures.txt"
+  echo "step 5: tests ran; go test exit $s (a result to record, not a pass)"
 else
   s=$?; echo "test-tree: exit $s" >> "$W/records/t-fixtures-tree.log"; tail -n 12 "$W/records/t-fixtures-tree.log"
   echo "STOP: the test tree was not prepared (exit $s); no tests were run"
@@ -225,7 +235,7 @@ fi
 **Step 6. Targeted reruns.** Only for failures from steps 4 and 5; at most three per test. Each rerun is one approved command, with the tree, package and test name filled in:
 ```sh
 (cd "$W/t-original" && PKG_CONFIG_LIBDIR="$W/codecs/lib/pkgconfig" CGO_ENABLED=1 go test -count=1 -race -run '^<TestName>$' ./<package>) >> "$W/records/reruns.txt" 2>&1
-s=$?; echo "rerun t-original <package> <TestName>: exit $s" >> "$W/records/reruns.txt"; echo "exit $s"
+s=$?; echo "rerun t-original <package> <TestName>: exit $s" >> "$W/records/reruns.txt"; echo "step 6: rerun exit $s (a result to record)"
 ```
 (the same with `t-fixtures` in both places)
 - **Purpose:** separate a consistent failure from a flaky one. Every rerun's exit status is in `reruns.txt`.
@@ -234,11 +244,12 @@ s=$?; echo "rerun t-original <package> <TestName>: exit $s" >> "$W/records/rerun
 **Step 7. Build the file set.**
 ```sh
 (cd "$W/ddsonic" && sh packaging/darwin-arm64/release.sh v1.0.0 "$W/codecs" "$W/out") > "$W/records/build-1.log" 2>&1
-s=$?; echo "exit $s" >> "$W/records/build-1.log"; echo "build: exit $s"; tail -n 40 "$W/records/build-1.log"
+s=$?; echo "exit $s" >> "$W/records/build-1.log"; tail -n 40 "$W/records/build-1.log"
+if [ "$s" = 0 ]; then echo "step 7: ok"; else echo "STOP: the build failed (exit $s); $W/out is empty"; fi
 ```
 - **Purpose:** the archive, SBOM, notices and `SHA256SUMS-darwin-arm64`.
 - **Expected:**
-  - `build: exit 0`;
+  - last, `step 7: ok`;
   - a privacy line with 0 machine, user or home-directory strings;
   - the manifest, naming `9ae61bcf…`, `darwin`, `arm64` and `go1.27.3`, with `"reproducible_from_tag_alone": false`;
   - three checksum lines.
@@ -247,31 +258,53 @@ s=$?; echo "exit $s" >> "$W/records/build-1.log"; echo "build: exit $s"; tail -n
 **Step 8. A second build, compared.**
 ```sh
 (cd "$W/ddsonic" && sh packaging/darwin-arm64/release.sh v1.0.0 "$W/codecs" "$W/out2") > "$W/records/build-2.log" 2>&1
-s=$?; echo "exit $s" >> "$W/records/build-2.log"; echo "build 2: exit $s"
+s=$?; echo "exit $s" >> "$W/records/build-2.log"
 if [ "$s" = 0 ] && [ "$(tail -n 1 "$W/records/build-1.log")" = "exit 0" ]; then
-  diff "$W/out/SHA256SUMS-darwin-arm64" "$W/out2/SHA256SUMS-darwin-arm64" && echo "same bytes" || echo "different bytes: record the difference"
+  if diff "$W/out/SHA256SUMS-darwin-arm64" "$W/out2/SHA256SUMS-darwin-arm64"; then
+    echo "step 8: ok; same bytes"
+  else
+    echo "step 8: ok; different bytes (a result to record)"
+  fi
 else
-  echo "STOP: a build did not exit 0; nothing was compared"
+  echo "STOP: a build did not exit 0 (build 2: exit $s); nothing was compared"
 fi
 ```
 - **Purpose:** whether two builds on the same machine and tooling give the same files.
-- **Expected:** `build 2: exit 0`, then "same bytes" or "different bytes". The comparison runs only if both builds exited 0. Either result is recorded as found; neither makes the build reproducible from the tag alone.
+- **Expected:** `step 8: ok; same bytes`, or `step 8: ok; different bytes`. The comparison runs only if both builds exited 0; otherwise the step ends with `STOP:`. Either result is recorded as found; neither makes the build reproducible from the tag alone.
 - **Risk:** low.
 
 **Step 9. Checks on the files.** Read-only, apart from extracting into `$W/x`, and only after the checksums match.
 ```sh
-if (cd "$W/out" && shasum -a 256 -c SHA256SUMS-darwin-arm64); then
-  echo "checksums: ok"
-  if mkdir "$W/x" && tar -xzf "$W/out/ddsonic-1.0.0-darwin-arm64.tar.gz" -C "$W/x"; then
-    B="$W/x/ddsonic-1.0.0-darwin-arm64/ddsonic"
-    "$B" --version; lipo -archs "$B"; otool -L "$B"; codesign -dv "$B" 2>&1 | grep -E '^(Signature|Format|CodeDirectory)'; vtool -show-build "$B" | grep -E 'minos|sdk'
-    for f in "$B" "$W/out/"*; do printf '%s ' "${f##*/}"; strings -a "$f" | grep -c -F -e "$HOME" -e "$(id -un)" -e "$(scutil --get LocalHostName)" -e "$(scutil --get ComputerName)"; done
-    cat "$W/records/tmpdir-before.txt"; ls -A "${TMPDIR:-/tmp}" | wc -l
+fail=0
+chk() { if [ "$2" = "$3" ]; then echo "ok: $1"; else echo "FAIL: $1: got '$2', want '$3'"; fail=1; fi; }
+if (cd "$W/out" && shasum -a 256 -c SHA256SUMS-darwin-arm64) && mkdir "$W/x" \
+   && tar -xzf "$W/out/ddsonic-1.0.0-darwin-arm64.tar.gz" -C "$W/x"; then
+  B="$W/x/ddsonic-1.0.0-darwin-arm64/ddsonic"
+  chk "version" "$("$B" --version 2>&1)" "ddsonic version v1.0.0 (commit 9ae61bcf6604e032b6e690394d10cb0bade80543)"
+  chk "architecture" "$(lipo -archs "$B" 2>&1)" "arm64"
+  if L="$(otool -L "$B")"; then
+    printf '%s\n' "$L"
+    chk "libraries listed" "$([ "$(printf '%s\n' "$L" | awk 'NR > 1' | grep -c .)" -gt 0 ] && echo yes || echo no)" "yes"
+    chk "libraries outside macOS" "$(printf '%s\n' "$L" | awk 'NR > 1 { print $1 }' | grep -c -v -E '^(/usr/lib/|/System/Library/)')" "0"
+    chk "codec libraries loaded dynamically" "$(printf '%s\n' "$L" | grep -c -i -E 'flac|vorbis|ogg|mpg123')" "0"
   else
-    echo "STOP: the archive could not be extracted"
+    chk "otool -L" "failed" "a library list"
   fi
+  chk "signature verifies" "$(codesign --verify "$B" >/dev/null 2>&1 && echo yes || echo no)" "yes"
+  codesign -dv "$B" 2>&1 | grep -E '^(Signature|Format|CodeDirectory)'
+  M="$(vtool -show-build "$B" 2>/dev/null | awk '$1 == "minos" { print $2; exit }')"
+  chk "minimum macOS recorded" "$([ -n "$M" ] && echo yes || echo no)" "yes"; echo "minos: $M"
+  for f in "$B" "$W/out/"*; do
+    if S="$(strings -a "$f")"; then
+      chk "privacy ${f##*/}" "$(printf '%s\n' "$S" | grep -c -F -e "$HOME" -e "$(id -un)" -e "$(scutil --get LocalHostName)" -e "$(scutil --get ComputerName)")" "0"
+    else
+      chk "strings ${f##*/}" "failed" "readable"
+    fi
+  done
+  echo "TMPDIR entries before step 4 / now (coarse, not a check): $(cat "$W/records/tmpdir-before.txt") / $(ls -A "${TMPDIR:-/tmp}" | wc -l)"
+  if [ "$fail" = 0 ]; then echo "step 9: ok"; else echo "STOP: step 9 failed; see the FAIL lines above"; fi
 else
-  echo "STOP: the checksums do not match; the files are not extracted or run"
+  echo "STOP: the checksums did not match or the archive could not be extracted; nothing was run"
 fi
 ```
 - **Purpose:**
@@ -283,7 +316,12 @@ fi
   - the minimum macOS version;
   - the privacy scan;
   - the temporary directory's entry count, before step 4 and now.
-- **Expected:** `checksums: ok`, and every privacy count `0`. Nothing is extracted or run unless every checksum matches. The privacy loop prints counts only, never the matched values. The two `$TMPDIR` counts are recorded as found.
+- **Expected:** an `ok:` line for each check, and last `step 9: ok`.
+  - Any failed check prints `FAIL: <check>: got …, want …`, and the step then ends with `STOP: step 9 failed`; that line, never `step 9: ok`, is the result.
+  - Every check runs even after one fails, so the record shows them all.
+  - Nothing is extracted or run unless every checksum matches.
+  - The privacy checks print counts only, never the matched values.
+  - The signature kind (expected: ad-hoc, made by the linker) and `minos` are printed for the record; they are not pass/fail values. The privacy loop prints counts only, never the matched values. The two `$TMPDIR` counts are recorded as found.
 - **Limits:** the `$TMPDIR` count is coarse. Other programs also use that directory, so a difference cannot be attributed to the tests or the build; it is a prompt to look, not a result.
 - **Risk:** none.
 
@@ -297,6 +335,7 @@ if (cd "$W/out" && shasum -a 256 -c -s SHA256SUMS-darwin-arm64) \
    && xattr -w com.apple.quarantine "0083;$(printf %x "$(date +%s)");Safari;" "$W/q.tar.gz" \
    && mkdir "$W/q" && tar -xzf "$W/q.tar.gz" -C "$W/q"; then
   xattr -l "$Q"; spctl --assess --type execute -vv "$Q"; "$Q" --version
+  echo "step 11: observations recorded above (not a pass/fail check)"
 else
   echo "STOP: the checked copy could not be prepared; nothing was run"
 fi
@@ -317,7 +356,8 @@ case "${W#/tmp/}" in
       && [ "$P" = "$(cd -P /tmp && pwd -P)/${W#/tmp/}" ] || P="" ;;
 esac
 if [ -n "$P" ]; then
-  chmod -R u+w -- "$P" && rm -rf -- "$P" && rm -f ~/ddsonic-arm64-workdir.txt && echo "removed $W"
+  chmod -R u+w -- "$P" && rm -rf -- "$P" && rm -f ~/ddsonic-arm64-workdir.txt && echo "removed $W" \
+    || echo "STOP: removal of $P did not complete; report it"
 else
   echo "REFUSED: '$W' is not the recorded work directory; nothing was removed"
 fi
