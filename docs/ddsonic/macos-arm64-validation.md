@@ -112,8 +112,11 @@ Each step is shown to the owner with its exact text and is run only after the ow
 ```sh
 sw_vers; uname -m; sysctl -n sysctl.proc_translated
 missing=""
-if xcode-select -p >/dev/null 2>&1; then
-  xcode-select -p; clang --version | head -n 1; xcrun --show-sdk-version; git --version
+if CLT="$(xcode-select -p 2>/dev/null)"; then
+  echo "Command Line Tools: $CLT"
+  if V="$(clang --version 2>/dev/null)"; then echo "clang: $(printf '%s\n' "$V" | head -n 1)"; else missing="$missing clang"; fi
+  if V="$(xcrun --show-sdk-version 2>/dev/null)" && [ -n "$V" ]; then echo "SDK: $V"; else missing="$missing macos-sdk"; fi
+  if V="$(git --version 2>/dev/null)"; then echo "$V"; else missing="$missing git"; fi
 else
   missing="$missing command-line-tools"
 fi
@@ -123,7 +126,7 @@ if [ -z "$missing" ]; then echo "step 0: ok"; else echo "STOP: missing:$missing 
 ```
 - **Purpose:** the record's environment lines, and the prerequisites.
 - **Prerequisites:** none. `clang`, `xcrun` and `git` run only when the Command Line Tools are present, because without them those commands can offer to install them.
-- **Expected:** `arm64`, `0` (not translated), a Command Line Tools path, the tools found, and last `step 0: ok`. Anything missing ends with `STOP: missing: …` instead.
+- **Expected:** `arm64`, `0` (not translated), the Command Line Tools path, the `clang` version, the SDK version, the `git` version, the tools found, and last `step 0: ok`. A probe that fails (Command Line Tools, `clang`, the SDK, `git` or a tool) is listed in `STOP: missing: …` instead, and the step does not end `ok`.
 - **Risk:** none. Do not paste output that includes the machine's name.
 
 **Step 1. Installs, only what step 0 found missing.** Each line is a separate approval and runs only if needed:
@@ -260,17 +263,18 @@ if [ "$s" = 0 ]; then echo "step 7: ok"; else echo "STOP: the build failed (exit
 (cd "$W/ddsonic" && sh packaging/darwin-arm64/release.sh v1.0.0 "$W/codecs" "$W/out2") > "$W/records/build-2.log" 2>&1
 s=$?; echo "exit $s" >> "$W/records/build-2.log"
 if [ "$s" = 0 ] && [ "$(tail -n 1 "$W/records/build-1.log")" = "exit 0" ]; then
-  if diff "$W/out/SHA256SUMS-darwin-arm64" "$W/out2/SHA256SUMS-darwin-arm64"; then
-    echo "step 8: ok; same bytes"
-  else
-    echo "step 8: ok; different bytes (a result to record)"
-  fi
+  diff "$W/out/SHA256SUMS-darwin-arm64" "$W/out2/SHA256SUMS-darwin-arm64"; d=$?
+  case "$d" in
+    0) echo "step 8: ok; same bytes" ;;
+    1) echo "step 8: ok; different bytes (a result to record)" ;;
+    *) echo "STOP: the comparison itself failed (diff exit $d); no result" ;;
+  esac
 else
   echo "STOP: a build did not exit 0 (build 2: exit $s); nothing was compared"
 fi
 ```
 - **Purpose:** whether two builds on the same machine and tooling give the same files.
-- **Expected:** `step 8: ok; same bytes`, or `step 8: ok; different bytes`. The comparison runs only if both builds exited 0; otherwise the step ends with `STOP:`. Either result is recorded as found; neither makes the build reproducible from the tag alone.
+- **Expected:** `step 8: ok; same bytes` (diff exit 0), or `step 8: ok; different bytes` (diff exit 1). The comparison runs only if both builds exited 0. A failed build, or a comparison error (diff exit 2 or more, such as a missing file), ends the step with `STOP:` and gives no result. Either result is recorded as found; neither makes the build reproducible from the tag alone.
 - **Risk:** low.
 
 **Step 9. Checks on the files.** Read-only, apart from extracting into `$W/x`, and only after the checksums match.
