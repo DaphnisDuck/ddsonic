@@ -90,7 +90,7 @@ ci-core: preflight-core
 ci-checks: fmt-check vet staticcheck security
 
 ci-tail:
-	shellcheck packaging/*.sh tools/*.sh
+	shellcheck packaging/*.sh packaging/darwin-arm64/*.sh tools/*.sh
 	git diff --exit-code
 
 check: fmt vet test
@@ -115,7 +115,7 @@ validate-docs: preflight-core fmt-check
 
 validate-test: preflight-core
 	$(MAKE) vet staticcheck ci-tests
-	shellcheck packaging/*.sh tools/*.sh
+	shellcheck packaging/*.sh packaging/darwin-arm64/*.sh tools/*.sh
 
 # ddsonic: the go-librespot contract gate (external/spotify/sdkcontract,
 # docs/ddsonic/acceptance.md). It is not part of check or test: it stages the

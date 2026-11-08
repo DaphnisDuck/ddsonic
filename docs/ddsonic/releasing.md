@@ -87,7 +87,7 @@ The AUR package is `ddsonic-bin`. `ddmus-bin` was never pushed to the AUR, so th
 
 ddsonic follows [Semantic Versioning](https://semver.org/) (owner, 2026-11-03):
 
-- **v1.0.0** is the published stable release. Its tag and artifacts are never altered. One exception (owner, 2026-11-07): a new, separately checksummed macOS ARM64 asset may be added to the existing v1.0.0 release while the tag, the source and the existing assets stay unchanged. This exception does not itself authorize building, uploading, replacing files, altering existing checksums, or publishing any artifact; separate owner approval remains mandatory before publication.
+- **v1.0.0** is the published stable release. Its tag and artifacts are never altered. One exception (owner, 2026-11-07): a new macOS ARM64 file set (its archive, its own checksum file, its SBOM and its third-party notices, checksummed separately from the existing `SHA256SUMS`) may be added to the existing v1.0.0 release while the tag, the source and the existing assets stay unchanged. This exception does not itself authorize building, uploading, replacing files, altering existing checksums, or publishing any artifact; separate owner approval remains mandatory before publication.
 - **v1.0.x** is reserved for compatible bug fixes, security fixes and maintenance releases, when they are needed.
 - **v1.1.0** is the next planned feature release. It takes post-1.0 usability improvements, such as P-27 (alphabetical radio sorting). Its scope and timing stay deliberately open: no fixed feature count, date or milestone threshold.
 - **v2.0.0** is reserved for changes that break an established compatibility commitment.
