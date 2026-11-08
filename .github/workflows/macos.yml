@@ -1,0 +1,163 @@
+name: macOS
+
+# ddsonic: macOS ARM64 (Apple Silicon) tests and packages, on GitHub-hosted
+# Apple Silicon runners (owner decision on #88, 2026-11-08).
+#
+# - test: informational. Builds the codec libraries from their pinned sources
+#   and runs go vet and go test -race. A failure shows in the run and its
+#   summary; it is not a required check, so it blocks nothing. Making it
+#   required is a later owner decision. It is not a statement that macOS is
+#   supported.
+# - package: builds the macOS release files with packaging/darwin-arm64 and
+#   uploads them as workflow artifacts only. It never creates, edits or
+#   uploads to a release: the owner publishes, as for every release.
+#
+# Triggers:
+# - push to main, and workflow_dispatch: test.
+# - tag push (v*): package, for that tag.
+# - workflow_dispatch with a version: test, and package for that tag.
+# - pull_request from this repository that changes this workflow or
+#   packaging/darwin-arm64: test, and a package dry run of v1.0.0 with the
+#   pull request's tooling. Pull requests from forks are skipped.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - ".github/workflows/macos.yml"
+      - "packaging/darwin-arm64/**"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag to package (for example v1.1.0); empty runs the tests only"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    if: >-
+      (github.event_name == 'push' && github.ref_type == 'branch') ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Go, as pinned in mise.toml, checked against its SHA-256
+        run: |
+          sh packaging/darwin-arm64/ci-go.sh "$RUNNER_TEMP"
+      - name: Codec libraries from their pinned sources
+        run: |
+          sh packaging/darwin-arm64/codecs.sh "$RUNNER_TEMP/codecs" > "$RUNNER_TEMP/codecs.log" 2>&1 || { tail -n 50 "$RUNNER_TEMP/codecs.log"; exit 1; }
+          cat "$RUNNER_TEMP/codecs/codecs.txt"
+      - name: go vet
+        id: vet
+        env:
+          CGO_ENABLED: "1"
+          GOTOOLCHAIN: local
+        run: |
+          export PKG_CONFIG_LIBDIR="$RUNNER_TEMP/codecs/lib/pkgconfig"
+          go vet ./...
+      - name: go test -race
+        id: tests
+        if: ${{ !cancelled() && steps.vet.conclusion != 'skipped' }}
+        env:
+          CGO_ENABLED: "1"
+          GOTOOLCHAIN: local
+        run: |
+          export PKG_CONFIG_LIBDIR="$RUNNER_TEMP/codecs/lib/pkgconfig"
+          set -o pipefail
+          go test -count=1 -race ./... 2>&1 | tee "$RUNNER_TEMP/tests.txt"
+      - name: Summary
+        if: ${{ always() }}
+        env:
+          VET: ${{ steps.vet.outcome }}
+          TESTS: ${{ steps.tests.outcome }}
+        run: |
+          {
+            echo "## macOS ARM64 tests (informational)"
+            echo
+            echo "- go vet: $VET"
+            echo "- go test -count=1 -race ./...: $TESTS"
+            if [ -f "$RUNNER_TEMP/tests.txt" ]; then
+              echo "- packages: $(grep -c '^ok' "$RUNNER_TEMP/tests.txt" || true) ok, $(grep -c '^FAIL' "$RUNNER_TEMP/tests.txt" || true) FAIL lines"
+              echo
+              echo '```'
+              grep -E '^(FAIL|--- FAIL|panic:)' "$RUNNER_TEMP/tests.txt" | head -n 50 || true
+              echo '```'
+            fi
+            echo
+            echo "This job is informational: it is not a required check, and it is not a statement that macOS is supported."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  package:
+    if: >-
+      (github.event_name == 'push' && github.ref_type == 'tag') ||
+      (github.event_name == 'workflow_dispatch' && inputs.version != '') ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # the tags, and the tag's commit
+      - name: The version and its commit
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          sh packaging/darwin-arm64/ci-version.sh "$EVENT" "$INPUT_VERSION" > "$RUNNER_TEMP/version.env"
+          cat "$RUNNER_TEMP/version.env"
+          cat "$RUNNER_TEMP/version.env" >> "$GITHUB_ENV"
+          . "$RUNNER_TEMP/version.env"
+          # A manual run builds the tag with the tag's own tooling.
+          if [ "$EVENT" = workflow_dispatch ]; then
+            git checkout --quiet --detach "$EXPECTED_COMMIT"
+            test -f packaging/darwin-arm64/ci-go.sh || { echo "::error::$VERSION predates the macOS workflow's tooling"; exit 1; }
+          fi
+          if [ "$EVENT" != pull_request ]; then
+            test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
+          fi
+      - name: Go, as pinned in mise.toml, checked against its SHA-256
+        run: |
+          sh packaging/darwin-arm64/ci-go.sh "$RUNNER_TEMP"
+      - name: Codec libraries from their pinned sources
+        run: |
+          DDSONIC_MACOS_TARGET="$MACOS_TARGET" sh packaging/darwin-arm64/codecs.sh "$RUNNER_TEMP/codecs" > "$RUNNER_TEMP/codecs.log" 2>&1 || { tail -n 50 "$RUNNER_TEMP/codecs.log"; exit 1; }
+          cat "$RUNNER_TEMP/codecs/codecs.txt"
+      - name: Release files (packaging/darwin-arm64/release.sh)
+        run: |
+          DDSONIC_EXPECTED_COMMIT="$EXPECTED_COMMIT" sh packaging/darwin-arm64/release.sh "$VERSION" "$RUNNER_TEMP/codecs" "$RUNNER_TEMP/out"
+      - name: Check the checksum file
+        run: |
+          cd "$RUNNER_TEMP/out"
+          ls -l
+          test "$(ls | wc -l | tr -d ' ')" = 5
+          shasum -a 256 -c SHA256SUMS-darwin-arm64
+          {
+            echo "## macOS ARM64 files for $VERSION ($EXPECTED_COMMIT)"
+            echo
+            echo "Workflow artifacts only; nothing is published. The owner publishes by the release approval process."
+            echo
+            echo '```'
+            cat SHA256SUMS-darwin-arm64
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: ${{ runner.temp }}/out/
+          retention-days: 14
+          if-no-files-found: error

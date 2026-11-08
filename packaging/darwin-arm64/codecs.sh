@@ -17,6 +17,10 @@
 # A path outside the home directory, such as /tmp/ddsonic-arm64/codecs, keeps
 # the user's name out of the build logs.
 #
+# The deployment target is macOS 13.0, Go 1.27's minimum, for new builds.
+# DDSONIC_MACOS_TARGET=11.0 rebuilds the codecs as v1.0.0 was built. The
+# target is recorded in <prefix>/deployment-target; release.sh checks it.
+#
 # Needs: Xcode Command Line Tools (clang, make, lipo), curl, shasum, tar and
 # pkg-config. Nothing is installed outside <prefix>.
 set -eu
@@ -43,9 +47,16 @@ prefix=$(cd "$prefix" && pwd -P)
 work="$prefix/build"
 mkdir -p "$work"
 
-# The same deployment target as the Intel recipe. -ffile-prefix-map keeps the
-# build directory's path out of the objects (assertion messages name files).
-target=11.0
+# -ffile-prefix-map keeps the build directory's path out of the objects
+# (assertion messages name files).
+target=${DDSONIC_MACOS_TARGET:-13.0}
+case "$target" in
+11.0 | 13.0) ;;
+*)
+	echo "codecs: DDSONIC_MACOS_TARGET must be 13.0 (new builds) or 11.0 (v1.0.0)" >&2
+	exit 1
+	;;
+esac
 export MACOSX_DEPLOYMENT_TARGET="$target"
 export CC="clang -arch arm64"
 export CFLAGS="-arch arm64 -O2 -mmacosx-version-min=$target -ffile-prefix-map=$work=/ddsonic-codecs"
@@ -141,4 +152,5 @@ done
 for pc in ogg vorbis vorbisenc flac libmpg123; do
 	pkg-config --exists "$pc" || { echo "codecs: pkg-config does not find $pc in $prefix" >&2; exit 1; }
 done
+printf '%s\n' "$target" > "$prefix/deployment-target"
 cat "$prefix/codecs.txt"

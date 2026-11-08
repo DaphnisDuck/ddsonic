@@ -8,12 +8,19 @@
 # release tag. <codec-prefix> is what packaging/darwin-arm64/codecs.sh built;
 # <out> must not exist yet, or be empty. The files are staged and moved into
 # <out> only when every check has passed; on failure <out> stays empty. The
-# version must be pinned in sources.txt. It writes four files to <out>:
+# version must be pinned in sources.txt, or its commit given in
+# DDSONIC_EXPECTED_COMMIT (tag-commit.sh). It writes five files to <out>:
 #
 #   ddsonic-<v>-darwin-arm64.tar.gz                  the binary and its papers
 #   ddsonic-<v>-darwin-arm64-sbom.cdx.json           CycloneDX SBOM
 #   ddsonic-<v>-darwin-arm64-THIRD_PARTY_NOTICES.txt notices
-#   SHA256SUMS-darwin-arm64                          checksums of those three
+#   ddsonic-<v>-darwin-arm64-build-sources.tar.gz    codec sources and these
+#                                                    scripts (bundle.sh)
+#   SHA256SUMS-darwin-arm64                          checksums of those four
+#
+# The deployment target is macOS 13.0 (Go 1.27's minimum), except for v1.0.0,
+# which was released with 11.0. The codec prefix must have been built for the
+# same target (codecs.sh records it in <codec-prefix>/deployment-target).
 #
 # The checksum file has its own name, so it cannot be confused with, or
 # replace, a release's SHA256SUMS. Nothing is uploaded or published.
@@ -59,13 +66,10 @@ repo=$(git -C "$here" rev-parse --show-toplevel)
 [ -z "$(git -C "$repo" status --porcelain)" ] || fail "the tooling checkout $repo has uncommitted changes"
 tooling=$(git -C "$repo" rev-parse --verify 'HEAD^{commit}')
 
-# The source: the release tag, which must match its pinned line in
-# sources.txt (tag object and peeled commit), resolved once.
-pinned=$(awk -v v="$version" '$1 == v { print $2, $3 }' "$here/sources.txt")
-[ -n "$pinned" ] || fail "$version is not pinned in $here/sources.txt"
-tagobj=$(git -C "$repo" rev-parse --verify "refs/tags/$version") || fail "no tag $version in $repo"
-commit=$(git -C "$repo" rev-parse --verify "refs/tags/$version^{commit}") || fail "no tag $version in $repo"
-[ "$tagobj $commit" = "$pinned" ] || fail "tag $version is $tagobj -> $commit; sources.txt pins $pinned"
+# The source: the release tag, resolved once, which must match its pinned
+# line in sources.txt and/or the commit the caller expects (tag-commit.sh).
+resolved=$(sh "$here/tag-commit.sh" "$version") || fail "tag $version did not resolve as expected"
+commit=${resolved#* }
 epoch=$(git -C "$repo" log -1 --format=%ct "$commit")
 name="ddsonic-${version#v}"
 bin="$name-darwin-arm64"
@@ -87,8 +91,17 @@ cd "$tree"
 go mod vendor
 
 # The build environment: only the codec prefix's libraries, no inherited
-# cgo flags. The deployment target matches the codec libraries'.
-target=11.0
+# cgo flags. The deployment target matches the codec libraries'. A prefix
+# without deployment-target was built by the v1.0.0 codecs.sh, for 11.0.
+case "$version" in
+v1.0.0) target=11.0 ;;
+*) target=13.0 ;;
+esac
+built_for=11.0
+if [ -f "$prefix/deployment-target" ]; then
+	built_for=$(cat "$prefix/deployment-target")
+fi
+[ "$built_for" = "$target" ] || fail "the codec prefix was built for macOS $built_for; $version needs $target (DDSONIC_MACOS_TARGET=$target sh codecs.sh)"
 export CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 GOFLAGS=-buildvcs=false
 export MACOSX_DEPLOYMENT_TARGET="$target"
 export PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig"
@@ -111,6 +124,7 @@ fi
 codesign --verify "$work/ddsonic" || fail "the binary's signature does not verify"
 signature=$(codesign -dv "$work/ddsonic" 2>&1 | awk -F= '$1 == "Signature" { print $2 }')
 minos=$(vtool -show-build "$work/ddsonic" | awk '$1 == "minos" { print $2; exit }')
+[ "$minos" = "$target" ] || fail "the binary's minos is $minos; the deployment target is $target"
 got=$("$work/ddsonic" --version)
 [ "$got" = "ddsonic version ${version} (commit ${commit})" ] || fail "--version says '$got'"
 
@@ -196,9 +210,11 @@ for f in "$out/$bin-sbom.cdx.json" "$out/$bin-THIRD_PARTY_NOTICES.txt"; do
 	[ "$hits" = 0 ] || fail "$(basename "$f") contains $hits strings naming this machine, its user or a home directory"
 done
 
+sh "$here/bundle.sh" "$version" "$commit" "$prefix" "$out" || fail "the build-sources archive failed"
+
 cd "$out"
-shasum -a 256 "$bin.tar.gz" "$bin-sbom.cdx.json" "$bin-THIRD_PARTY_NOTICES.txt" > SHA256SUMS-darwin-arm64
+shasum -a 256 "$bin.tar.gz" "$bin-sbom.cdx.json" "$bin-THIRD_PARTY_NOTICES.txt" "$bin-build-sources.tar.gz" > SHA256SUMS-darwin-arm64
 shasum -a 256 -c -s SHA256SUMS-darwin-arm64 || fail "the staged files do not match their checksums"
-mv "$bin.tar.gz" "$bin-sbom.cdx.json" "$bin-THIRD_PARTY_NOTICES.txt" SHA256SUMS-darwin-arm64 "$final/"
+mv "$bin.tar.gz" "$bin-sbom.cdx.json" "$bin-THIRD_PARTY_NOTICES.txt" "$bin-build-sources.tar.gz" SHA256SUMS-darwin-arm64 "$final/"
 cat "$work/$bin/RELEASE-MANIFEST.json"
 cat "$final/SHA256SUMS-darwin-arm64"
