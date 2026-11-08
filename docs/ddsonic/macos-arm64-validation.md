@@ -411,17 +411,51 @@ Sources: Apple's developer documentation on signing, notarization and Gatekeeper
 
     (A) adds no account, cost or secret, and suits a terminal program installed from a terminal. (B) is the better experience for browser downloads, and the standard for macOS distribution. The recommendation is (A) for this provisional `v1.0.0` file, if step 11 shows the Gatekeeper path is workable and the release text explains it. (B) should be reconsidered if macOS becomes a supported platform. The recommendation rests on the assumptions above and is revisited once they are verified.
 
+## Validation results (2026-11-08)
+
+The owner ran steps 0 to 11 on the owner's Apple Silicon (M3) Mac, under macOS 26.6.2, with Apple clang 21.0.0, the macOS 26.5 SDK, Go 1.27.3 and pkg-config 3.0.10, using this tooling at commit `ab4de5333c76be306e1f260389b92dd01d0e782f`. The records are kept privately. What follows is at the level of facts.
+
+From the transferred records:
+- **Codecs (step 3):** the four codec libraries built as static arm64 archives from their pinned source releases.
+- **Original tests (step 4):** the tag's own tests against the tag's own code. Of 71 packages with tests, 63 passed and 8 failed: `external/netease`, `external/spotify`, `external/ytmusic`, `internal/ytdlp`, `internal/ytdlp/ytdlptest`, `player`, `resolve` and `ui/model`. In seven of them, the failing tests are built on the test-helper package that the corrected fixtures replace. In `external/spotify`, one test of its test guard fails, a file the overlay also replaces. This baseline stays on record.
+- **Corrected fixtures (step 5):** the same production code with the nine-file overlay from `7d7a643369086f4936c2566bba581c8d86a858ed` (test files and the test-helper package only). All 71 packages passed.
+- **Classification:** each original failure that passes with corrected fixtures is consistent with a test-fixture or synchronization defect, as [Test method](#test-method) qualifies it. No production defect has been shown, and none has been excluded. Production cleanup behaviour on macOS remains unverified.
+- **Release builds (steps 6 to 8):**
+  - Two builds gave byte-identical files.
+  - The manifest records `minos` 11.0 and an ad-hoc signature.
+  - Each build log carries the linker's warning that Go's object was built for macOS 13.0 (see decision 8).
+  - `--help` and `--version` name `v1.0.0` and commit `9ae61bcf6604e032b6e690394d10cb0bade80543`.
+
+Owner-attested (reported by the owner, not in the transferred records):
+- the step 9 checks of the extracted build;
+- the hands-on smoke tests (step 10) passed. Behaviour already known from Linux is tracked separately and not re-described here;
+- step 11: with a synthetic quarantine attribute, macOS refused to run the binary ("Killed: 9"), with a dialog offering to move it to the Trash.
+
+Not tested: a real browser download, other Macs, other macOS versions, and Intel Macs. The install instructions are validated on the Mac before they are final.
+
+## Owner decisions (2026-11-08)
+
+- **A narrow exception for this file set only.** The README makes resolving the macOS test failures a prerequisite for macOS distribution. The owner made a narrow, explicit exception to that prerequisite, for the provisional `v1.0.0` macOS ARM64 file set described here and nothing else.
+  - It is not macOS support. macOS stays provisional.
+  - It waives neither future macOS qualification (the acceptance criteria on #88) nor restoring macOS CI. For both, the prerequisite stands.
+  - The record is kept as it is: the historical test failures (the original run above, and the earlier CI failures), the corrected-fixture pass, and the open question. Production cleanup behaviour on macOS is unverified.
+  - It authorizes no upload. Publication needs a separate owner approval.
+- **The file set** has five files: the archive, its checksum file, its SBOM, its third-party notices, and an archive of its build sources (decisions 6 and 7; [releasing.md](releasing.md)).
+- **Signing:** ad hoc; Developer ID signing and notarization are deferred (decision 5).
+- **Minimum macOS:** 13 or later, tested on one Apple Silicon Mac only (decision 8).
+- **Notices and source:** before publication, the macOS notices and source materials are completed, including the missing notice above. The published Linux files are not changed.
+
 ## Licenses and source disclosure
 
 This identifies obligations to check before any publication. It makes no claim that they are met.
 
 | Component | Version | License | Linked | Where its source is | To check before publication |
 |---|---|---|---|---|---|
-| ddsonic | `v1.0.0` (`9ae61bcf…`) | MIT; the executable as a whole GPL-3.0 (it links go-librespot) | — | `ddsonic-1.0.0-source.tar.gz` on the release (the tag's source, with `vendor/` and `native/`) | GPL-3.0 corresponding source includes the scripts that control the build. The macOS tooling is not in that archive: publishing it beside the files, or relying on the public repository at the commit the manifest names, is an [open decision](#open-decisions). |
+| ddsonic | `v1.0.0` (`9ae61bcf…`) | MIT; the executable as a whole GPL-3.0 (it links go-librespot) | — | `ddsonic-1.0.0-source.tar.gz` on the release (the tag's source, with `vendor/` and `native/`) | GPL-3.0 corresponding source includes the scripts that control the build. The macOS tooling is not in that archive. Decided (owner, 2026-11-08): it is published beside the files, with the four codec source releases, in an archive of the build sources (decision 6). |
 | go-librespot | v0.9.1 with ddsonic's patches | GPL-3.0 | static (Go) | `third_party/go-librespot` and `patches/` in the source archive | Same as above; the notices name the patches. |
-| Go modules (76, as listed in the SBOM) | per the SBOM | per the notices | static (Go) | `vendor/` in the source archive | The notices reproduce each license; `xlab/vorbis-go` has no license file (noted, as in the Linux notices). |
+| Go modules (78, as listed in the macOS SBOM) | per the SBOM | per the notices | static (Go) | `vendor/` in the source archive | The notices reproduce each license; `xlab/vorbis-go` has no license file (noted, as in the Linux notices). |
 | Go standard library and runtime | go1.27.3 | BSD-3-Clause | static | go.dev | License text in the notices. |
-| mpg123 | 1.32.6 | LGPL-2.1 | static | The same source archive (same SHA-256) is in `native/` of the release's source archive | Static linking under LGPL-2.1: whether the published ddsonic source and the build tooling are enough for a user to relink. |
+| mpg123 | 1.32.6 | LGPL-2.1 | static | The same source archive (same SHA-256) is in `native/` of the release's source archive | Static linking under LGPL-2.1: whether the published ddsonic source and the build tooling are enough for a user to relink. One file linked from it, `src/libmpg123/icy2utf8.c`, carries its own permissive notice, which asks that the notice accompany the work; the notices file does not reproduce it yet. |
 | libFLAC | 1.5.0 | BSD-3-Clause (Xiph.Org) | static | xiph.org release, SHA-256 recorded | License text in the notices. This is a different version from the Linux binary's Debian-packaged FLAC. |
 | libvorbis | 1.3.7 | BSD-3-Clause (Xiph.Org) | static | xiph.org release, SHA-256 recorded | License text in the notices. |
 | libogg | 1.3.5 | BSD-3-Clause (Xiph.Org) | static | xiph.org release, SHA-256 recorded | License text in the notices. |
@@ -429,7 +463,7 @@ This identifies obligations to check before any publication. It makes no claim t
 
 ## Open decisions
 
-For the owner. None is taken here.
+For the owner. Decisions 5 to 8 were taken on 2026-11-08 ([below](#owner-decisions-2026-11-08)); the others are open.
 
 1. **The agreed test suite (criterion 2):**
    - which packages and tests count;
@@ -438,10 +472,10 @@ For the owner. None is taken here.
 2. **The fixture commit** for step 5 (proposed: `7d7a643369086f4936c2566bba581c8d86a858ed`), and the nine-file overlay list.
 3. **The smoke-test list** above.
 4. **Approval of each Mac step**, by its exact command, as the work reaches it.
-5. **Signing and notarization:** (A) or (B) above, decided after step 11.
-6. **Build tooling as corresponding source:** whether the macOS tooling and the codec sources' references are published beside the file set, as a fifth file or inside the archive, or whether the public repository at the commit the manifest names is enough.
-7. **The file set's wording in [releasing.md](releasing.md):** this change reads the singular "asset" in the `v1.0.0` exception as not clearly covering four files, and states the set. Owner approval of that wording comes through the review of this change.
-8. **The minimum macOS version** any release text states. The manifest records the binary's own minimum (`minos`). The codec libraries target 11.0, and Go may require a later version.
+5. **Signing and notarization:** (A) or (B) above, decided after step 11. **Decided (owner, 2026-11-08):** (A) for the provisional file set; Developer ID signing and notarization are deferred.
+6. **Build tooling as corresponding source:** whether the macOS tooling and the codec sources' references are published beside the file set, as a fifth file or inside the archive, or whether the public repository at the commit the manifest names is enough. **Decided (owner, 2026-11-08):** a fifth file, an archive of the build sources: the four codec source releases and `packaging/darwin-arm64/` at the commit the manifest names.
+7. **The file set's wording in [releasing.md](releasing.md):** this change reads the singular "asset" in the `v1.0.0` exception as not clearly covering four files, and states the set. Owner approval of that wording comes through the review of this change. **Decided (owner, 2026-11-08):** the exception names five files, the archive of the build sources included.
+8. **The minimum macOS version** any release text states. **Decided (owner, 2026-11-08):** macOS 13 or later. The binary's `minos` is 11.0, the deployment target of the codec libraries and the build. Go 1.27 itself requires macOS 13 or later, and the build's linker warns that Go's own object targets 13.0. So 11.0 is not a supported minimum, and release text states macOS 13 or later, tested on one Apple Silicon Mac only. Future builds use deployment target 13.0; that is a tooling change, and the candidate is not rebuilt for it.
 9. **The archive's README:** the archive carries the tag's `README.md`, which says there is no macOS release build. Either keep the tag's text unchanged and explain in the release text, or add a short platform note file to the archive.
 10. **Records:** where the private evidence is kept, and what summary goes on #88.
 11. **The go-librespot contract gate** (`make sdk-contract`, which CI runs on Linux): whether it runs on the Mac too. Its native checks are unverified on macOS.
