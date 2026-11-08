@@ -61,6 +61,26 @@ native() {
 	done
 }
 native "mpg123" mpg123
+# One libmpg123 source file, src/libmpg123/icy2utf8.c, carries its own notice,
+# whose permission asks that it be retained or reproduced in an accompanying
+# document. It is reproduced here from the mpg123 source release in the prefix.
+mpg123_version=$(version_of mpg123)
+icy=$(tar -xOjf "$prefix/src/mpg123-$mpg123_version.tar.bz2" "mpg123-$mpg123_version/src/libmpg123/icy2utf8.c" |
+	awk '$0 == "/*-" { on = 1; next } on && $0 == " *-" { exit } on')
+case $icy in
+*"retained or reproduced in an accompanying document"*) ;;
+*)
+	echo "notices: no notice found in mpg123's src/libmpg123/icy2utf8.c" >&2
+	exit 1
+	;;
+esac
+section "mpg123: src/libmpg123/icy2utf8.c"
+cat <<'ICY'
+This file of libmpg123 is linked into the executable. It carries its own
+notice, reproduced here from the file:
+
+ICY
+printf '%s\n' "$icy"
 native "FLAC (libFLAC)" flac
 native "libvorbis" libvorbis
 native "libogg" libogg
