@@ -22,6 +22,7 @@ func (m *Model) replacePlaylist(tracks []playlist.Track) {
 		tracks = playlist.WithPlaybackContext(tracks)
 	}
 	m.playlist.Replace(tracks)
+	m.playlistUndo = playlistUndo{} // ddsonic: a replacement drops the undo, even of an equal list (#22)
 	m.normalizeQueueOverlay()
 	m.retireLibraryPlay() // ddsonic: a newer queue retires a pending library play
 }

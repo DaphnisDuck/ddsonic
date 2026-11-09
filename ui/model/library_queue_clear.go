@@ -5,8 +5,10 @@ package model
 // holds only while the playlist is as that change left it: any later change
 // to the playlist (an add, a removal, a move, playing a track or a list,
 // shuffle, repeat, a track ending and the next starting) bumps its revision
-// and drops the undo. Moving the cursor, seeking, pausing and the volume do
-// not touch the playlist, so they keep it.
+// and drops the undo. A replacement (replacePlaylist: playing a list,
+// loading one, a clear) drops it even when the new list equals the old and
+// the revision does not move. Moving the cursor, seeking, pausing and the
+// volume do not touch the playlist, so they keep it.
 
 import tea "charm.land/bubbletea/v2"
 

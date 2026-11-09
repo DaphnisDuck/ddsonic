@@ -12,6 +12,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/bjarneo/cliamp/ipc"
 	"github.com/bjarneo/cliamp/playlist"
 )
 
@@ -309,4 +310,63 @@ func TestQueueShiftXClears(t *testing.T) {
 	if m = updated.(Model); m.playlist.Len() != 0 {
 		t.Errorf("Shift+x: %d tracks, want the queue cleared", m.playlist.Len())
 	}
+}
+
+// Replacing the queue drops the undo even when the new list is the one the
+// queue already holds, so the revision does not move (review round 1).
+func TestQueueUndoDroppedByAnEqualReplacement(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		arm     func(Model) Model
+		replace func(Model) Model
+	}{
+		{"x, then the same list played from the library", removeSecond, func(m Model) Model {
+			m.libraryPlayTracks(m.playlist.Tracks(), m.playlist.Index(), "")
+			return m
+		}},
+		{"x, then the same saved playlist loaded", func(m Model) Model {
+			m.localProvider = nil // x edits the live queue only
+			m.loadedPlaylist = "Saved"
+			return removeSecond(m)
+		}, func(m Model) Model {
+			m.plManager.tracks, m.plManager.selPlaylist = m.playlist.Tracks(), "Saved"
+			m.plMgrLoadAndPlay(m.playlist.Index())
+			return m
+		}},
+		{"X, then the empty queue cleared over IPC", func(m Model) Model { return queuePress(m, "X") }, func(m Model) Model {
+			reply := make(chan ipc.Response, 1)
+			updated, _ := m.Update(ipc.QueueRequestMsg{Op: "queue.clear", Reply: reply})
+			return updated.(Model)
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m, _ := newQueueModel(t)
+			m = tt.arm(m)
+			if !m.playlistUndo.active {
+				t.Fatal("setup armed no undo")
+			}
+			rev := m.playlist.Revision()
+			m = tt.replace(m)
+			if m.playlist.Revision() != rev {
+				t.Logf("the replacement moved the revision (%d to %d); the case is meant to keep it", rev, m.playlist.Revision())
+			}
+			assertUndoDropped(t, m)
+		})
+	}
+}
+
+// Picking the track already playing, or moving the cursor, replaces
+// nothing: the undo holds.
+func TestQueueUndoKeptByEnterOnTheCurrentTrack(t *testing.T) {
+	m, _ := newQueueModel(t)
+	m = removeSecond(m)
+	m = queuePress(queuePress(queuePress(m, "g"), "enter"), "j")
+	if m = queuePress(m, "ctrl+z"); m.playlist.Len() != 3 {
+		t.Errorf("Ctrl+Z after Enter on the playing track: %d tracks, want 3 (status %q)", m.playlist.Len(), m.status.text)
+	}
+}
+
+// removeSecond removes track II with x while track I plays on.
+func removeSecond(m Model) Model {
+	return queuePress(queuePress(queuePress(m, "g"), "j"), "x")
 }
