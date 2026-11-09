@@ -182,8 +182,8 @@ type libFrame struct {
 	// source is the catalog provider of the level's content, from the row
 	// that opened it (or its frame); "" where sources mix.
 	source string
-	// needs is each row's width, and column the width listColumnShare of
-	// them fit (setEntries, library_rows.go).
+	// needs is each row's width, and column the widest (setEntries,
+	// library_rows.go).
 	needs  []int
 	column int
 	// rows are the entries as rendered lines (with section headings),

@@ -233,8 +233,9 @@ func TestResizeKeepsTheCursorOnScreen(t *testing.T) {
 
 // #63: a long title no longer runs past its column. At every width the
 // details start at one cell, the long row's too (its title is cut at a word),
-// and every row ends where the others do: the panel up to listReadWidth,
-// the list's table past it, never narrower than listReadWidth.
+// and every row ends where the others do: the panel, or on a wide terminal
+// libTableMax (#133; it was listReadWidth, 100, which cut text with the rest
+// of the screen empty). The list needs 174 cells, so it fills both.
 func TestWideRowsKeepTheirFields(t *testing.T) {
 	longTitle := strings.TrimSpace(strings.Repeat("Long Title ", 14)) // 153 cells
 	entries := []library.Entry{{Title: longTitle, Detail: "Artist · 1999", Open: library.Menu("y")}}
@@ -248,7 +249,7 @@ func TestWideRowsKeepTheirFields(t *testing.T) {
 	for _, tt := range []struct{ w, end int }{
 		{80, 80 - pad - short},
 		{100, 100 - pad - short},
-		{300, pad + listReadWidth - short},
+		{300, pad + libTableMax - short},
 	} {
 		m := resized(t, newLibraryModel(root), tt.w, 40)
 		detailAt := -1

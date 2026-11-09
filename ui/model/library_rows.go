@@ -134,41 +134,53 @@ func measureTrackCols(entries []library.Entry, numbers []int) libCols {
 // fields returns the title and detail fields' widths in a row of width
 // cells after the cursor prefix. Every row of a kind in a list has the same
 // fields, so its detail and tail start at the same cell whatever the
-// title's length. The title field is as wide as the row's room after the
-// widest detail allows, but no wider than the widest title, and no narrower
-// than the title column, so one long title or detail does not move the
-// column for the rest. It leaves the detail field the detail column, up to
-// half the row (detailFirst: all but 4 cells), and keeps at least 4 cells
-// (cliamp's minimum title). The detail field is the rest of the row. A list
-// without details has only the title field.
+// title's length (#63). The detail keeps the detail column, up to half the
+// row (detailFirst: all but 4 cells), and more where the titles leave room,
+// up to the widest detail; the title takes the rest, up to the widest title
+// and at least 4 cells (cliamp's minimum title); the detail field is what
+// is left. So text is cut only where the row has no room left for it, and
+// one long title or detail does not take the other's room while there is
+// some (#133). A list without details has only the title field.
 func (c libCols) fields(width int) (title, detail int) {
 	avail := max(width-c.lead-c.tail, 0)
 	if c.detail == 0 {
 		return avail, 0
 	}
-	reserve := min(c.detail, avail/2)
+	hi := avail / 2
 	if c.detailFirst {
-		reserve = min(c.detail, avail-libDetailGap-4)
+		hi = avail - libDetailGap - 4
 	}
-	title = min(max(c.title, avail-libDetailGap-c.detailMax), c.titleMax, avail-libDetailGap-reserve)
-	title = min(max(title, 4), avail)
+	detail = max(min(c.detailMax, hi, max(c.detail, avail-libDetailGap-c.titleMax)), 0)
+	title = min(max(min(c.titleMax, avail-libDetailGap-detail), 4), avail)
 	return title, max(avail-libDetailGap-title, 0)
 }
 
-// table is the width the list's rows of this kind need: the cursor prefix,
-// the lead, the title and detail columns (fields gives them exactly at this
-// width) and the tail.
+// table is the width the list's rows of this kind need to show all their
+// text: the cursor prefix, the lead, the widest title and detail (fields
+// gives them exactly at this width) and the tail (#133).
 func (c libCols) table() int {
-	w := libCursorPrefix + c.lead + c.title + c.tail
+	w := libCursorPrefix + c.lead + max(c.titleMax, 4) + c.tail
 	if c.detail > 0 {
-		w += libDetailGap + c.detail
+		w += libDetailGap + c.detailMax
 	}
 	return w
 }
 
-// setEntries sets the frame's rows and measures them for listRowWidth: the
+// libTableMax is the widest a library list's rows grow (#133): on a wider
+// terminal the rest stays empty, so a title and its detail stay within
+// reach of the eye.
+const libTableMax = 160
+
+// libRowWidth returns the width a library row of a list whose rows need need
+// cells fills: its content, within the panel and libTableMax. Every row of a
+// kind needs the same, so the columns hold still from row to row.
+func libRowWidth(panel, need int) int {
+	return min(panel, libTableMax, need)
+}
+
+// setEntries sets the frame's rows and measures them for libRowWidth: the
 // fields of its browsable rows and of its track rows, each row's need (its
-// kind's table), and the list's column.
+// kind's table), and the list's column, the widest need.
 func (f *libFrame) setEntries(entries []library.Entry) {
 	f.entries = entries
 	numbers := libTrackNumbers(entries)
@@ -182,7 +194,10 @@ func (f *libFrame) setEntries(entries []library.Entry) {
 			f.needs[i] = f.trackCols.table()
 		}
 	}
-	f.column = listColumn(f.needs)
+	f.column = 0
+	if len(f.needs) > 0 {
+		f.column = slices.Max(f.needs) // the section headings span the widest kind's rows
+	}
 }
 
 // trackRowNeed is the width of track t's row after its prefix: its name as

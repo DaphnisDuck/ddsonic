@@ -216,7 +216,8 @@ func TestLibraryFieldsAtTheTwoColumnWidth(t *testing.T) {
 }
 
 // The measure and the render are one rule: at its own table width a list's
-// fields are its columns.
+// fields hold its widest title and detail, so a row as wide as the table
+// cuts nothing (#133; under #63 the table was the 9-in-10 columns).
 func TestLibColsTableIsItsColumns(t *testing.T) {
 	for kind, entries := range colsKinds() {
 		var f libFrame
@@ -226,8 +227,8 @@ func TestLibColsTableIsItsColumns(t *testing.T) {
 				continue // no rows of this kind
 			}
 			title, detail := c.fields(c.table() - libCursorPrefix)
-			if title != max(c.title, 4) || detail != c.detail {
-				t.Errorf("%s: fields at the table = %d, %d; columns %d, %d", kind, title, detail, c.title, c.detail)
+			if title != max(c.titleMax, 4) || detail != c.detailMax {
+				t.Errorf("%s: fields at the table = %d, %d; widest %d, %d", kind, title, detail, c.titleMax, c.detailMax)
 			}
 		}
 	}

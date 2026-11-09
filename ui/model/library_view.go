@@ -266,7 +266,7 @@ func (m *Model) renderLibraryList(budget int) string {
 	}
 
 	panel := ui.PanelWidth
-	defer ui.WithPanelWidth(listRowWidth(panel, f.column, 0))() // section headings
+	defer ui.WithPanelWidth(libRowWidth(panel, f.column))() // section headings
 	rows, numbers, rowOf := f.libLayout()
 	scroll := libScroll(rows, libCursorRow(rowOf, f.cursor), f.scroll, budget)
 	// While the search input has focus, Enter does not act on a row, so no
@@ -291,7 +291,7 @@ func (m *Model) renderLibraryList(budget int) string {
 			cols = f.trackCols
 		}
 		// Every row of a kind is its kind's table (setEntries).
-		restore := ui.WithPanelWidth(listRowWidth(panel, need, need))
+		restore := ui.WithPanelWidth(libRowWidth(panel, need))
 		lines = append(lines, cursorLine(libEntryLabel(f.entries[row.index], numbers[row.index], cols),
 			showCursor && row.index == f.cursor))
 		restore()
