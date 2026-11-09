@@ -91,7 +91,7 @@ In search results, `/`, `Esc` and `h` return to the query; while typing, Enter o
 | `r` | Repeat: off, all, one |
 | `a` | Play the selected track next (again to take it back) |
 | `A` | Up next: the tracks queued with `a` |
-| `x` | Remove the selected track; `Ctrl+Z` undoes it |
+| `x` / `X` | Remove the selected track / clear the whole queue, stopping playback; `Ctrl+Z` undoes it until the queue next changes |
 | `f` | On a queued station from the radio directory: add it to Radio → Favorites, or take it out (a `★` marks a favorite, however the station was queued) |
 | `Shift+↑` `Shift+↓` | Move the selected track up / down |
 | `e` | Next EQ preset |

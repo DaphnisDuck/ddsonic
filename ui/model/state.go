@@ -30,6 +30,8 @@ type playlistUndo struct {
 	loaded    string
 	saved     []playlist.Track
 	persisted bool
+	revision  uint64 // ddsonic: the playlist's revision it holds for (#22)
+	detached  bool   // ddsonic: X detached the loaded playlist; undo reattaches it
 }
 
 // netSearchScreenType identifies which screen of the net search overlay is active.

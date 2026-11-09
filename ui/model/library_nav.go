@@ -535,6 +535,8 @@ func (m *Model) handleLibraryKey(msg tea.KeyPressMsg) (cmd tea.Cmd, handled bool
 			return m.librarySkip(key == "n"), true
 		case "f":
 			return m.libToggleFavorite(), true
+		case "X":
+			return m.libClearQueue(), true
 		}
 		return nil, !queuePassthroughKeys[key] && !libraryPassthroughKeys[key]
 	}

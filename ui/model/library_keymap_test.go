@@ -141,11 +141,11 @@ func TestLibraryKeyBarListsTable(t *testing.T) {
 		want, not []string
 	}{
 		{"Library", []string{"Move", "Open", "Search", "Queue", "Sync", "Quit", "Stop", "Prev, next", "Volume", "Hide keys"},
-			[]string{"Back", "Order", "Help", "Info", "Shuffle", "Seek far"}},
+			[]string{"Back", "Order", "Help", "Info", "Shuffle", "Seek far", "Clear queue"}},
 		{"Library below the root", []string{"Back", "Quit"}, nil},
 		{"ordered list", []string{"Order"}, []string{"Sync"}},
 		{"Queue", []string{"Library", "Play", "Filter", "Seek", "Shuffle", "Repeat", "Play next", "Up next", "Remove",
-			"Reorder", "Undo", "EQ", "Speed", "Info", "Lyrics", "Jump", "Quit", "Stop", "Volume", "Hide keys", "Prev, next", "Seek far"},
+			"Reorder", "Undo", "Clear queue", "EQ", "Speed", "Info", "Lyrics", "Jump", "Quit", "Stop", "Volume", "Hide keys", "Prev, next", "Seek far"},
 			[]string{"Help", "Favorite", "Open", "Sync", "Mono"}},
 		{"Library Search", []string{"Results", "Close", "Clear"}, []string{"Stop", "Volume", "Move", "Hide keys"}},
 		{"Search Results", []string{"Query", "Move", "Open", "Stop", "Quit", "Prev, next"}, []string{"Search", "Sync", "Seek far"}},

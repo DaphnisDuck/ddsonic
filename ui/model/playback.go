@@ -383,7 +383,7 @@ func (m *Model) removeSelectedFromPlaylist() {
 		return
 	}
 	m.normalizeQueueOverlay()
-	m.playlistUndo = playlistUndo{active: true, snapshot: snapshot, loaded: loaded, saved: saved, persisted: persisted}
+	m.armPlaylistUndo(playlistUndo{snapshot: snapshot, loaded: loaded, saved: saved, persisted: persisted}) // ddsonic: #22
 	if wasActive {
 		m.stopPlayback()
 		m.player.ClearPreload()
@@ -403,11 +403,11 @@ func (m *Model) removeSelectedFromPlaylist() {
 }
 
 func (m *Model) undoPlaylistMutation() tea.Cmd {
-	undo := m.playlistUndo
-	if !undo.active {
+	if !m.playlistUndoCurrent() { // ddsonic: a changed playlist drops the undo (#22)
 		m.status.Warning("Nothing to undo", statusTTLShort)
 		return nil
 	}
+	undo := m.playlistUndo
 	if undo.persisted {
 		saver := m.localSaver()
 		if saver == nil {
@@ -420,6 +420,10 @@ func (m *Model) undoPlaylistMutation() tea.Cmd {
 		}
 	}
 	m.playlist.Restore(undo.snapshot)
+	if undo.detached { // ddsonic: #22
+		m.loadedPlaylist = undo.loaded
+		m.setHeaderStateFromTracks(m.playlist.Tracks())
+	}
 	m.normalizeQueueOverlay()
 	m.playlistUndo = playlistUndo{}
 	if m.plCursor >= m.playlist.Len() {
