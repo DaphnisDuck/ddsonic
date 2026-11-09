@@ -45,7 +45,7 @@ func bigLibraryRoot() library.Level {
 	)
 }
 
-func resized(t *testing.T, m Model, w, h int) Model {
+func resized(t testing.TB, m Model, w, h int) Model {
 	t.Helper()
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
 	return updated.(Model)

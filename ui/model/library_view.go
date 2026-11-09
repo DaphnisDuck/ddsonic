@@ -338,8 +338,8 @@ func libTrackRow(number int, name, label string, secs int) string {
 		budget -= lipgloss.Width(dur) + 1
 	}
 	const minName = 4
-	label = truncate(label, max(budget-minName-libTrackLabelGap, 1))
-	name = truncate(name, max(budget-libTrackLabelGap-lipgloss.Width(label), minName))
+	label = truncateWords(label, max(budget-minName-libTrackLabelGap, 1))
+	name = truncateWords(name, max(budget-libTrackLabelGap-lipgloss.Width(label), minName))
 	return formatTrackRow(number, name+strings.Repeat(" ", libTrackLabelGap)+label, secs)
 }
 
@@ -366,16 +366,16 @@ func libEntryLabel(e library.Entry, number, titleCol int) string {
 	if d := library.CleanText(e.Detail); titleCol > 0 && d != "" {
 		// Wide: the title column, then the detail, which keeps up to half
 		// the row when the title is long.
-		title = truncate(title, max(avail-2-min(lipgloss.Width(d), avail/2), 4))
+		title = truncateWords(title, max(avail-2-min(lipgloss.Width(d), avail/2), 4))
 		gap := max(titleCol-lipgloss.Width(title), 0) + 2
-		return title + strings.Repeat(" ", gap) + truncate(d, max(avail-lipgloss.Width(title)-gap, 0)) + suffix
+		return title + strings.Repeat(" ", gap) + truncateWords(d, max(avail-lipgloss.Width(title)-gap, 0)) + suffix
 	}
-	detail := truncate(library.CleanText(e.Detail), avail/2)
+	detail := truncateWords(library.CleanText(e.Detail), avail/2)
 	titleW := avail
 	if detail != "" {
 		titleW -= lipgloss.Width(detail) + 2
 	}
-	title = truncate(title, max(titleW, 4))
+	title = truncateWords(title, max(titleW, 4))
 	if detail == "" {
 		return title + suffix
 	}
