@@ -346,8 +346,11 @@ func TestR12ModelMatchesHandComputedCase(t *testing.T) {
 }
 
 // TestR12Measure records the scenarios of #83 and logs what is heard. It
-// asserts nothing; run with -v.
+// asserts nothing and runs only with -v.
 func TestR12Measure(t *testing.T) {
+	if !testing.Verbose() {
+		t.Skip("a measurement: run with -v")
+	}
 	a := writeFixture(t, "a.wav", 1, 3)
 	b := writeFixture(t, "b.wav", -1, 3)
 	type scenario struct {
