@@ -42,6 +42,11 @@ full catalog/sqlite/migrations/*
 full acceptance/*
 full docs/ddsonic/acceptance/*
 full docs/ddsonic/acceptance.md
+# The design notes' Markdown is policy prose (docs); anything else under
+# docs/ddsonic/design/, nested or not, is full. The docs line comes first
+# here because the first matching line decides, and * also matches /.
+docs docs/ddsonic/design/*.md
+full docs/ddsonic/design/*
 full AGENTS.md
 full SOURCE-PROVENANCE.md
 full LICENSE*
@@ -72,7 +77,6 @@ code docs/ddsonic/POST-1.0-CATALOG.md
 docs CLAUDE.md
 docs SECURITY.md
 docs docs/ddsonic/releasing.md
-docs docs/ddsonic/design/*.md
 docs docs/*.md
 docs CHANGELOG.md
 docs plan.md

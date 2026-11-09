@@ -199,7 +199,12 @@ func TestClassifyChange(t *testing.T) {
 		{"policy prose is docs: SECURITY.md", func(f *fixture) { f.write("SECURITY.md", "x\n") }, "docs", rule("docs SECURITY.md")},
 		{"policy prose is docs: releasing.md", func(f *fixture) { f.write("docs/ddsonic/releasing.md", "x\n") }, "docs", rule("docs docs/ddsonic/releasing.md")},
 		{"policy prose is docs: a design note", func(f *fixture) { f.write("docs/ddsonic/design/n.md", "x\n") }, "docs", rule("docs docs/ddsonic/design/*.md")},
-		{"not prose in the design notes is full", func(f *fixture) { f.write("docs/ddsonic/design/n.txt", "x\n") }, "full", "no rule matches"},
+		{"policy prose is docs: a nested design note", func(f *fixture) { f.write("docs/ddsonic/design/sub/n.md", "x\n") }, "docs", rule("docs docs/ddsonic/design/*.md")},
+		{"not prose in the design notes is full: text", func(f *fixture) { f.write("docs/ddsonic/design/n.txt", "x\n") }, "full", rule("full docs/ddsonic/design/*")},
+		{"not prose in the design notes is full: Go", func(f *fixture) { f.write("docs/ddsonic/design/x.go", "package design\n") }, "full", rule("full docs/ddsonic/design/*")},
+		{"not prose in the design notes is full: a test", func(f *fixture) { f.write("docs/ddsonic/design/x_test.go", "package design\n") }, "full", rule("full docs/ddsonic/design/*")},
+		{"not prose in the design notes is full: svg", func(f *fixture) { f.write("docs/ddsonic/design/d.svg", "<svg/>\n") }, "full", rule("full docs/ddsonic/design/*")},
+		{"not prose in the design notes is full: nested Go", func(f *fixture) { f.write("docs/ddsonic/design/sub/y.go", "package sub\n") }, "full", rule("full docs/ddsonic/design/*")},
 		{"AGENTS.md is full", func(f *fixture) { f.write("AGENTS.md", "x\n") }, "full", rule("full AGENTS.md")},
 		{"mixed: policy prose and code is code", func(f *fixture) {
 			f.write("CLAUDE.md", "x\n")
