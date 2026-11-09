@@ -45,6 +45,12 @@ import (
 //     loop pauses the queue on its next turn ($OTO/driver_darwin.go:163-198).
 //     suspendLag is how many periods the device still takes after Suspend is
 //     called; it is a parameter, not a measured value.
+//   - The mux is its own goroutine ($OTO/internal/mux/mux.go:68, :90-119),
+//     signalled by each driver read (:155); whether it refills before or
+//     after a pause or Stop changes the chain, and whether before Suspend,
+//     is scheduling. lateRefill puts each refill at the next event (the
+//     next write, Suspend or Resume) instead of right after the read: the
+//     two orderings bound what the model shows, not every interleaving.
 //   - At speaker.Init the player reads one chunk from the empty mixer, which
 //     is silence ($OTO/internal/mux/mux.go:298-335), and Player.New suspends
 //     right after (player.go:129).
@@ -62,6 +68,9 @@ type otoModel struct {
 	period     int                // frames the driver takes per write
 	suspendLag int                // periods taken after Suspend is called
 	suspendErr error              // a device that cannot be suspended
+	lateRefill bool               // the mux refills at the next event, not at once
+
+	pending bool // a refill the mux has not done yet (lateRefill)
 
 	drains    []func() // suspends scheduled with drainAfter, not yet fired
 	queue     [][2]float64
@@ -86,6 +95,7 @@ func (m *otoModel) refill() {
 // step is one driver write: a period from the player buffer, then the mux
 // refills it.
 func (m *otoModel) step() {
+	m.runPending()
 	if m.suspended {
 		return
 	}
@@ -95,7 +105,19 @@ func (m *otoModel) step() {
 		m.out = append(m.out, [2]float64{}) // underrun
 	}
 	m.queue = append([][2]float64(nil), m.queue[n:]...)
+	if m.lateRefill {
+		m.pending = true
+		return
+	}
 	m.refill()
+}
+
+// runPending is the mux goroutine getting to a refill it was signalled for.
+func (m *otoModel) runPending() {
+	if m.pending {
+		m.pending = false
+		m.refill()
+	}
 }
 
 func (m *otoModel) steps(n int) {
@@ -108,12 +130,14 @@ func (m *otoModel) Suspend() error {
 	if m.suspendErr != nil {
 		return m.suspendErr
 	}
+	m.runPending() // late: the mux refills after the action, before the suspend holds
 	m.steps(m.suspendLag)
 	m.suspended = true
 	return nil
 }
 
 func (m *otoModel) Resume() error {
+	m.runPending()
 	m.suspended = false
 	return nil
 }
@@ -133,7 +157,7 @@ func (m *otoModel) mark(name string) { m.marks = append(m.marks, mark{len(m.out)
 
 // newModelPlayer is Player.New with the model for a device: the same fields,
 // a suspended device holding Init's chunk of silence.
-func newModelPlayer(t *testing.T, bufferMs, periodsPerChunk, suspendLag int) (*Player, *otoModel) {
+func newModelPlayer(t *testing.T, bufferMs, periodsPerChunk, suspendLag int, lateRefill bool) (*Player, *otoModel) {
 	t.Helper()
 	sr := beep.SampleRate(fixtureRate)
 	frames := sr.N(time.Duration(bufferMs) * time.Millisecond)
@@ -153,6 +177,7 @@ func newModelPlayer(t *testing.T, bufferMs, periodsPerChunk, suspendLag int) (*P
 		chunk:      frames / 2,
 		period:     frames / 2 / periodsPerChunk,
 		suspendLag: suspendLag,
+		lateRefill: lateRefill,
 		suspended:  true,
 	}
 	m.queue = make([][2]float64, m.chunk)
@@ -290,6 +315,7 @@ func TestR12ModelMatchesHandComputedCase(t *testing.T) {
 	tests := []struct {
 		name   string
 		before int   // driver writes before the source goes silent
+		late   bool  // lateRefill
 		want   []int // recorded counters; 0 is silence
 	}{
 		{
@@ -309,11 +335,21 @@ func TestR12ModelMatchesHandComputedCase(t *testing.T) {
 			before: 3,
 			want:   []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24},
 		},
+		{
+			// As "no silence", but the mux refills late. The third write
+			// leaves [13..16] with a refill pending; the mux gets to it
+			// after the source went silent, so a chunk of silence follows
+			// 13..16. On resume: 8 frames of silence, then 17...
+			name:   "late refill, silence enters",
+			before: 3,
+			late:   true,
+			want:   []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 0, 0, 0, 0, 0, 0, 0, 0, 17, 18, 19, 20},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			next, paused := 1, false
-			m := &otoModel{chunk: 8, period: 4, suspendLag: 1}
+			m := &otoModel{chunk: 8, period: 4, suspendLag: 1, lateRefill: tt.late}
 			m.pull = func(buf [][2]float64) {
 				for i := range buf {
 					if paused {
@@ -403,7 +439,7 @@ func TestR12Measure(t *testing.T) {
 				for before := 6; before < 6+dev.periods+1; before++ {
 					name := fmt.Sprintf("%s/%s/lag%d/before%d", sc.name, dev.name, lag, before)
 					t.Run(name, func(t *testing.T) {
-						p, m := newModelPlayer(t, 250, dev.periods, lag)
+						p, m := newModelPlayer(t, 250, dev.periods, lag, false)
 						if err := p.PlayAt(a, 0, 0); err != nil {
 							t.Fatal(err)
 						}

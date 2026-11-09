@@ -19,6 +19,9 @@ import (
 // the same audio through a registered StreamerFactory, the path Spotify's
 // stream takes into the player (pipeline.go buildPipeline). The second is
 // not Spotify's prefetch adapter and not real Spotify audio.
+//
+// They show what the model does, not what a real device does: they pin the
+// fix's behaviour against the dependencies' documented semantics.
 
 const r12BufferMs = 250 // the default buffer_ms (config/config.go)
 
@@ -28,24 +31,28 @@ type r12Case struct {
 	suspendLag int
 	before     int // driver writes between the start and the action
 	source     string
+	lateRefill bool
 }
 
 func r12Cases() []r12Case {
 	var cases []r12Case
-	for _, source := range []string{"local", "factory"} {
-		for _, dev := range []struct {
-			name    string
-			periods int
-		}{{"linux", 2}, {"macos", 4}} {
-			for lag := range 3 {
-				for before := 6; before <= 6+dev.periods; before++ {
-					cases = append(cases, r12Case{
-						name:       fmt.Sprintf("%s/%s/lag%d/before%d", source, dev.name, lag, before),
-						periods:    dev.periods,
-						suspendLag: lag,
-						before:     before,
-						source:     source,
-					})
+	for _, refill := range []string{"eager", "late"} {
+		for _, source := range []string{"local", "factory"} {
+			for _, dev := range []struct {
+				name    string
+				periods int
+			}{{"linux", 2}, {"macos", 4}} {
+				for lag := range 3 {
+					for before := 6; before <= 6+dev.periods; before++ {
+						cases = append(cases, r12Case{
+							name:       fmt.Sprintf("%s/%s/%s/lag%d/before%d", refill, source, dev.name, lag, before),
+							periods:    dev.periods,
+							suspendLag: lag,
+							before:     before,
+							source:     source,
+							lateRefill: refill == "late",
+						})
+					}
 				}
 			}
 		}
@@ -84,7 +91,7 @@ func heardAfter(m *otoModel, at int) []segment {
 func TestR12PauseResumeIsSeamless(t *testing.T) {
 	for _, c := range r12Cases() {
 		t.Run(c.name, func(t *testing.T) {
-			p, m := newModelPlayer(t, r12BufferMs, c.periods, c.suspendLag)
+			p, m := newModelPlayer(t, r12BufferMs, c.periods, c.suspendLag, c.lateRefill)
 			a, _ := r12Tracks(t, p, c)
 			if err := p.PlayAt(a, 0, 0); err != nil {
 				t.Fatal(err)
@@ -112,11 +119,19 @@ func TestR12PauseResumeIsSeamless(t *testing.T) {
 	}
 }
 
-func TestR12SwitchAfterStopPlaysNoOldAudio(t *testing.T) {
+// TestR12StopDoesNotReplayTheStoppedTrack (named
+// TestR12SwitchAfterStopPlaysNoOldAudio in the first round's logs): after
+// Stop, the stopped track is never heard again once the music has broken
+// off. "drained": B asked for after the device has had time to play out, no
+// frame of A after B is asked for. "at-once": B asked for straight after
+// Stop, A's frames already read ahead may still play, straight on, before
+// silence and B (the device's latency, as for a switch while playing); that
+// variant guards that a pending drain-suspend does not stop B.
+func TestR12StopDoesNotReplayTheStoppedTrack(t *testing.T) {
 	for _, c := range r12Cases() {
 		for _, wait := range []string{"drained", "at-once"} {
 			t.Run(c.name+"/"+wait, func(t *testing.T) {
-				p, m := newModelPlayer(t, r12BufferMs, c.periods, c.suspendLag)
+				p, m := newModelPlayer(t, r12BufferMs, c.periods, c.suspendLag, c.lateRefill)
 				a, b := r12Tracks(t, p, c)
 				if err := p.PlayAt(a, 0, 0); err != nil {
 					t.Fatal(err)
@@ -164,7 +179,7 @@ func TestR12SwitchAfterStopPlaysNoOldAudio(t *testing.T) {
 }
 
 func TestR12PauseFallsBackWhenTheDeviceCannotSuspend(t *testing.T) {
-	p, m := newModelPlayer(t, r12BufferMs, 2, 0)
+	p, m := newModelPlayer(t, r12BufferMs, 2, 0, false)
 	a, _ := r12Tracks(t, p, r12Case{source: "local"})
 	if err := p.PlayAt(a, 0, 0); err != nil {
 		t.Fatal(err)
@@ -196,5 +211,39 @@ func TestR12PauseFallsBackWhenTheDeviceCannotSuspend(t *testing.T) {
 	want := (last.first+last.len-1)%counterWrap + 1
 	if len(after) != 1 || after[0].track != 'A' || after[0].first != want {
 		t.Errorf("after resuming, want one run of A from %d:%s", want, describe(m))
+	}
+}
+
+// TestR12SwitchWhilePausedPlaysNoOldAudio is the case #83 leaves open: a
+// track started while paused begins with the paused track's read-ahead
+// frames (125-188 ms in this model). It fails today and is skipped unless
+// R12_KNOWN_FAILING=1, so the target stays written down.
+func TestR12SwitchWhilePausedPlaysNoOldAudio(t *testing.T) {
+	if os.Getenv("R12_KNOWN_FAILING") == "" {
+		t.Skip("#83: not fixed; set R12_KNOWN_FAILING=1 to run")
+	}
+	for _, c := range r12Cases() {
+		t.Run(c.name, func(t *testing.T) {
+			p, m := newModelPlayer(t, r12BufferMs, c.periods, c.suspendLag, c.lateRefill)
+			a, b := r12Tracks(t, p, c)
+			if err := p.PlayAt(a, 0, 0); err != nil {
+				t.Fatal(err)
+			}
+			m.steps(c.before)
+			p.TogglePause()
+			m.steps(10)
+			m.mark("playB")
+			at := len(m.out)
+			if err := p.PlayAt(b, 0, 0); err != nil {
+				t.Fatal(err)
+			}
+			m.steps(8)
+			for _, s := range heardAfter(m, at) {
+				if s.track == 'A' {
+					t.Errorf("A heard after B was asked for:%s", describe(m))
+					break
+				}
+			}
+		})
 	}
 }

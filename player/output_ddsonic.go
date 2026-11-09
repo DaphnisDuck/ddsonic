@@ -6,27 +6,28 @@ import (
 	"github.com/gopxl/beep/v2/speaker"
 )
 
-// #83: the output device keeps what it has read ahead across a suspend.
+// #83: what the output device has read ahead survives a suspend.
 //
-// oto's mux reads the chain ahead into its player buffer, half of
-// speaker.Init's buffer, up to twice over, and Context.Suspend clears none of
-// it; Beep's speaker never empties it and gives no way to. The device plays
-// it when it resumes. So two things are never left there:
+// oto's mux reads the chain ahead into its player buffer (half of
+// speaker.Init's buffer, up to twice over), Context.Suspend clears none of
+// it, and Beep's speaker never empties it and gives no way to; the device
+// plays it on resume. In the tests' model of Beep and oto, and in a probe of
+// oto's own mux code, that made two faults, which this code avoids:
 //
-//   - silence the chain made for a pause. A pause that paused the chain and
-//     then suspended the device left the music's next frames, then the
-//     silence the chain made while the suspend took hold: resume played a
-//     moment of music, a gap, then the rest. Pausing suspends the device and
-//     leaves the chain running: what it read ahead is the music's own next
-//     frames, which resume plays without a gap.
-//   - the last frames of a stopped track. Stop suspended the device holding
-//     them, and the next track's start played them first. Stop lets the
-//     device play out what it holds, which is heard as the stop, and
-//     suspends it only then, unless a track has started meanwhile.
+//   - pausing silenced the chain, then suspended: silence read in between
+//     was played on resume after a moment of music, then the rest. Pausing
+//     now suspends the device and leaves the chain running, so what is read
+//     ahead is the music's own next frames.
+//   - Stop suspended with the stopped track's last frames read ahead, and
+//     the next track's start played them first. Stop now lets the device
+//     play them out, heard as the stop, and suspends only then, unless a
+//     track has started meanwhile.
 //
-// One case is left: a track started while paused. The device holds the
-// paused track's next frames and plays them before the new track's; nothing
-// in Beep's speaker can drop them.
+// That these are the faults the owner heard (pause stutter, a fragment of
+// the previous track) is likely but not confirmed on a real device.
+//
+// Not fixed: a track started while paused begins with the paused track's
+// read-ahead frames. Beep's speaker cannot drop them (#83 stays open).
 
 // togglePause is TogglePause.
 func (p *Player) togglePause() {
