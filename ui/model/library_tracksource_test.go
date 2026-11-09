@@ -88,9 +88,9 @@ func TestBrowsedTrackRowIsUnchanged(t *testing.T) {
 // gives the list room for it and does not cut the title short to fit one.
 func TestSearchTrackRowNeedCountsItsSource(t *testing.T) {
 	track := playlist.Track{Path: "/m/1.mp3", Title: "Shared Song", Artist: "Echo Artist", DurationSecs: 180}
-	plain := libEntryNeed(library.Entry{Title: track.Title, Track: &track}, 1, libCols{})
-	labelled := libEntryNeed(library.Entry{Title: track.Title, Detail: "YouTube", Track: &track}, 1, libCols{})
-	if want := plain + libTrackLabelGap + len("YouTube"); labelled != want {
+	plain := measureTrackCols([]library.Entry{{Title: track.Title, Track: &track}}, []int{1}).table()
+	labelled := measureTrackCols([]library.Entry{{Title: track.Title, Detail: "YouTube", Track: &track}}, []int{1}).table()
+	if want := plain + libDetailGap + len("YouTube"); labelled != want {
 		t.Errorf("a labelled row needs %d cells, want %d: the plain row's %d and the label", labelled, want, plain)
 	}
 }

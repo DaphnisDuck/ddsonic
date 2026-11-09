@@ -193,6 +193,8 @@ type libFrame struct {
 	numbers []int
 	rowOf   []int
 	cols    libCols // the fields of its browsable rows
+	// trackCols are the fields of its track rows.
+	trackCols libCols
 }
 
 func (f *libFrame) loading() bool { return f.cancel != nil }

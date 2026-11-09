@@ -21,8 +21,8 @@ import (
 // stop at their content: up to it, rows fill the width as they always have.
 // Past it, a list's rows end where most of them fit (listColumn), so a title
 // and its detail stay within reach of the eye instead of a screen apart. A
-// library level's browsable rows all end at its table (libCols); a longer
-// track row runs past the column as far as it needs.
+// library level's rows of each kind all end at its table (libCols); a
+// longer queue row runs past the column as far as it needs.
 const listReadWidth = 100
 
 // listColumnShare is the share of a list's rows that fit in its column; the
@@ -59,24 +59,35 @@ func libEntryTitleWidth(e library.Entry) int {
 	return w
 }
 
-// libTrackLabelGap is the space between a track row's name and its label
-// (libTrackRow).
-const libTrackLabelGap = 2
-
 // libIsTrackRow reports whether entry renders as a numbered track row.
 func libIsTrackRow(e library.Entry) bool { return e.Track != nil && !e.Track.Realtime }
 
-// libDetailGap is the space between a browsable row's title and detail
-// fields.
+// libDetailGap is the space between a row's title and detail fields.
 const libDetailGap = 2
 
-// libCols is what a library level measures of its browsable rows to lay out
-// their fields (#63): the width of the widest title and detail, and the
-// columns listColumnShare of them fit (listColumn); detail is 0 when no row
-// has one. opens is whether a row ends in " ›".
+// libCols is what a library level measures of one kind of its rows, the
+// browsable rows or the track rows, to lay out their fields (#63): the
+// widest title and detail, and the columns listColumnShare of them fit
+// (listColumn); detail is 0 when no row has one. A track's title is its name
+// and its detail its source (a search result's). lead is the field before
+// the title (a track's number) and tail the one after the detail (" ›", or
+// a space and a track's duration). detailFirst keeps the detail its column
+// whole before the title, as a track row keeps its source.
 type libCols struct {
 	title, titleMax, detail, detailMax int
-	opens                              bool
+	lead, tail                         int
+	detailFirst                        bool
+}
+
+// measureCols sets c's title and detail columns from their widths.
+func (c *libCols) measureCols(titles, details []int) {
+	c.title, c.detail = listColumn(titles), listColumn(details)
+	if len(titles) > 0 {
+		c.titleMax = slices.Max(titles)
+	}
+	if len(details) > 0 {
+		c.detailMax = slices.Max(details)
+	}
 }
 
 // measureLibCols measures entries' browsable rows.
@@ -91,82 +102,85 @@ func measureLibCols(entries []library.Entry) libCols {
 		if d := library.CleanText(e.Detail); d != "" {
 			details = append(details, lipgloss.Width(d))
 		}
-		c.opens = c.opens || e.Open != nil
+		if e.Open != nil {
+			c.tail = 2 // " ›"
+		}
 	}
-	c.title, c.detail = listColumn(titles), listColumn(details)
-	if len(titles) > 0 {
-		c.titleMax = slices.Max(titles)
-	}
-	if len(details) > 0 {
-		c.detailMax = slices.Max(details)
-	}
+	c.measureCols(titles, details)
 	return c
 }
 
-func (c libCols) suffixWidth() int {
-	if c.opens {
-		return 2 // " ›"
+// measureTrackCols measures entries' track rows, numbered by numbers.
+func measureTrackCols(entries []library.Entry, numbers []int) libCols {
+	var titles, details []int
+	c := libCols{detailFirst: true}
+	for i, e := range entries {
+		if !libIsTrackRow(e) {
+			continue
+		}
+		titles = append(titles, lipgloss.Width(library.CleanText(trackViewName(*e.Track))))
+		if d := library.CleanText(e.Detail); d != "" {
+			details = append(details, lipgloss.Width(d))
+		}
+		c.lead = max(c.lead, lipgloss.Width(fmt.Sprintf("%d. ", numbers[i])))
+		if d := formatTrackTime(e.Track.DurationSecs); d != "" {
+			c.tail = max(c.tail, 1+lipgloss.Width(d))
+		}
 	}
-	return 0
+	c.measureCols(titles, details)
+	return c
 }
 
-// fields returns the title and detail fields' widths in a row with avail
-// cells between the cursor prefix and the " ›". Every browsable row of a list
-// has the same fields, so its detail starts at the same cell whatever the
+// fields returns the title and detail fields' widths in a row of width
+// cells after the cursor prefix. Every row of a kind in a list has the same
+// fields, so its detail and tail start at the same cell whatever the
 // title's length. The title field is as wide as the row's room after the
 // widest detail allows, but no wider than the widest title, and no narrower
 // than the title column, so one long title or detail does not move the
 // column for the rest. It leaves the detail field the detail column, up to
-// half the row, and keeps at least 4 cells (cliamp's minimum title). The
-// detail field is the rest of the row. A list without details has only the
-// title field.
-func (c libCols) fields(avail int) (title, detail int) {
-	avail = max(avail, 0)
+// half the row (detailFirst: all but 4 cells), and keeps at least 4 cells
+// (cliamp's minimum title). The detail field is the rest of the row. A list
+// without details has only the title field.
+func (c libCols) fields(width int) (title, detail int) {
+	avail := max(width-c.lead-c.tail, 0)
 	if c.detail == 0 {
 		return avail, 0
 	}
 	reserve := min(c.detail, avail/2)
+	if c.detailFirst {
+		reserve = min(c.detail, avail-libDetailGap-4)
+	}
 	title = min(max(c.title, avail-libDetailGap-c.detailMax), c.titleMax, avail-libDetailGap-reserve)
 	title = min(max(title, 4), avail)
 	return title, max(avail-libDetailGap-title, 0)
 }
 
-// table is the width the list's browsable rows need: its title and detail
-// columns (fields gives them exactly at this width), the cursor prefix and
-// the " ›".
+// table is the width the list's rows of this kind need: the cursor prefix,
+// the lead, the title and detail columns (fields gives them exactly at this
+// width) and the tail.
 func (c libCols) table() int {
-	w := libCursorPrefix + c.title + c.suffixWidth()
+	w := libCursorPrefix + c.lead + c.title + c.tail
 	if c.detail > 0 {
 		w += libDetailGap + c.detail
 	}
 	return w
 }
 
-// libEntryNeed is the width entry's row needs on a wide terminal: a
-// browsable row the list's table, whatever its own title; number is a
-// track's number.
-func libEntryNeed(e library.Entry, number int, cols libCols) int {
-	if libIsTrackRow(e) {
-		need := libCursorPrefix + lipgloss.Width(fmt.Sprintf("%d. ", number)) + trackRowNeed(library.CleanText(trackViewName(*e.Track)), *e.Track, false)
-		if d := library.CleanText(e.Detail); d != "" {
-			need += libTrackLabelGap + lipgloss.Width(d) // a search result's source, after the name
-		}
-		return need
-	}
-	return cols.table()
-}
-
 // setEntries sets the frame's rows and measures them for listRowWidth: the
-// fields of its browsable rows, each row's need, and the list's column.
+// fields of its browsable rows and of its track rows, each row's need (its
+// kind's table), and the list's column.
 func (f *libFrame) setEntries(entries []library.Entry) {
 	f.entries = entries
-	f.cols = measureLibCols(entries)
 	numbers := libTrackNumbers(entries)
+	f.cols, f.trackCols = measureLibCols(entries), measureTrackCols(entries, numbers)
 	f.rows, f.numbers = libraryRows(entries), numbers
 	f.rowOf = libRowOf(f.rows, len(entries))
 	f.needs = make([]int, len(entries))
 	for i, e := range entries {
-		f.needs[i] = libEntryNeed(e, numbers[i], f.cols)
+		f.needs[i] = f.cols.table()
+		if libIsTrackRow(e) {
+			f.needs[i] = f.trackCols.table()
+		}
 	}
 	f.column = listColumn(f.needs)
 }

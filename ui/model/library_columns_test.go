@@ -45,14 +45,30 @@ func colsKinds() map[string][]library.Entry {
 	fav := row("Rumours", "Fleetwood Mac · 1977")
 	fav.Favorite = true
 	kinds["albums"] = append(kinds["albums"], fav)
-	tr := playlist.Track{Path: "/m/1.mp3", Title: colsLong, DurationSecs: 300}
 	for i, title := range titles {
 		section := []string{"Albums", "Artists", "Playlists"}[i%3]
 		kinds["search"] = append(kinds["search"], library.Entry{Title: title, Detail: []string{"Spotify", "Local · 3 albums", "YouTube · from tracks"}[i%3], Open: open, Section: section})
 	}
-	kinds["search"] = append(kinds["search"], library.Entry{Title: tr.Title, Detail: "Local", Track: &tr, Section: "Tracks"})
+	// Track rows: an album's (no label, numbers past 9, durations of
+	// every width and none) and search results' (each with its source).
+	secs := []int{245, 3725, 0, 61, 599, 1200, 30}
+	for n := range 12 {
+		tr := playlist.Track{Path: fmt.Sprint("/m/", n), Title: titles[n%len(titles)], DurationSecs: secs[n%len(secs)]}
+		kinds["album tracks"] = append(kinds["album tracks"], library.Entry{Title: tr.Title, Track: &tr})
+	}
+	for i, title := range titles {
+		tr := playlist.Track{Path: fmt.Sprint("/s/", i), Title: title, DurationSecs: secs[i]}
+		kinds["search"] = append(kinds["search"], library.Entry{Title: title, Detail: []string{"Local", "YouTube · from tracks", "Spotify", "ヨアソビ"}[i%4], Track: &tr, Section: "Tracks"})
+	}
 	return kinds
 }
+
+// colsDuration is a track row's duration at its end, and colsNumber its
+// number.
+var (
+	colsDuration = regexp.MustCompile(` (\d+:)?\d+:\d\d$`)
+	colsNumber   = regexp.MustCompile(`^ *\d+\. `)
+)
 
 // colsField is the start cell of the field after a title (the first run
 // of two or more spaces), or -1.
@@ -74,11 +90,19 @@ func assertFieldCut(t *testing.T, shown, full string) {
 }
 
 // checkColsRows checks one list's rendered rows (cursor cells included)
-// against its entries: one detail start, one end, a word cut per field, and
-// no row wider than panel.
+// against its entries: one detail start and one end for its browsable rows;
+// one name, source and duration start for its track rows; a word cut per
+// field; and no row wider than panel.
 func checkColsRows(t *testing.T, label string, lines []string, entries []library.Entry, panel int) {
 	t.Helper()
 	detailAt, endAt, i := -1, -1, 0
+	nameAt, labelAt, durationAt := -1, -1, -1
+	same := func(what string, at *int, got int, row string) {
+		if *at >= 0 && got != *at {
+			t.Errorf("%s: %s start at %d and %d: %q", label, what, *at, got, row)
+		}
+		*at = got
+	}
 	for _, l := range lines {
 		if strings.TrimSpace(l) == "" {
 			continue // the body's padding
@@ -92,10 +116,36 @@ func checkColsRows(t *testing.T, label string, lines []string, entries []library
 		if w := lipgloss.Width(l); w > panel {
 			t.Errorf("%s: row %q is %d cells, panel %d", label, l, w, panel)
 		}
-		if libIsTrackRow(e) {
-			continue // label after the name (libTrackRow), not a field
-		}
 		body := strings.TrimRight(content, " ")
+		if libIsTrackRow(e) {
+			if d := colsDuration.FindStringIndex(body); d != nil {
+				same("durations", &durationAt, lipgloss.Width(body[:d[0]+1]), body)
+				body = strings.TrimRight(body[:d[0]], " ")
+			} else if e.Track.DurationSecs > 0 {
+				t.Errorf("%s: row %q has no duration", label, body)
+			}
+			num := colsNumber.FindString(body)
+			if num == "" || strings.TrimSpace(num) != fmt.Sprintf("%d.", libTrackNumbers(entries)[i-1]) {
+				t.Errorf("%s: row %q does not start with its number", label, body)
+				continue
+			}
+			same("names", &nameAt, lipgloss.Width(num), body)
+			body = body[len(num):]
+			name := library.CleanText(trackViewName(*e.Track))
+			if e.Detail == "" {
+				assertFieldCut(t, body, name)
+				continue
+			}
+			mm := colsField.FindStringSubmatchIndex(body)
+			if mm == nil {
+				t.Errorf("%s: row %q: no source field", label, body)
+				continue
+			}
+			same("sources", &labelAt, lipgloss.Width(body[:mm[4]]), body)
+			assertFieldCut(t, body[:mm[3]], name)
+			assertFieldCut(t, body[mm[4]:], e.Detail)
+			continue
+		}
 		if e.Open != nil {
 			end := lipgloss.Width(body)
 			if endAt >= 0 && end != endAt {
@@ -118,10 +168,7 @@ func checkColsRows(t *testing.T, label string, lines []string, entries []library
 			continue
 		}
 		at := lipgloss.Width(body[:mm[4]])
-		if detailAt >= 0 && at != detailAt {
-			t.Errorf("%s: details start at %d and %d: %q", label, detailAt, at, body)
-		}
-		detailAt = at
+		same("details", &detailAt, at, body)
 		if at < 4+libDetailGap {
 			t.Errorf("%s: the title field is %d cells", label, at-libDetailGap)
 		}
@@ -151,11 +198,16 @@ func TestLibraryFieldsAtTheTwoColumnWidth(t *testing.T) {
 	for _, size := range [][2]int{{80, 24}, {160, 48}} {
 		panel := newColumnTestModel(size[0], size[1]).layout.playlistWidth
 		for kind, entries := range colsKinds() {
-			cols := measureLibCols(entries)
+			var f libFrame
+			f.setEntries(entries)
 			restore := ui.WithPanelWidth(panel)
 			var lines []string
 			for i, e := range entries {
-				lines = append(lines, stripAnsi(cursorLine(libEntryLabel(e, i+1, cols), false)))
+				cols := f.cols
+				if libIsTrackRow(e) {
+					cols = f.trackCols
+				}
+				lines = append(lines, stripAnsi(cursorLine(libEntryLabel(e, f.numbers[i], cols), false)))
 			}
 			restore()
 			checkColsRows(t, fmt.Sprintf("%s at the %dx%d list column (%d)", kind, size[0], size[1], panel), lines, entries, panel)
@@ -167,10 +219,16 @@ func TestLibraryFieldsAtTheTwoColumnWidth(t *testing.T) {
 // fields are its columns.
 func TestLibColsTableIsItsColumns(t *testing.T) {
 	for kind, entries := range colsKinds() {
-		c := measureLibCols(entries)
-		title, detail := c.fields(c.table() - libCursorPrefix - c.suffixWidth())
-		if title != max(c.title, 4) || detail != c.detail {
-			t.Errorf("%s: fields at the table = %d, %d; columns %d, %d", kind, title, detail, c.title, c.detail)
+		var f libFrame
+		f.setEntries(entries)
+		for _, c := range []libCols{f.cols, f.trackCols} {
+			if c.titleMax == 0 {
+				continue // no rows of this kind
+			}
+			title, detail := c.fields(c.table() - libCursorPrefix)
+			if title != max(c.title, 4) || detail != c.detail {
+				t.Errorf("%s: fields at the table = %d, %d; columns %d, %d", kind, title, detail, c.title, c.detail)
+			}
 		}
 	}
 }

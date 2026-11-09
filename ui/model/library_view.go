@@ -286,12 +286,13 @@ func (m *Model) renderLibraryList(budget int) string {
 		if row.index < len(f.needs) {
 			need = f.needs[row.index]
 		}
-		column := f.column
-		if !libIsTrackRow(f.entries[row.index]) {
-			column = need // every browsable row is the list's table (libCols.table)
+		cols := f.cols
+		if libIsTrackRow(f.entries[row.index]) {
+			cols = f.trackCols
 		}
-		restore := ui.WithPanelWidth(listRowWidth(panel, column, need))
-		lines = append(lines, cursorLine(libEntryLabel(f.entries[row.index], numbers[row.index], f.cols),
+		// Every row of a kind is its kind's table (setEntries).
+		restore := ui.WithPanelWidth(listRowWidth(panel, need, need))
+		lines = append(lines, cursorLine(libEntryLabel(f.entries[row.index], numbers[row.index], cols),
 			showCursor && row.index == f.cursor))
 		restore()
 	}
@@ -323,36 +324,37 @@ func libTrackNumbers(entries []library.Entry) []int {
 	return numbers
 }
 
-// libTrackRow is formatTrackRow with a label after the name: "3. Name  Label
-// 4:05". The label is kept whole and the name gives way to it, down to four
-// cells; only a row too narrow for both shortens the label. Without a label
-// it is formatTrackRow's row. Both are cut at a word (#64), before
-// formatTrackRow would cut them mid-word.
-func libTrackRow(number int, name, label string, secs int) string {
-	// What formatTrackRow leaves for the name: the row less its number and
-	// its duration.
-	budget := ui.PanelWidth - libCursorPrefix - lipgloss.Width(fmt.Sprintf("%d. ", number))
-	if dur := formatTrackTime(secs); dur != "" {
-		budget -= lipgloss.Width(dur) + 1
+// libTrackRow renders a library track row in its list's fields (#63):
+// "  3. Name          Label     4:05". The number is right-aligned in the
+// lead, the name and the label (a search result's source) each have a field,
+// cut at a word (#64), and the duration starts at the same cell on every
+// row. The label keeps its column before the name (libCols.detailFirst).
+func libTrackRow(number int, name, label string, secs int, cols libCols) string {
+	num := fmt.Sprintf("%d. ", number)
+	nameW, labelW := cols.fields(ui.PanelWidth - libCursorPrefix)
+	row := strings.Repeat(" ", max(cols.lead-lipgloss.Width(num), 0)) + num + padCells(truncateWords(name, nameW), nameW)
+	if cols.detail > 0 {
+		row += strings.Repeat(" ", libDetailGap) + padCells(truncateWords(label, labelW), labelW)
 	}
-	if label == "" {
-		return formatTrackRow(number, truncateWords(name, max(budget, 4)), secs)
+	if cols.tail > 0 {
+		row += " " + formatTrackTime(secs)
 	}
-	const minName = 4
-	label = truncateWords(label, max(budget-minName-libTrackLabelGap, 1))
-	name = truncateWords(name, max(budget-libTrackLabelGap-lipgloss.Width(label), minName))
-	return formatTrackRow(number, name+strings.Repeat(" ", libTrackLabelGap)+label, secs)
+	return strings.TrimRight(row, " ")
 }
 
 // libEntryLabel renders "Title      Detail ›"; tracks use the numbered track
-// row with duration, and their detail, which only a search result has (its
-// source), follows the name. A station is a live stream with neither, so it
+// row (libTrackRow) in cols, the list's track fields, with their detail,
+// which only a search result has (its source), in a field of its own;
+// unmeasured (cols zero), a track row has its own. A station is a live stream with neither, so it
 // is a plain row. Browsable rows end in "›". The title and the detail each
 // get a field of the list's (cols.fields): the detail starts at the same
 // cell on every row, and a longer title or detail is cut at a word (#63).
 func libEntryLabel(e library.Entry, number int, cols libCols) string {
-	if e.Track != nil && !e.Track.Realtime {
-		return libTrackRow(number, library.CleanText(trackViewName(*e.Track)), library.CleanText(e.Detail), e.Track.DurationSecs)
+	if libIsTrackRow(e) {
+		if cols.lead == 0 { // not measured with a list: the row's own
+			cols = measureTrackCols([]library.Entry{e}, []int{number})
+		}
+		return libTrackRow(number, library.CleanText(trackViewName(*e.Track)), library.CleanText(e.Detail), e.Track.DurationSecs, cols)
 	}
 	suffix := ""
 	if e.Open != nil {
@@ -362,7 +364,7 @@ func libEntryLabel(e library.Entry, number int, cols libCols) string {
 	if e.Favorite {
 		title = "★ " + title
 	}
-	titleW, detailW := cols.fields(ui.PanelWidth - libCursorPrefix - cols.suffixWidth())
+	titleW, detailW := cols.fields(ui.PanelWidth - libCursorPrefix)
 	title = truncateWords(title, titleW)
 	if cols.detail == 0 {
 		return title + suffix

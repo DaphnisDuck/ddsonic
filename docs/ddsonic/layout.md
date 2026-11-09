@@ -6,10 +6,10 @@ ddsonic fills the terminal. On a taller terminal, every list shows more rows. On
 
 - **Height:** the library's lists (levels, search results), the queue, Up next, lyrics and track info get every row between the header and the key bar. The now-playing lines, seek bar and visualizer keep their heights; extra rows go to the list.
 - **Short terminals:** the queue, and track info, lyrics or Up next over it, take rows from the visualizer (down to one row) until the list has 8. If that is not enough, the queue's key bar shows only its first lines, keeping at least 3 list rows. Below 40×10, ddsonic shows "Terminal too small" until the terminal grows.
-- **Library rows:** a list's browsable rows (albums, artists, genres, playlists, search results) have fixed fields at every width: the title, then the detail (artist, year), which starts at the same cell on every row, then the "›". A title or detail longer than its field is cut to the whole words that fit, with "…"; a word longer than the field, or text without spaces (Japanese, say), is cut at a character. A long title never moves the detail (#63, #64).
-- **Field widths:** the title field is wide enough for 9 in 10 of the list's titles, and wider when the row has room once the longest detail fits, up to the longest title. It leaves the detail at least the width 9 in 10 details need, up to half the row. The detail field takes the rest of the row.
+- **Library rows:** a list's browsable rows (albums, artists, genres, playlists, search results) have fixed fields at every width: the title, then the detail (artist, year), which starts at the same cell on every row, then the "›". A title or detail longer than its field is cut to the whole words that fit, with "…"; a word longer than the field, or text without spaces (Japanese, say), is cut at a character. A long title never moves the detail (#63, #64). A library list's track rows (an album's tracks, search results' tracks) have fixed fields the same way: the number, right-aligned; the name; the source, for a search result; and the duration, each starting at the same cell on every track row.
+- **Field widths:** the title field is wide enough for 9 in 10 of the list's titles, and wider when the row has room once the longest detail fits, up to the longest title. It leaves the detail at least the width 9 in 10 details need, up to half the row. The detail field takes the rest of the row. A track's source keeps that width before its name does, down to 4 cells of name.
 - **Width up to 100 columns:** rows fill the width; the "›" and a track's duration are at the right edge.
-- **Width over 100 columns:** a library list's rows end at the width its fields need, never narrower than 100 columns, so a wide terminal shows them as a 100-column one does. Track rows (an album's tracks, the queue, Up next) end where most of their rows end, and a longer track row runs past them. The queue's settings column stays at the right edge.
+- **Width over 100 columns:** a library list's rows end at the width its fields need, never narrower than 100 columns, so a wide terminal shows them as a 100-column one does. The queue's and Up next's rows end where most of their rows end, and a longer row runs past them. The queue's settings column stays at the right edge.
 
 ## Border
 
@@ -35,5 +35,5 @@ border = false
 - On a very wide terminal, the space right of a list's table stays empty; nothing is stretched to fill it.
 - Narrow terminals (around 40 columns): the detail keeps up to half the row, so titles and details are both cut to a few words, and a year after an artist may not show. The title keeps at least 4 cells.
 - A cut at a word can leave the end of a field empty: the next word is left out whole rather than cut to fill it.
-- A track row in a library list (an album's tracks, search results' tracks) keeps its source after the name rather than in the detail field.
+- At narrow widths a search result's source keeps its width before the track's name, so a long name can show only its first word or a few characters.
 - cliamp's own screens (provider browsers, pickers, playlist manager) keep cliamp's sizing.
