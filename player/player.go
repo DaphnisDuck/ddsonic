@@ -1189,7 +1189,7 @@ func (p *Player) suspendSpeaker() {
 	if p.suspended {
 		return
 	}
-	if err := speaker.Suspend(); err != nil {
+	if err := speakerSuspend(); err != nil { // ddsonic: a test seam (speaker_seam_ddsonic.go)
 		// Non-fatal: the ALSA driver may return an error if the context
 		// has already hit a terminal error. Continue without tracking
 		// the suspended state so we don't try to resume a dead context.
@@ -1207,7 +1207,7 @@ func (p *Player) resumeSpeaker() {
 	if !p.suspended {
 		return
 	}
-	if err := speaker.Resume(); err != nil {
+	if err := speakerResume(); err != nil { // ddsonic: a test seam (speaker_seam_ddsonic.go)
 		return
 	}
 	p.suspended = false
