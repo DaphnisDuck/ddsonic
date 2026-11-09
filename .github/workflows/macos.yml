@@ -8,6 +8,11 @@ name: macOS
 #   summary; it is not a required check, so it blocks nothing. Making it
 #   required is a later owner decision. It is not a statement that macOS is
 #   supported.
+#   Deliberately skipped (SKIPPED_TESTS in the job, exact names): 21
+#   validation-tooling tests of the root package that run
+#   tools/classify-change.sh and tools/change-class.sh, development tools for
+#   the Linux dev shell (bash 5; macOS has bash 3.2). They are not player code;
+#   they run in the Linux CI. The job summary says so.
 # - package: builds the macOS release files with packaging/darwin-arm64 and
 #   uploads them as workflow artifacts only. It never creates, edits or
 #   uploads to a release: the owner publishes, as for every release.
@@ -50,6 +55,9 @@ jobs:
       (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: macos-26
     timeout-minutes: 60
+    env:
+      # Exact top-level test names, "|"-separated; see the comment at the top.
+      SKIPPED_TESTS: "TestChangeClassClasses|TestClassifierFilesAreFull|TestClassifyChange|TestClassifyChangeExportedSpecialVariables|TestClassifyChangeFailsClosed|TestClassifyChangeIgnoresBashEnvFunctions|TestClassifyChangeIgnoresGitEnvironment|TestClassifyChangeIgnoresShellState|TestClassifyChangeNeverPrintsConfigSecrets|TestClassifyChangeRefusesAShallowClone|TestClassifyChangeRefusesInvalidUTF8|TestClassifyChangeRefusesInvisibleCodePoints|TestClassifyChangeRefusesNonCanonicalUTF8|TestClassifyChangeRefusesToRunInsideAnotherShell|TestClassifyChangeRejectsBadRules|TestClassifyChangeResistsExportedFunctions|TestClassifyChangeTrustsOnlyTheProjectOrigin|TestClassifyChangeUsesTheBaseRules|TestClassifyChangeWorkingTree|TestClassifyPathsUsesTheGivenRules|TestReadOrEmbeddedFilesAreCodeOrAbove"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -87,7 +95,7 @@ jobs:
         run: |
           export PKG_CONFIG_LIBDIR="$RUNNER_TEMP/codecs/lib/pkgconfig"
           set -o pipefail
-          go test -count=1 -race ./... 2>&1 | tee "$RUNNER_TEMP/tests.txt"
+          go test -count=1 -race -skip "^($SKIPPED_TESTS)\$" ./... 2>&1 | tee "$RUNNER_TEMP/tests.txt"
       - name: Summary
         if: ${{ always() }}
         env:
@@ -99,6 +107,7 @@ jobs:
             echo
             echo "- go vet: $VET"
             echo "- go test -count=1 -race ./...: $TESTS"
+            echo "- Skipped on macOS: $(printf '%s\n' "$SKIPPED_TESTS" | tr '|' '\n' | grep -c .) validation-tooling tests that need the Linux dev shell (tools/classify-change.sh); they run in the Linux CI."
             if [ -f "$RUNNER_TEMP/tests.txt" ]; then
               echo "- packages: $(grep -c '^ok' "$RUNNER_TEMP/tests.txt" || true) ok, $(grep -c '^FAIL' "$RUNNER_TEMP/tests.txt" || true) FAIL lines"
               echo
