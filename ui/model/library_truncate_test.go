@@ -31,7 +31,8 @@ func TestTruncateWords(t *testing.T) {
 		{"next word left out though room stays", "A Supercalifragilistic", 12, "A…"},
 		{"no space before the ellipsis", "Abbey Road Remastered", 11, "Abbey Road…"},
 		{"spaces inside the run kept", "Abbey  Road  Remastered", 12, "Abbey  Road…"},
-		{"a separator is not left last", "Pink Floyd · 1973", 13, "Pink Floyd…"},
+		{"a separator is a word", "Pink Floyd · 1973", 13, "Pink Floyd ·…"},
+		{"a separator is a word, one cell short", "Pink Floyd · 1973", 12, "Pink Floyd…"},
 		{"oversized word", "Supercalifragilistic", 12, "Supercalifr…"},
 		{"oversized first word", "Supercalifragilistic Expialidocious", 12, "Supercalifr…"},
 		{"no spaces: CJK", "日本語のタイトル", 9, "日本語の…"},
@@ -48,7 +49,8 @@ func TestTruncateWords(t *testing.T) {
 		{"width 1", "Abbey Road", 1, "…"},
 		{"width 2", "Abbey Road", 2, "A…"},
 		{"width 2, fits", "Ab", 2, "Ab"},
-		{"cut after a separator, less the space", "- Live", 3, "-…"},
+		{"a lone separator is a word", "- Live", 3, "-…"},
+		{"a cut never ends in a space", "A  Supercalifragilistic", 2, "A…"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got := truncateWords(tt.s, tt.w)
@@ -103,8 +105,8 @@ func assertWordCut(t *testing.T, shown, full string) {
 	}
 }
 
-// #64: a library row's title and detail, and a search track row's name,
-// are cut at a word, at every width.
+// #64: a library row's title and detail, and a library track row's name,
+// with a label or without, are cut at a word, at every width.
 func TestLibraryRowsCutAtWords(t *testing.T) {
 	const title = "The Dark Side of the Moon Experience Immersion Box Set Remastered"
 	const detail = "Pink Floyd and the Orchestra of the Age of Enlightenment · 1973"
@@ -125,6 +127,10 @@ func TestLibraryRowsCutAtWords(t *testing.T) {
 		}
 		tr := libEntryLabel(library.Entry{Title: track.Title, Detail: "YouTube", Track: &track}, 1, libCols{})
 		name := strings.Split(strings.TrimPrefix(tr, "1. "), "  ")[0]
+		assertWordCut(t, name, track.Title)
+		// A track row without a label too (an album's tracks).
+		plain := libEntryLabel(library.Entry{Title: track.Title, Track: &track}, 1, libCols{})
+		name = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(plain, "1. "), "5:00"))
 		assertWordCut(t, name, track.Title)
 	}
 }

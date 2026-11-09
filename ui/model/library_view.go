@@ -326,16 +326,17 @@ func libTrackNumbers(entries []library.Entry) []int {
 // libTrackRow is formatTrackRow with a label after the name: "3. Name  Label
 // 4:05". The label is kept whole and the name gives way to it, down to four
 // cells; only a row too narrow for both shortens the label. Without a label
-// it is formatTrackRow's row.
+// it is formatTrackRow's row. Both are cut at a word (#64), before
+// formatTrackRow would cut them mid-word.
 func libTrackRow(number int, name, label string, secs int) string {
-	if label == "" {
-		return formatTrackRow(number, name, secs)
-	}
 	// What formatTrackRow leaves for the name: the row less its number and
 	// its duration.
 	budget := ui.PanelWidth - libCursorPrefix - lipgloss.Width(fmt.Sprintf("%d. ", number))
 	if dur := formatTrackTime(secs); dur != "" {
 		budget -= lipgloss.Width(dur) + 1
+	}
+	if label == "" {
+		return formatTrackRow(number, truncateWords(name, max(budget, 4)), secs)
 	}
 	const minName = 4
 	label = truncateWords(label, max(budget-minName-libTrackLabelGap, 1))
