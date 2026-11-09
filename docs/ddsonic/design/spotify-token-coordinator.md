@@ -1790,7 +1790,7 @@ toolchain. The macOS workflow does not run it, so the gate's native release
 checks are unverified on macOS. On
 macOS the runner adds Homebrew's two prefixes to the child's `PATH` and
 `PKG_CONFIG_PATH`, where pkg-config and the codec libraries live there; that
-too is unverified until then.
+too is unverified.
 
 Its steps:
 
