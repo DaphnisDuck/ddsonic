@@ -1786,8 +1786,8 @@ is required, and may not be skipped, for: the full validation of a change to
 the Spotify session code, every release candidate's validation, and any
 change that touches the boundary with go-librespot or the version of it that
 `go.mod` selects. CI runs it in its own Linux job, sdk-contract, with the pinned
-toolchain; macOS has no CI job for now, so the native release checks are
-unverified on macOS until macOS acceptance. On
+toolchain. The macOS workflow does not run it, so the gate's native release
+checks are unverified on macOS. On
 macOS the runner adds Homebrew's two prefixes to the child's `PATH` and
 `PKG_CONFIG_PATH`, where pkg-config and the codec libraries live there; that
 too is unverified until then.
