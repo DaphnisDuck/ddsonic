@@ -57,9 +57,18 @@ jobs:
       - name: Go, as pinned in mise.toml, checked against its SHA-256
         run: |
           sh packaging/darwin-arm64/ci-go.sh "$RUNNER_TEMP"
-      - name: Codec libraries from their pinned sources
+      - name: Codec libraries from their pinned sources (up to 3 attempts, for network resets)
         run: |
-          sh packaging/darwin-arm64/codecs.sh "$RUNNER_TEMP/codecs" > "$RUNNER_TEMP/codecs.log" 2>&1 || { tail -n 50 "$RUNNER_TEMP/codecs.log"; exit 1; }
+          for attempt in 1 2 3; do
+            rm -rf "$RUNNER_TEMP/codecs" "$RUNNER_TEMP/codecs.log"
+            if sh packaging/darwin-arm64/codecs.sh "$RUNNER_TEMP/codecs" > "$RUNNER_TEMP/codecs.log" 2>&1; then
+              echo "codecs.sh: attempt $attempt of 3 succeeded"
+              break
+            fi
+            echo "codecs.sh: attempt $attempt of 3 failed"
+            if [ "$attempt" = 3 ]; then tail -n 50 "$RUNNER_TEMP/codecs.log"; exit 1; fi
+            sleep 30
+          done
           cat "$RUNNER_TEMP/codecs/codecs.txt"
       - name: go vet
         id: vet
@@ -133,9 +142,18 @@ jobs:
       - name: Go, as pinned in mise.toml, checked against its SHA-256
         run: |
           sh packaging/darwin-arm64/ci-go.sh "$RUNNER_TEMP"
-      - name: Codec libraries from their pinned sources
+      - name: Codec libraries from their pinned sources (up to 3 attempts, for network resets)
         run: |
-          DDSONIC_MACOS_TARGET="$MACOS_TARGET" sh packaging/darwin-arm64/codecs.sh "$RUNNER_TEMP/codecs" > "$RUNNER_TEMP/codecs.log" 2>&1 || { tail -n 50 "$RUNNER_TEMP/codecs.log"; exit 1; }
+          for attempt in 1 2 3; do
+            rm -rf "$RUNNER_TEMP/codecs" "$RUNNER_TEMP/codecs.log"
+            if DDSONIC_MACOS_TARGET="$MACOS_TARGET" sh packaging/darwin-arm64/codecs.sh "$RUNNER_TEMP/codecs" > "$RUNNER_TEMP/codecs.log" 2>&1; then
+              echo "codecs.sh: attempt $attempt of 3 succeeded"
+              break
+            fi
+            echo "codecs.sh: attempt $attempt of 3 failed"
+            if [ "$attempt" = 3 ]; then tail -n 50 "$RUNNER_TEMP/codecs.log"; exit 1; fi
+            sleep 30
+          done
           cat "$RUNNER_TEMP/codecs/codecs.txt"
       - name: Release files (packaging/darwin-arm64/release.sh)
         run: |

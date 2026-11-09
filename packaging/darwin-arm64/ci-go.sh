@@ -23,7 +23,7 @@ esac
 [ ! -e "$dir/go" ] || fail "$dir/go exists"
 
 archive="$dir/go$version.darwin-arm64.tar.gz"
-curl -fsSL --proto '=https' --proto-redir '=https' -o "$archive" "https://go.dev/dl/go$version.darwin-arm64.tar.gz"
+curl -fsSL --retry 3 --retry-all-errors --proto '=https' --proto-redir '=https' -o "$archive" "https://go.dev/dl/go$version.darwin-arm64.tar.gz"
 echo "$sum  $archive" | shasum -a 256 -c - || fail "go$version.darwin-arm64.tar.gz does not match its SHA-256"
 tar -xzf "$archive" -C "$dir"
 rm -f "$archive"
