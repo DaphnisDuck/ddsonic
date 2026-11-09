@@ -14,7 +14,9 @@
 # full: the build, CI, tooling and this classifier; dependencies; the Spotify
 # boundary and the go-librespot it relies on; sign-in, credentials, external
 # processes and the plugin sandbox; storage schema, config, IPC and upgrade;
-# release and acceptance material; policy documents.
+# release and acceptance material; AGENTS.md, a symlink. Policy prose is
+# docs, below: no test reads it beyond the citation check, which the docs
+# profile runs; its review stays as strict (CLAUDE.md, Review loop).
 full go.mod
 full go.sum
 full Makefile
@@ -40,11 +42,7 @@ full catalog/sqlite/migrations/*
 full acceptance/*
 full docs/ddsonic/acceptance/*
 full docs/ddsonic/acceptance.md
-full docs/ddsonic/releasing.md
-full docs/ddsonic/design/*
-full CLAUDE.md
 full AGENTS.md
-full SECURITY.md
 full SOURCE-PROVENANCE.md
 full LICENSE*
 full .gitignore
@@ -69,7 +67,12 @@ code theme/themes/*
 code internal/worldmap/raster.bin.gz
 code docs/ddsonic/POST-1.0-CATALOG.md
 
-# docs: documentation no test reads, outside the policy documents above.
+# docs: documentation no test reads beyond the citation check, policy prose
+# included.
+docs CLAUDE.md
+docs SECURITY.md
+docs docs/ddsonic/releasing.md
+docs docs/ddsonic/design/*.md
 docs docs/*.md
 docs CHANGELOG.md
 docs plan.md

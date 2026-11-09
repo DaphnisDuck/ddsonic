@@ -15,7 +15,7 @@ Fork rules (keep upstream merges cheap):
 ## Validation quickstart
 
 - `make tools` once: CI's pinned tools into `~/.local/share/ddsonic/devtools` (outside `/tmp`, so they outlive a session); `make preflight` checks them in under a second.
-- Before a review, commit, then `make validate`: local proportional validation (`docs/ddsonic/acceptance.md`, "Proportional validation"). It runs the profile of the change's class and ends with the `validate: PASSED class=...` line for the review request; the Reviewer verifies the class. The class is full, and `make validate` runs the full `make ci` (about 10 minutes: run it in the background), for security-sensitive code, tools, CI, dependencies, the Spotify boundary and sign-in, policy docs, and anything unknown or ambiguous. Commit first: `make ci` ends with `git diff --exit-code`.
+- Before a review, commit, then `make validate`: local proportional validation (`docs/ddsonic/acceptance.md`, "Proportional validation"). It runs the profile of the change's class and ends with the `validate: PASSED class=...` line for the review request; the Reviewer verifies the class. The class is full, and `make validate` runs the full `make ci` (about 10 minutes: run it in the background), for security-sensitive code, tools, CI, dependencies, the Spotify boundary and sign-in, and anything unknown or ambiguous. Policy prose (this file, `SECURITY.md`, `docs/ddsonic/releasing.md`, the design notes) is docs class, which still runs the citation check; its review is unchanged. Commit first: `make ci` ends with `git diff --exit-code`.
 - GitHub CI always runs in full. Nothing local is tamperproof (a change can edit its own Makefile and scripts), so independent review and the owner's merge approval remain required.
 
 ---
