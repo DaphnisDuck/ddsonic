@@ -39,7 +39,7 @@ func TestSearchTrackRowShowsItsSource(t *testing.T) {
 			t.Run(tt.name, func(t *testing.T) {
 				defer ui.WithPanelWidth(panel)()
 				track := tt.track
-				got := libEntryLabel(library.Entry{Title: track.Title, Detail: tt.source, Track: &track}, tt.number, 0)
+				got := libEntryLabel(library.Entry{Title: track.Title, Detail: tt.source, Track: &track}, tt.number, libCols{})
 
 				if !strings.Contains(got, "  "+tt.source) {
 					t.Errorf("panel %d: row %q does not show its source %q whole", panel, got, tt.source)
@@ -76,7 +76,7 @@ func TestBrowsedTrackRowIsUnchanged(t *testing.T) {
 	track := playlist.Track{Path: "/m/1.mp3", Title: "Shared Song", Artist: "Echo Artist", DurationSecs: 180}
 	for _, panel := range []int{146, 76, 40} {
 		restore := ui.WithPanelWidth(panel)
-		got := libEntryLabel(library.Entry{Title: track.Title, Track: &track}, 7, 0)
+		got := libEntryLabel(library.Entry{Title: track.Title, Track: &track}, 7, libCols{})
 		if want := formatTrackRow(7, trackViewName(track), 180); got != want {
 			t.Errorf("panel %d: unlabelled track row = %q, want the plain row %q", panel, got, want)
 		}
@@ -88,8 +88,8 @@ func TestBrowsedTrackRowIsUnchanged(t *testing.T) {
 // gives the list room for it and does not cut the title short to fit one.
 func TestSearchTrackRowNeedCountsItsSource(t *testing.T) {
 	track := playlist.Track{Path: "/m/1.mp3", Title: "Shared Song", Artist: "Echo Artist", DurationSecs: 180}
-	plain := libEntryNeed(library.Entry{Title: track.Title, Track: &track}, 1, 0)
-	labelled := libEntryNeed(library.Entry{Title: track.Title, Detail: "YouTube", Track: &track}, 1, 0)
+	plain := libEntryNeed(library.Entry{Title: track.Title, Track: &track}, 1, libCols{})
+	labelled := libEntryNeed(library.Entry{Title: track.Title, Detail: "YouTube", Track: &track}, 1, libCols{})
 	if want := plain + libTrackLabelGap + len("YouTube"); labelled != want {
 		t.Errorf("a labelled row needs %d cells, want %d: the plain row's %d and the label", labelled, want, plain)
 	}

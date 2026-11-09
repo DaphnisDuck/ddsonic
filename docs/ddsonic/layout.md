@@ -1,13 +1,15 @@
 # Layout
 
-ddsonic fills the terminal. On a taller terminal, every list shows more rows. On a wider one, long titles show in full, and rows line up as a table rather than stretching across the screen. Resizing while ddsonic runs reflows the screen at once.
+ddsonic fills the terminal. On a taller terminal, every list shows more rows. On a wider one, titles get more room, and rows line up as a table rather than stretching across the screen. Resizing while ddsonic runs reflows the screen at once.
 
 ## What you see
 
 - **Height:** the library's lists (levels, search results), the queue, Up next, lyrics and track info get every row between the header and the key bar. The now-playing lines, seek bar and visualizer keep their heights; extra rows go to the list.
 - **Short terminals:** the queue, and track info, lyrics or Up next over it, take rows from the visualizer (down to one row) until the list has 8. If that is not enough, the queue's key bar shows only its first lines, keeping at least 3 list rows. Below 40×10, ddsonic shows "Terminal too small" until the terminal grows.
-- **Width up to 100 columns:** rows fill the width, with the detail (artist, year) or duration at the right edge.
-- **Width over 100 columns:** a list's rows form a table. Titles take a column wide enough for 9 in 10 of the list's titles, and details start after it; a longer title pushes its own detail right instead of being cut. Track rows (an album's tracks, the queue, Up next) end where most of their rows end. Rows never get narrower than 100 columns. The queue's settings column stays at the right edge.
+- **Library rows:** a list's browsable rows (albums, artists, genres, playlists, search results) have fixed fields at every width: the title, then the detail (artist, year), which starts at the same cell on every row, then the "›". A title or detail longer than its field is cut to the whole words that fit, with "…"; a word longer than the field, or text without spaces (Japanese, say), is cut at a character. A long title never moves the detail (#63, #64).
+- **Field widths:** the title field is wide enough for 9 in 10 of the list's titles, and wider when the row has room once the longest detail fits, up to the longest title. It leaves the detail at least the width 9 in 10 details need, up to half the row. The detail field takes the rest of the row.
+- **Width up to 100 columns:** rows fill the width; the "›" and a track's duration are at the right edge.
+- **Width over 100 columns:** a library list's rows end at the width its fields need, never narrower than 100 columns, so a wide terminal shows them as a 100-column one does. Track rows (an album's tracks, the queue, Up next) end where most of their rows end, and a longer track row runs past them. The queue's settings column stays at the right edge.
 
 ## Border
 
@@ -25,10 +27,13 @@ border = false
 - cliamp caps its lists at 12 or 24 rows unless its expanded mode (Ctrl+X) is on; with the library enabled the lists take the whole body.
 - `bodySize()` (`ui/model/library_layout.go`) returns the body's width and rows: the list column beside the settings pane on the two-column playback screen, else the frame's inner width. The library's views size themselves from it. A detail view (track info, say) that wants to use its room reads `bodySize()` rather than combining `ui.PanelWidth` with row counts of its own.
 - The border is decided with the tier (`libBorderOn`, `ui/model/library_frame.go`): the frame style swaps one cell of padding on each side for it, so the row and column counts do not change. The rule replaces the blank spacer row above the key bar (`libSpacerRule`); the two-column queue, which has no spacer, counts a row for it. cliamp's full tier without a visualizer counts one chrome row short, relying on the fit to cut the frame's blank bottom row when a status line shows; with the border that row is the border's bottom line, so it is counted.
-- Row widths on wide terminals come from `listRowWidth` and `listColumn` (`library_layout.go`). A library level measures its rows once, when its entries arrive (`libFrame.setEntries`). The queue measures its tracks once per playlist change (`queueFit`, keyed by `Playlist.Revision`). Rendering narrows `ui.PanelWidth` per row with `ui.WithPanelWidth`, so cliamp's row formatters need no change.
+- Row widths on wide terminals come from `listRowWidth` and `listColumn`, a library row's fields from `libCols` (`library_rows.go`). A library level measures its rows once, when its entries arrive (`libFrame.setEntries`). The queue measures its tracks once per playlist change (`queueFit`, keyed by `Playlist.Revision`). Rendering narrows `ui.PanelWidth` per row with `ui.WithPanelWidth`, so cliamp's row formatters need no change.
 
 ## Limits
 
 - The visualizer, settings column (22–30 columns) and now-playing lines keep their sizes on a large terminal; only lists grow.
 - On a very wide terminal, the space right of a list's table stays empty; nothing is stretched to fill it.
+- Narrow terminals (around 40 columns): the detail keeps up to half the row, so titles and details are both cut to a few words, and a year after an artist may not show. The title keeps at least 4 cells.
+- A cut at a word can leave the end of a field empty: the next word is left out whole rather than cut to fill it.
+- A track row in a library list (an album's tracks, search results' tracks) keeps its source after the name rather than in the detail field.
 - cliamp's own screens (provider browsers, pickers, playlist manager) keep cliamp's sizing.

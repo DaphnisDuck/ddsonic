@@ -266,10 +266,6 @@ func (m *Model) renderLibraryList(budget int) string {
 	}
 
 	panel := ui.PanelWidth
-	titleCol := 0 // the title column, on a wide terminal
-	if panel > listReadWidth {
-		titleCol = f.titleCol
-	}
 	defer ui.WithPanelWidth(listRowWidth(panel, f.column, 0))() // section headings
 	rows, numbers, rowOf := f.libLayout()
 	scroll := libScroll(rows, libCursorRow(rowOf, f.cursor), f.scroll, budget)
@@ -290,8 +286,12 @@ func (m *Model) renderLibraryList(budget int) string {
 		if row.index < len(f.needs) {
 			need = f.needs[row.index]
 		}
-		restore := ui.WithPanelWidth(listRowWidth(panel, f.column, need))
-		lines = append(lines, cursorLine(libEntryLabel(f.entries[row.index], numbers[row.index], titleCol),
+		column := f.column
+		if !libIsTrackRow(f.entries[row.index]) {
+			column = need // every browsable row is the list's table (libCols.table)
+		}
+		restore := ui.WithPanelWidth(listRowWidth(panel, column, need))
+		lines = append(lines, cursorLine(libEntryLabel(f.entries[row.index], numbers[row.index], f.cols),
 			showCursor && row.index == f.cursor))
 		restore()
 	}
@@ -346,14 +346,13 @@ func libTrackRow(number int, name, label string, secs int) string {
 // libEntryLabel renders "Title      Detail ›"; tracks use the numbered track
 // row with duration, and their detail, which only a search result has (its
 // source), follows the name. A station is a live stream with neither, so it
-// is a plain row. Browsable rows end in "›". Up to listReadWidth the detail is
-// right-aligned; on a wider terminal (titleCol > 0) it starts after a
-// titleCol-wide title column, or after a longer title.
-func libEntryLabel(e library.Entry, number, titleCol int) string {
+// is a plain row. Browsable rows end in "›". The title and the detail each
+// get a field of the list's (cols.fields): the detail starts at the same
+// cell on every row, and a longer title or detail is cut at a word (#63).
+func libEntryLabel(e library.Entry, number int, cols libCols) string {
 	if e.Track != nil && !e.Track.Realtime {
 		return libTrackRow(number, library.CleanText(trackViewName(*e.Track)), library.CleanText(e.Detail), e.Track.DurationSecs)
 	}
-	width := ui.PanelWidth - libCursorPrefix
 	suffix := ""
 	if e.Open != nil {
 		suffix = " ›"
@@ -362,23 +361,19 @@ func libEntryLabel(e library.Entry, number, titleCol int) string {
 	if e.Favorite {
 		title = "★ " + title
 	}
-	avail := width - lipgloss.Width(suffix)
-	if d := library.CleanText(e.Detail); titleCol > 0 && d != "" {
-		// Wide: the title column, then the detail, which keeps up to half
-		// the row when the title is long.
-		title = truncateWords(title, max(avail-2-min(lipgloss.Width(d), avail/2), 4))
-		gap := max(titleCol-lipgloss.Width(title), 0) + 2
-		return title + strings.Repeat(" ", gap) + truncateWords(d, max(avail-lipgloss.Width(title)-gap, 0)) + suffix
-	}
-	detail := truncateWords(library.CleanText(e.Detail), avail/2)
-	titleW := avail
-	if detail != "" {
-		titleW -= lipgloss.Width(detail) + 2
-	}
-	title = truncateWords(title, max(titleW, 4))
-	if detail == "" {
+	titleW, detailW := cols.fields(ui.PanelWidth - libCursorPrefix - cols.suffixWidth())
+	title = truncateWords(title, titleW)
+	if cols.detail == 0 {
 		return title + suffix
 	}
-	pad := max(avail-lipgloss.Width(title)-lipgloss.Width(detail), 2)
-	return title + strings.Repeat(" ", pad) + detail + suffix
+	row := padCells(title, titleW) + strings.Repeat(" ", libDetailGap) + padCells(truncateWords(library.CleanText(e.Detail), detailW), detailW)
+	if suffix == "" {
+		return strings.TrimRight(row, " ")
+	}
+	return row + suffix
+}
+
+// padCells pads s with spaces to w cells.
+func padCells(s string, w int) string {
+	return s + strings.Repeat(" ", max(w-lipgloss.Width(s), 0))
 }

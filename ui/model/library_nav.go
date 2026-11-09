@@ -182,17 +182,17 @@ type libFrame struct {
 	// source is the catalog provider of the level's content, from the row
 	// that opened it (or its frame); "" where sources mix.
 	source string
-	// needs is each row's width, and column the list's detail column
-	// (setEntries, library_layout.go).
+	// needs is each row's width, and column the width listColumnShare of
+	// them fit (setEntries, library_rows.go).
 	needs  []int
 	column int
 	// rows are the entries as rendered lines (with section headings),
 	// numbers each track's number, and rowOf each entry's line: set with
 	// the entries, so a render costs the lines in view, not the list.
-	rows     []libRow
-	numbers  []int
-	rowOf    []int
-	titleCol int // the title column of rows with a detail, on a wide terminal
+	rows    []libRow
+	numbers []int
+	rowOf   []int
+	cols    libCols // the fields of its browsable rows
 }
 
 func (f *libFrame) loading() bool { return f.cancel != nil }

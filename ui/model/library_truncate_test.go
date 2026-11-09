@@ -111,8 +111,9 @@ func TestLibraryRowsCutAtWords(t *testing.T) {
 	track := playlist.Track{Path: "/m/1.mp3", Title: "Shine On You Crazy Diamond Parts One Through Nine Live", DurationSecs: 300}
 	for _, panel := range []int{40, 56, 80, 100} {
 		defer ui.WithPanelWidth(panel)()
-		row := libEntryLabel(library.Entry{Title: title, Detail: detail, Open: library.Menu("x")}, 0, 0)
-		row = strings.TrimSuffix(row, " ›")
+		e := library.Entry{Title: title, Detail: detail, Open: library.Menu("x")}
+		row := libEntryLabel(e, 0, measureLibCols([]library.Entry{e}))
+		row = strings.TrimRight(strings.TrimSuffix(row, " ›"), " ")
 		fields := regexp.MustCompile(`  +`).Split(row, -1)
 		if len(fields) != 2 {
 			t.Fatalf("panel %d: row %q: want a title and a detail", panel, row)
@@ -122,7 +123,7 @@ func TestLibraryRowsCutAtWords(t *testing.T) {
 		if w := lipgloss.Width(row); w > panel-libCursorPrefix {
 			t.Errorf("panel %d: row is %d cells", panel, w)
 		}
-		tr := libEntryLabel(library.Entry{Title: track.Title, Detail: "YouTube", Track: &track}, 1, 0)
+		tr := libEntryLabel(library.Entry{Title: track.Title, Detail: "YouTube", Track: &track}, 1, libCols{})
 		name := strings.Split(strings.TrimPrefix(tr, "1. "), "  ")[0]
 		assertWordCut(t, name, track.Title)
 	}

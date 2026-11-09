@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -230,57 +231,46 @@ func TestResizeKeepsTheCursorOnScreen(t *testing.T) {
 	}
 }
 
-// Up to listReadWidth, rows fill the width as before. Past it, the details
-// line up at the column most rows fit in, and a longer row runs past it
-// whole instead of being cut.
-func TestWideRowsEndAtTheirContent(t *testing.T) {
+// #63: a long title no longer runs past its column. At every width the
+// details start at one cell, the long row's too (its title is cut at a word),
+// and every row ends where the others do: the panel up to listReadWidth,
+// the list's table past it, never narrower than listReadWidth.
+func TestWideRowsKeepTheirFields(t *testing.T) {
 	longTitle := strings.TrimSpace(strings.Repeat("Long Title ", 14)) // 153 cells
 	entries := []library.Entry{{Title: longTitle, Detail: "Artist · 1999", Open: library.Menu("y")}}
 	for i := range 20 {
 		entries = append(entries, library.Entry{Title: fmt.Sprintf("Short %02d", i), Detail: "Artist · 1999", Open: library.Menu("x")})
 	}
 	root := library.Menu("Music", entries...)
-	rowEnd := func(m Model, marker string) int {
-		for _, l := range strings.Split(stripAnsi(m.View().Content), "\n") {
-			if strings.Contains(l, marker) {
-				return lipgloss.Width(strings.TrimRight(l, " "))
-			}
-		}
-		t.Fatalf("no row with %q", marker)
-		return 0
-	}
 	// Rows end two cells short of their width: libEntryLabel reserves the
 	// libCursorPrefix, and cursorLine draws two of its cells.
 	const pad, short = 3, 2 // the frame's left padding
-	for _, tt := range []struct{ w, short, long int }{
-		{80, 80 - pad - short, 80 - pad - short},
-		{100, 100 - pad - short, 100 - pad - short},
-		// Wide: the details start after the title column (9 of 10 titles are
-		// "Short NN"), and the long title pushes its own detail right.
-		{300, pad + 2 + len("Short 05") + 2 + lipgloss.Width("Artist · 1999") + 2, pad + 2 + lipgloss.Width(longTitle) + 2 + lipgloss.Width("Artist · 1999") + 2},
+	for _, tt := range []struct{ w, end int }{
+		{80, 80 - pad - short},
+		{100, 100 - pad - short},
+		{300, pad + listReadWidth - short},
 	} {
 		m := resized(t, newLibraryModel(root), tt.w, 40)
-		if got := rowEnd(m, "Short 05"); got != tt.short {
-			t.Errorf("width %d: a short row ends at %d, want %d", tt.w, got, tt.short)
-		}
-		if got := rowEnd(m, "Long Title Long"); got != tt.long {
-			t.Errorf("width %d: the long row ends at %d, want %d", tt.w, got, tt.long)
-		}
-	}
-	m := resized(t, newLibraryModel(root), 300, 40)
-	out := stripAnsi(m.View().Content)
-	if !strings.Contains(out, longTitle) {
-		t.Error("the long title is cut at 300 columns")
-	}
-	// The details line up in one column.
-	col := -1
-	for _, l := range strings.Split(out, "\n") {
-		if strings.Contains(l, "Short") {
-			at := strings.Index(l, "Artist")
-			if col >= 0 && at != col {
-				t.Fatalf("details at %d and %d: not one column", col, at)
+		detailAt := -1
+		for _, l := range strings.Split(stripAnsi(m.View().Content), "\n") {
+			if !strings.Contains(l, "Short") && !strings.Contains(l, "Long Title") {
+				continue
 			}
-			col = at
+			if got := lipgloss.Width(strings.TrimRight(l, " ")); got != tt.end {
+				t.Errorf("width %d: row %q ends at %d, want %d", tt.w, l, got, tt.end)
+			}
+			at := strings.Index(l, "Artist")
+			if at < 0 {
+				t.Fatalf("width %d: row %q has no detail", tt.w, l)
+			}
+			at = lipgloss.Width(l[:at])
+			if detailAt >= 0 && at != detailAt {
+				t.Errorf("width %d: details at %d and %d: not one column", tt.w, detailAt, at)
+			}
+			detailAt = at
+			if strings.Contains(l, "Long Title") && (strings.Contains(l, longTitle) || !regexp.MustCompile(`(Long|Title)…`).MatchString(l)) {
+				t.Errorf("width %d: the long title is not cut at a word: %q", tt.w, l)
+			}
 		}
 	}
 }

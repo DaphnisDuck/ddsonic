@@ -236,10 +236,10 @@ func TestLibraryOrderKey(t *testing.T) {
 func TestStationRowsHaveNoNumber(t *testing.T) {
 	station := playlist.Track{Path: "https://s", Title: "WBGO", Stream: true, Realtime: true}
 	song := playlist.Track{Path: "/a.flac", Title: "Song", DurationSecs: 60}
-	if got := libEntryLabel(library.Entry{Title: "WBGO", Track: &station}, 1, 0); strings.Contains(got, "1.") || !strings.Contains(got, "WBGO") {
+	if got := libEntryLabel(library.Entry{Title: "WBGO", Track: &station}, 1, libCols{}); strings.Contains(got, "1.") || !strings.Contains(got, "WBGO") {
 		t.Errorf("station row = %q, want no number", got)
 	}
-	if got := libEntryLabel(library.Entry{Title: "Song", Track: &song}, 3, 0); !strings.HasPrefix(got, "3. ") {
+	if got := libEntryLabel(library.Entry{Title: "Song", Track: &song}, 3, libCols{}); !strings.HasPrefix(got, "3. ") {
 		t.Errorf("track row = %q, want its number", got)
 	}
 	if got := libTrackNumbers([]library.Entry{{Track: &station}, {Track: &song}}); !slices.Equal(got, []int{0, 1}) {
