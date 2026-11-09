@@ -68,20 +68,15 @@ jobs:
           sh tools/devtools.sh fetch
       # ddsonic: the go-librespot contract gate, unchanged; it runs here because
       # this job has the pinned toolchain, which the gate requires and checks.
-      # macOS has no CI job for now (see below), so the gate's native release
-      # checks are unverified on macOS until macOS acceptance.
+      # The macOS workflow does not run it, so the gate's native release checks
+      # are unverified on macOS.
       - run: make sdk-contract
       - name: The tree is clean
         run: |
           git diff --exit-code
 
-  # ddsonic: no macOS job, temporarily. It is disabled pending open macOS
-  # issues in the player's yt-dlp handling, which its tests found and which
-  # remain unresolved: process lifecycle (a child kept a pipe open until the
-  # teardown deadline), temporary-file cleanup (a yt-dlp temporary directory
-  # left after Stop), and possible privacy exposure, as that directory is
-  # where yt-dlp may copy a browser's cookie database (the player TestStop*
-  # failures, run 41374046108). Re-enabling it needs those resolved. The
-  # macOS code, build tags and tests are unchanged.
+  # ddsonic: macOS is not covered by this file. A separate, informational
+  # workflow, .github/workflows/macos.yml, tests it on Apple Silicon runners;
+  # it is not a required check.
   # ddsonic: no Windows job. ddsonic 1.0 does not support Windows, and its tests
   # assume Unix paths and file modes.

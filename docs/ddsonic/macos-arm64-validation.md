@@ -16,7 +16,7 @@ Nothing here authorizes publication. Building, testing and packaging produce loc
   - `pkg-config` and `jq`.
 
   `RELEASE-MANIFEST.json` records each of them. The build is **not reproducible from the tag alone**, and nothing should describe it as if it were.
-- **Build host:** the owner's Apple Silicon (M3) Mac. No CI workflow builds or tests macOS.
+- **Build host:** the owner's Apple Silicon (M3) Mac. The v1.0.0 file set was not built in CI.
 
 ## The tooling
 
@@ -39,7 +39,7 @@ Nothing here authorizes publication. Building, testing and packaging produce loc
 
 It writes `RELEASE-MANIFEST.json` and an archive with a fixed order, owner and time, then the SBOM, the notices and `SHA256SUMS-darwin-arm64`. It stages them in a temporary directory, which it always removes, and moves them into `<out>` only after every check has passed. A failed build leaves `<out>` empty.
 
-**Why not reuse `.github/scripts/build-darwin-amd64-codecs.sh`:** it is upstream's Intel recipe. It cross-builds x86_64 with x86_64 flags throughout and is referenced by nothing. Intel macOS is outside this target, and ddsonic keeps upstream files unchanged where it can, so that merges stay cheap. The arm64 script uses the same four source releases at the same SHA-256 sums. It lives with the packaging it serves, not under `.github/`, because no workflow runs it.
+**Why not reuse `.github/scripts/build-darwin-amd64-codecs.sh`:** it is upstream's Intel recipe. It cross-builds x86_64 with x86_64 flags throughout and is referenced by nothing. Intel macOS is outside this target, and ddsonic keeps upstream files unchanged where it can, so that merges stay cheap. The arm64 script uses the same four source releases at the same SHA-256 sums. It lives with the packaging it serves, not under `.github/`; the macOS workflow (`.github/workflows/macos.yml`) runs it from there.
 
 **Checked on Linux, before any Mac run** (2026-11-08):
 - `sh -n`, `bash -n` and the pinned shellcheck 0.9.0 pass on all five scripts.
