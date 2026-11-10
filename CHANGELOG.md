@@ -28,7 +28,8 @@ ddsonic is a fork of [cliamp](https://github.com/bjarneo/cliamp). Versions befor
 - The Linux third-party notices omitted the notice of mpg123's `icy2utf8.c`. Release builds now include it, and the release script refuses notices without it. The published v1.0.0 files are unchanged.
 
 ### Known limitations
-- The Spotify limitations listed under 1.0.0 still apply.
+- The Spotify limitations listed under 1.0.0 still apply, and the Vorbis one is wider than 1.0.0 states.
+- Spotify playback in Ogg Vorbis: every Vorbis decoder ddsonic opens keeps its memory until you quit, whether or not its track was played, because ddsonic does not close Vorbis decoders (closing one can abort the program with the Spotify library ddsonic uses). About 141 KiB per open was seen in one measurement, with a test file and that computer's libvorbis; that is not an established cost for every system, and the release build was not measured. This is the limitation accepted for 1.0.0, not a new one in 1.1.0.
 - A brief stutter on pause and resume, and a fragment of the previous track after switching tracks by hand, can still be heard. Both have been seen on Linux and macOS; the cause is not yet known.
 
 ## [1.0.0] - 2026-10-31
