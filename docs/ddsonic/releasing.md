@@ -114,13 +114,29 @@ This consolidates requirements that already exist, with their sources. It adds n
 - [ ] **Linux live and human acceptance** (owner, on Titan), including what [acceptance.md](acceptance.md#owed-by-the-next-candidates-live-and-platform-acceptance) records as owed. The gate rules apply: only `pass` is a pass, BLOCKER and HIGH block publication, an unfixed MEDIUM needs the owner's written waiver, nothing may remain `investigate`.
 - [ ] **#121**, Linux notices (mandatory): the generated `THIRD_PARTY_NOTICES`, both inside `ddsonic-<v>-linux-amd64.tar.gz` and as `ddsonic-<v>-THIRD_PARTY_NOTICES.txt`, contain the notice of mpg123's `src/libmpg123/icy2utf8.c` byte for byte. The Docker release image was never run for the change, so until this is recorded on #121 the packaging path is not validated. Compare against the original file in the pinned archive (`native/` of the source archive):
 
+  Run it from the extracted source archive's directory (the one holding `native/`), once for `THIRD_PARTY_NOTICES` taken out of the binary archive and once for the standalone `.txt`, with `"$NOTICES"` set to that file's path:
+
   ```sh
   sha256sum native/mpg123-1.32.6.tar.bz2   # must equal MPG123_SHA256 in packaging/Dockerfile
   tar -xOjf native/mpg123-1.32.6.tar.bz2 mpg123-1.32.6/src/libmpg123/icy2utf8.c |
       awk '$0 == "/*-" { on = 1; next } on && $0 == " *-" { exit } on' > icy.expected
-  python3 -I -c 'import sys; n = open(sys.argv[1], "rb").read(); e = open("icy.expected", "rb").read(); h = b"mpg123: src/libmpg123/icy2utf8.c\n"; ok = len(e) > 0 and n.count(h) == 1 and n.count(e) == 1; print("expected bytes", len(e), "| header", n.count(h), "| notice", n.count(e), "|", "OK" if ok else "FAIL"); sys.exit(0 if ok else 1)' <notices file>
+  python3 -I - "$NOTICES" <<'PY'
+  import sys
+  SEP = "=" * 80  # the line packaging/notices.sh prints above every section heading
+  lines = open(sys.argv[1], "rb").read().decode("utf-8").split("\n")
+  exp = open("icy.expected", "rb").read().decode("utf-8").rstrip("\n").split("\n")
+  heads = [i for i, l in enumerate(lines) if l == "mpg123: src/libmpg123/icy2utf8.c" and i and lines[i - 1] == SEP]
+  def hits(seq): return [k for k in range(len(seq) - len(exp) + 1) if seq[k:k + len(exp)] == exp]
+  ok, inside = False, 0
+  if exp != [""] and len(heads) == 1:
+      end = next((j for j in range(heads[0] + 1, len(lines)) if lines[j] == SEP), len(lines))
+      inside = len(hits(lines[heads[0] + 1:end]))
+      ok = inside == 1 and len(hits(lines)) == 1
+  print("expected lines", len(exp), "| headings", len(heads), "| notice in its section", inside, "| notice anywhere", len(hits(lines)), "|", "OK" if ok else "FAIL")
+  sys.exit(0 if ok else 1)
+  PY
   ```
 
-  Expected: `OK` (a non-empty expected notice, the header once, the notice once) for each of the two files; also compare the notice with lines 8 to 24 of the original file.
+  Expected: `OK`: a non-empty expected notice, exactly one complete heading line, and exactly one unchanged notice block, at line boundaries, inside that section and nowhere else. Also compare the notice with lines 8 to 24 of the original file.
 - [ ] **#88**, Apple Silicon macOS qualification (target: macOS 13 or later on Apple Silicon; Intel is out of scope; signing and notarization are not prerequisites). Criteria 5 to 7 as recorded on #88: one acceptance run on the release candidate using the CI package job's artifacts (checksum, extraction, install, launch, one local file, one radio stream, clean quit); the install text states the signing and Gatekeeper limits accurately (a text check); ddsonic cleans up yt-dlp's processes and temporary files on macOS in real use, as a fail-closed count check inside that run (both counts zero before and after). The owner runs it on the physical Mac. The macOS download-reliability concern stays on #88 and is revisited if the real packaging workflow meets it.
 - [ ] **Publication** stays with the owner: check the draft, then publish by hand; commit the acceptance summary into the release record.
