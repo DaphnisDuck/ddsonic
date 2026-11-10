@@ -247,6 +247,14 @@ Areas with no case at all. Listed so that their absence is a decision and not an
 - macOS. The scripted cases need Linux's network namespaces and are blocked elsewhere.
 - CI. The binary lane runs locally; it is not in the workflows.
 
+## Decoder items: corrections (2026-11-10)
+
+The two decoder items under [Owed by the next candidate's live and platform acceptance](#owed-by-the-next-candidates-live-and-platform-acceptance) stay as the owner set them on 2026-10-13, and what they ask to be measured is unchanged and still owed. Two of their statements of fact are corrected here:
+
+- **MP3.** "ddsonic does not close a track's decoder when the track ends" is out of date for Spotify's MP3 and FLAC decoders. In v1.0.0 and on `main` they are closed on every path: a stream that was never accepted when it is disposed of (`releaseDecoder` in `external/spotify/playback_ddsonic.go`), an accepted one when its streamer closes (`spotifyStreamer.Close` in `external/spotify/streamer.go`). The measurement shows whether that holds on a real candidate.
+- **MP3 on Local.** Local MP3 files are decoded in pure Go (`github.com/gopxl/beep/v2/mp3`, through `player/decode.go`), not by go-librespot's MP3 decoder, which uses mpg123. A Local MP3 run is a different path and cannot stand in for the Spotify MP3 measurement; that one needs Spotify tracks delivered as MP3.
+- **Vorbis.** The retention is not limited to streams that were never accepted. ddsonic closes no Spotify Vorbis decoder, accepted or not (`releaseDecoder`, and `spotifyStreamer.Close`, which closes only MP3 and FLAC), so under the current cleanup policy every opened Vorbis decoder stays retained until the program exits. v1.0.0 behaves the same. About 141 KiB per open was observed with a test fixture and the host's libvorbis; that is not an established cost for every platform, and it was not measured on a release binary.
+
 ## Changing the basis of the evidence
 
 A case, its runner, a fixture, a semantics row and the harness are what a result means. Changing any of them changes what was proved:
