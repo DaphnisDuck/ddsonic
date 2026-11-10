@@ -92,6 +92,9 @@ func TestBinaryNeverInstallsYtdlp(t *testing.T) {
 		}{{"shipped", shipped, false}, {"with a pool", pooled, true}} {
 			t.Run(tt.name+", "+build.name, func(t *testing.T) {
 				stderr, log := runWithoutYtdlp(t, build.bin, tt.config)
+				if strings.Contains(stderr, "control socket") {
+					t.Fatalf("ddsonic stopped before the yt-dlp check:\n%s", stderr)
+				}
 				if tt.ownCreds || build.pool {
 					if !strings.Contains(stderr, "YouTube needs yt-dlp") {
 						t.Errorf("no install instructions on stderr:\n%s", stderr)
@@ -117,7 +120,14 @@ func TestBinaryNeverInstallsYtdlp(t *testing.T) {
 func runWithoutYtdlp(t *testing.T, ddsonic, config string) (stderr, log string) {
 	t.Helper()
 	bin, log := fakeInstallers(t)
-	dir := t.TempDir()
+	// The config directory holds the control socket, so its path must be
+	// short: macOS's t.TempDir (under /var/folders, with the test's name) is
+	// past the socket limit, and ddsonic would stop before the yt-dlp check.
+	dir, err := os.MkdirTemp("/tmp", "dd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
