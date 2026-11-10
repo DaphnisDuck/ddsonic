@@ -140,14 +140,17 @@ func (m *Model) libSleepCommand(e library.Entry) {
 // sleepRemote runs before Update handles msg: an MPRIS or IPC volume or
 // transport command is a command like a key's.
 func (m *Model) sleepRemote(msg tea.Msg) {
-	if (m.sleep.fading || m.sleep.pausePending) && sleepRemoteCommand(msg) {
+	if (m.sleep.fading || m.sleep.pausePending) && m.sleepRemoteCommand(msg) {
 		m.sleepCommand()
 	}
 }
 
 // sleepRemoteCommand reports whether msg is a volume or transport command
-// from MPRIS or IPC.
-func sleepRemoteCommand(msg tea.Msg) bool {
+// from MPRIS or IPC: anything that sets the volume, pauses, plays, stops,
+// skips or seeks, including the queue operations that stop playback
+// (clearing the queue, removing the playing track) or start it. Reading,
+// enqueueing and moving do not count.
+func (m *Model) sleepRemoteCommand(msg tea.Msg) bool {
 	switch msg := msg.(type) {
 	case playback.PlayPauseMsg, playback.PlayMsg, playback.PauseMsg, playback.StopMsg,
 		playback.NextMsg, playback.PrevMsg, playback.SeekMsg, playback.SetPositionMsg,
@@ -155,6 +158,8 @@ func sleepRemoteCommand(msg tea.Msg) bool {
 		return true
 	case ipc.URLRequestMsg:
 		return msg.Play
+	case ipc.QueueRequestMsg: // the older IPC protocol (ipc_extended.go)
+		return m.sleepQueueCommand(msg.Op, msg.Index)
 	case V2RequestMsg:
 		request, err := v2OperationRequest(msg.Request)
 		if err != nil {
@@ -162,12 +167,24 @@ func sleepRemoteCommand(msg tea.Msg) bool {
 		}
 		switch request.Cmd {
 		case "play", "pause", "toggle", "stop", "next", "prev",
-			"volume", "volume.adjust", "seek", "seek.absolute",
-			"track.play", "queue.play", "load":
+			"volume", "volume.adjust", "seek", "seek.absolute", "load":
 			return true
 		case "url.load":
 			return request.Play
 		}
+		return m.sleepQueueCommand(request.Cmd, request.Index)
+	}
+	return false
+}
+
+// sleepQueueCommand reports whether a queue operation stops or starts
+// playback.
+func (m *Model) sleepQueueCommand(op string, index int) bool {
+	switch op {
+	case "queue.play", "track.play", "queue.clear":
+		return true
+	case "queue.remove":
+		return m.playlist != nil && index == m.playlist.Index()
 	}
 	return false
 }

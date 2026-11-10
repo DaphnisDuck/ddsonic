@@ -31,6 +31,7 @@ func (m *Model) appendTracksToPlaylist(tracks []playlist.Track, what string) tea
 	}
 	if wasEmpty {
 		// An empty playlist has nothing playing to protect, so start there.
+		m.sleepCommand() // ddsonic: adding starts playback: a transport command (sleep_ddsonic.go)
 		m.plCursor = 0
 		m.playlist.SetIndex(0)
 		m.adjustScroll()

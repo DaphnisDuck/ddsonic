@@ -202,6 +202,7 @@ func (m *Model) appendTrack(track playlist.Track) tea.Cmd {
 	idx := m.playlist.Len() - 1
 	m.status.Showf(statusTTLMedium, "Added: %s", track.DisplayName())
 	if wasEmpty || !m.player.IsPlaying() {
+		m.sleepCommand() // ddsonic: adding starts playback: a transport command (sleep_ddsonic.go)
 		m.playlist.SetIndex(idx)
 		m.plCursor = idx
 		m.adjustScroll()
@@ -242,6 +243,7 @@ func (m *Model) appendAlbum(album playlist.Track, tracks []playlist.Track) tea.C
 	m.addToHeaderState(tracks)
 	m.status.Showf(statusTTLMedium, "Added album: %s (%d tracks)", album.Title, len(tracks))
 	if wasEmpty || !m.player.IsPlaying() {
+		m.sleepCommand() // ddsonic: adding starts playback: a transport command (sleep_ddsonic.go)
 		m.playlist.SetIndex(idx)
 		m.plCursor = idx
 		m.adjustScroll()
@@ -386,6 +388,7 @@ func (m *Model) removeSelectedFromPlaylist() {
 	m.normalizeQueueOverlay()
 	m.armPlaylistUndo(playlistUndo{snapshot: snapshot, loaded: loaded, saved: saved, persisted: persisted}) // ddsonic: #22
 	if wasActive {
+		m.sleepCommand() // ddsonic: removing the playing track stops it (sleep_ddsonic.go)
 		m.stopPlayback()
 		m.player.ClearPreload()
 	}

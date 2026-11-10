@@ -675,6 +675,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status.Warning("No episodes found in feed.", statusTTLDefault)
 			return m, nil
 		}
+		m.sleepCommand() // ddsonic: the chosen episode replaces the queue and plays (sleep_ddsonic.go)
 		m.retireTracksPaging()
 		m.replacePlaylist(msg.tracks)
 		m.loadedPlaylist = ""
@@ -710,6 +711,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// need to re-scan pendingURLs (which misses interactive loads).
 			batchCmd := m.initYTDLBatch(msg.urls)
 			if msg.autoPlay && m.playlist.Len() > 0 && !m.player.IsPlaying() {
+				m.sleepCommand() // ddsonic: loading starts playback (sleep_ddsonic.go)
 				playCmd := m.playCurrentTrack()
 				m.notifyAll()
 				if batchCmd != nil {
@@ -806,6 +808,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status.Successf(statusTTLDefault, "Added %d track(s)", len(msg.tracks))
 		}
 		if !m.player.IsPlaying() && m.playlist.Len() > 0 {
+			m.sleepCommand() // ddsonic: the chosen files play (sleep_ddsonic.go)
 			if msg.replace {
 				m.playlist.SetIndex(0)
 			}

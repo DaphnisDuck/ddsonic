@@ -577,6 +577,7 @@ func (m *Model) handleNavTrackListKey(msg tea.KeyPressMsg) tea.Cmd {
 			m.addToHeaderState(tracks)
 			m.status.Showf(statusTTLMedium, "Added %d tracks", len(tracks))
 			if wasEmpty || !m.player.IsPlaying() {
+				m.sleepCommand() // ddsonic: a transport command (sleep_ddsonic.go)
 				m.playlist.SetIndex(0)
 				cmd := m.playCurrentTrack()
 				m.notifyPlayback()
@@ -599,6 +600,7 @@ func (m *Model) handleNavTrackListKey(msg tea.KeyPressMsg) tea.Cmd {
 			m.normalizeQueueOverlay()
 			m.status.Showf(statusTTLMedium, "Queued: %s", t.DisplayName())
 			if !m.player.IsPlaying() {
+				m.sleepCommand() // ddsonic: a transport command (sleep_ddsonic.go)
 				cmd := m.nextTrack()
 				m.notifyPlayback()
 				return cmd
@@ -650,6 +652,7 @@ func (m *Model) replacePlaylistFromNav() tea.Cmd {
 	if len(tracks) == 0 {
 		return nil
 	}
+	m.sleepCommand() // ddsonic: a transport command (sleep_ddsonic.go)
 	m.player.Stop()
 	m.player.ClearPreload()
 	m.resetYTDLBatch()

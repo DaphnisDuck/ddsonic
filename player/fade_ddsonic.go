@@ -3,13 +3,22 @@
 // changes Volume(), so the volume shown in the UI, sent over MPRIS and IPC,
 // and saved stays what the user set.
 //
-// A fade is anchored to wall time, not to how many samples have played: the
-// UI names the moment the fade must end, and each buffer's gain comes from
-// the clock when the buffer is processed, sample by sample. A stalled
-// decoder, a late command or a slow tick cannot make the fade end late: any
-// sample processed at or after the end is multiplied by exactly the target
-// gain. What the guarantee covers is processing time; the audio device
-// plays a buffer some milliseconds later (its own buffer latency).
+// Time in the fade is an audio-time cursor: the instant of the next sample
+// to be processed. It advances by one sample's duration per sample, so the
+// gain is smooth across buffers however the audio thread pulls them (in
+// bursts ahead of real time, or with the clock not moving between pulls).
+// The cursor is reconciled with the wall clock only forward: when the
+// clock is ahead of it (a stall, a pause, the first buffer), it jumps to
+// the clock; it never moves back. So a fade-out still reaches exactly zero
+// for every sample processed at or after its end by the clock, and may
+// reach it a little earlier when audio is read ahead, never later. The
+// guarantee is about processing time; the audio device plays a buffer some
+// milliseconds after it is processed (its own latency).
+//
+// A new command takes effect at the cursor where the audio thread picks it
+// up: its ramp starts there, from the gain the previous command had there,
+// so a change never steps the level. A fade-out ends at the instant it
+// names; a cancel ramps back to normal over cancelFadeRamp from pickup.
 //
 // Cost on the audio path: with no fade, one atomic load and a branch per
 // buffer; during a ramp, a clock read per buffer and a few float operations
@@ -26,12 +35,15 @@ import (
 // normal: short enough to feel immediate, long enough not to click.
 const cancelFadeRamp = 50 * time.Millisecond
 
-// fadeCmd is one fade command: ramp the gain from wherever it is to `to`,
-// reaching it at `end` (wall time). Commands are never changed once sent.
+// fadeCmd is one fade command: ramp the gain to `to`, from wherever it is
+// when the audio thread picks the command up. The ramp ends at `end` (wall
+// time) when end is set, else `ramp` after pickup. Commands are never
+// changed once sent.
 type fadeCmd struct {
-	to         float64
-	start, end time.Time     // the ramp; end <= start is at once
-	step       time.Duration // one sample's duration at the output rate
+	to   float64
+	end  time.Time
+	ramp time.Duration
+	step time.Duration // one sample's duration at the output rate
 }
 
 // fadeGain is the fade stage. Its zero value is unity gain.
@@ -40,9 +52,11 @@ type fadeGain struct {
 	now func() time.Time        // the clock; nil is time.Now (tests set it)
 
 	// The audio goroutine's own state.
-	applied *fadeCmd // the command in effect; nil is unity
-	from    float64  // the gain when applied arrived
-	settled bool     // applied has reached `to` and `to` is unity
+	applied    *fadeCmd  // the command in effect; nil is unity
+	from, to   float64   // the ramp's gains
+	start, end time.Time // the ramp, in audio time
+	cursor     time.Time // the next sample's instant; never moves back
+	settled    bool      // the ramp has reached `to` and `to` is unity
 }
 
 func (f *fadeGain) clock() time.Time {
@@ -52,15 +66,14 @@ func (f *fadeGain) clock() time.Time {
 	return time.Now()
 }
 
-// gainAt is the gain under the applied command `left` before its end.
-func (f *fadeGain) gainAt(left time.Duration) float64 {
-	c := f.applied
-	if c == nil {
+// gain is the gain `left` before the ramp's end.
+func (f *fadeGain) gain(left time.Duration) float64 {
+	if f.applied == nil {
 		return 1
 	}
-	span := c.end.Sub(c.start)
+	span := f.end.Sub(f.start)
 	if left <= 0 || span <= 0 {
-		return c.to
+		return f.to
 	}
 	if left >= span {
 		return f.from
@@ -69,7 +82,7 @@ func (f *fadeGain) gainAt(left time.Duration) float64 {
 	// the ear: most of the drop in level comes early, and the end is a
 	// gentle tail into silence rather than a sudden cut.
 	x := float64(left) / float64(span)
-	return c.to + (f.from-c.to)*x*x
+	return f.to + (f.from-f.to)*x*x
 }
 
 // apply multiplies samples by the fade gain. It runs on the audio
@@ -82,53 +95,49 @@ func (f *fadeGain) apply(samples [][2]float64) {
 	if c == f.applied && (c == nil || f.settled) {
 		return
 	}
-	now := f.clock()
-	if c != f.applied {
-		f.from = f.gainAt(f.leftAt(now))
-		f.applied, f.settled = c, false
+	if now := f.clock(); now.After(f.cursor) {
+		f.cursor = now // forward only: after a stall, a pause, or at first
 	}
-	left := c.end.Sub(now)
+	if c != f.applied {
+		f.from = f.gain(f.end.Sub(f.cursor))
+		f.applied, f.to, f.start, f.settled = c, c.to, f.cursor, false
+		f.end = c.end
+		if c.end.IsZero() {
+			f.end = f.cursor.Add(c.ramp)
+		}
+	}
+	left := f.end.Sub(f.cursor)
 	for i := range samples {
-		g := f.gainAt(left - time.Duration(i)*c.step)
+		g := f.gain(left - time.Duration(i)*c.step)
 		samples[i][0] *= g
 		samples[i][1] *= g
 	}
-	f.settled = c.to == 1 && left-time.Duration(len(samples))*c.step <= 0
-}
-
-// leftAt is how long before the applied command's end `now` is.
-func (f *fadeGain) leftAt(now time.Time) time.Duration {
-	if f.applied == nil {
-		return 0
-	}
-	return f.applied.end.Sub(now)
+	advance := time.Duration(len(samples)) * c.step
+	f.cursor = f.cursor.Add(advance)
+	f.settled = f.to == 1 && left-advance <= 0
 }
 
 // send hands the audio goroutine a new command.
-func (f *fadeGain) send(to float64, start, end time.Time, step time.Duration) {
-	f.cmd.Store(&fadeCmd{to: to, start: start, end: end, step: step})
-}
+func (f *fadeGain) send(c fadeCmd) { f.cmd.Store(&c) }
 
-// FadeOutUntil ramps the output down from the level it is at now to
-// silence at end, measured by the clock. At and after end the output is
-// silent until the fade is cancelled or reset, including after a pause and
-// a resume. The user's volume is not changed.
+// FadeOutUntil ramps the output down, from the level it is at, to silence
+// at end by the clock. From end on the output is silent until the fade is
+// cancelled or reset, including after a pause and a resume. The user's
+// volume is not changed.
 func (p *Player) FadeOutUntil(end time.Time) {
-	now := p.fade.clock()
-	p.fade.send(0, now, end, p.sampleStep())
+	p.fade.send(fadeCmd{to: 0, end: end, step: p.sampleStep()})
 }
 
-// CancelFade brings the output back to normal over a short ramp.
+// CancelFade brings the output back to normal over cancelFadeRamp, from
+// the level it is at when the audio thread picks the command up.
 func (p *Player) CancelFade() {
-	now := p.fade.clock()
-	p.fade.send(1, now, now.Add(cancelFadeRamp), p.sampleStep())
+	p.fade.send(fadeCmd{to: 1, ramp: cancelFadeRamp, step: p.sampleStep()})
 }
 
 // ResetFade brings the output back to normal at once: for when playback is
 // paused or stopped, and the next sound is a fresh start anyway.
 func (p *Player) ResetFade() {
-	now := p.fade.clock()
-	p.fade.send(1, now, now, p.sampleStep())
+	p.fade.send(fadeCmd{to: 1, step: p.sampleStep()})
 }
 
 // sampleStep is one sample's duration at the output rate.

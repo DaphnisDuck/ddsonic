@@ -585,10 +585,13 @@ func TestSleepLibraryCommandsDuringTheFade(t *testing.T) {
 
 // IPC and MPRIS operations, as sleepRemoteCommand classifies them.
 func TestSleepRemoteCommands(t *testing.T) {
+	m := newSleepRig(t, 0).m // playing track 2 of 3 (index 1)
+	sleepRemoteCommand := m.sleepRemoteCommand
 	commands := []string{"player.play", "player.pause", "player.toggle", "player.stop", "player.next", "player.prev",
 		"player.previous", "player.volume.set", "player.volume.adjust", "player.seek.relative", "player.seek.absolute",
 		"runtime.play", "runtime.pause", "runtime.toggle", "runtime.stop", "runtime.next", "runtime.prev",
-		"runtime.volume", "runtime.seek", "runtime.playlist.play", "runtime.queue.play"}
+		"runtime.volume", "runtime.seek", "runtime.playlist.play", "runtime.queue.play",
+		"runtime.playlist.clear", "runtime.queue.clear"}
 	for _, op := range commands {
 		if !sleepRemoteCommand(v2(t, op, "")) {
 			t.Errorf("%s is not a command", op)
@@ -602,6 +605,19 @@ func TestSleepRemoteCommands(t *testing.T) {
 	}
 	if !sleepRemoteCommand(v2(t, "url.load", `{"path":"x","play":true}`)) || sleepRemoteCommand(v2(t, "url.load", `{"path":"x"}`)) {
 		t.Error("url.load is a command exactly when it plays")
+	}
+	if !sleepRemoteCommand(v2(t, "runtime.playlist.remove", `{"index":1}`)) || sleepRemoteCommand(v2(t, "runtime.playlist.remove", `{"index":2}`)) {
+		t.Error("queue.remove is a command exactly when it removes the playing track")
+	}
+	for _, q := range []struct {
+		op    string
+		index int
+		want  bool
+	}{{"queue.play", 0, true}, {"track.play", 0, true}, {"queue.clear", 0, true}, {"queue.remove", 1, true},
+		{"queue.remove", 0, false}, {"queue.enqueue", 2, false}, {"track.queue", 0, false}, {"queue.move", 0, false}, {"queue.list", 0, false}} {
+		if got := sleepRemoteCommand(ipc.QueueRequestMsg{Op: q.op, Index: q.index}); got != q.want {
+			t.Errorf("older IPC %s %d: command %v, want %v", q.op, q.index, got, q.want)
+		}
 	}
 	for _, m := range []tea.Msg{playback.PlayMsg{}, playback.PauseMsg{}, playback.PlayPauseMsg{}, playback.StopMsg{},
 		playback.NextMsg{}, playback.PrevMsg{}, playback.SeekMsg{}, playback.SetPositionMsg{}, playback.SetVolumeMsg{}} {
@@ -782,5 +798,83 @@ func TestSleepWithoutAFader(t *testing.T) {
 	r.tick(15 * time.Minute)
 	if !plain.paused {
 		t.Error("did not pause")
+	}
+}
+
+// The other paths that stop playback, or replace the queue and start it,
+// are commands during the fade too; adding or queueing while something
+// plays is not. "stopped" is the queue having ended on its own during the
+// fade, so that adding would start playback.
+func TestSleepQueueCommandsDuringTheFade(t *testing.T) {
+	stopped := func(r *sleepRig) { r.e.playing = false }
+	tests := []struct {
+		name    string
+		prep    func(r *sleepRig)
+		do      func(r *sleepRig)
+		cancels bool
+	}{
+		{"X clears the queue", nil, func(r *sleepRig) { r.m.libClearQueue() }, true},
+		{"x on the playing row", nil, func(r *sleepRig) { r.m.plCursor = 1; r.m.removeSelectedFromPlaylist() }, true},
+		{"x on another row", nil, func(r *sleepRig) { r.m.plCursor = 2; r.m.removeSelectedFromPlaylist() }, false},
+		{"playlist manager plays a list", nil, func(r *sleepRig) {
+			r.m.plManager.tracks = tracksOf("p1", "p2")
+			r.m.plMgrLoadAndPlay(0)
+		}, true},
+		{"browser replaces the queue", nil, func(r *sleepRig) {
+			r.m.navBrowser.tracks = tracksOf("n1", "n2")
+			r.m.replacePlaylistFromNav()
+		}, true},
+		{"browser adds all, stopped", stopped, func(r *sleepRig) {
+			r.m.navBrowser.tracks = tracksOf("n1", "n2")
+			r.m.handleNavTrackListKey(libKey("a"))
+		}, true},
+		{"browser adds all while playing", nil, func(r *sleepRig) {
+			r.m.navBrowser.tracks = tracksOf("n1", "n2")
+			r.m.handleNavTrackListKey(libKey("a"))
+		}, false},
+		{"browser queues one, stopped", stopped, func(r *sleepRig) {
+			r.m.navBrowser.tracks = tracksOf("n1")
+			r.m.handleNavTrackListKey(libKey("q"))
+		}, true},
+		{"browser queues one while playing", nil, func(r *sleepRig) {
+			r.m.navBrowser.tracks = tracksOf("n1")
+			r.m.handleNavTrackListKey(libKey("q"))
+		}, false},
+		{"add a track, stopped", stopped, func(r *sleepRig) { r.m.appendTrack(playlist.Track{Path: "x"}) }, true},
+		{"add a track while playing", nil, func(r *sleepRig) { r.m.appendTrack(playlist.Track{Path: "x"}) }, false},
+		{"add an album, stopped", stopped, func(r *sleepRig) { r.m.appendAlbum(playlist.Track{Path: "al"}, tracksOf("x", "y")) }, true},
+		{"add an album while playing", nil, func(r *sleepRig) { r.m.appendAlbum(playlist.Track{Path: "al"}, tracksOf("x", "y")) }, false},
+		{"files chosen to replace the queue", nil, func(r *sleepRig) { r.send(fbTracksResolvedMsg{tracks: tracksOf("f1"), replace: true}) }, true},
+		{"files added while playing", nil, func(r *sleepRig) { r.send(fbTracksResolvedMsg{tracks: tracksOf("f1")}) }, false},
+		{"files added, stopped", stopped, func(r *sleepRig) { r.send(fbTracksResolvedMsg{tracks: tracksOf("f1")}) }, true},
+		{"feeds loaded to play, stopped", stopped, func(r *sleepRig) { r.send(feedsLoadedMsg{tracks: tracksOf("e1"), autoPlay: true}) }, true},
+		{"feeds loaded while playing", nil, func(r *sleepRig) { r.send(feedsLoadedMsg{tracks: tracksOf("e1"), autoPlay: true}) }, false},
+		{"an episode chosen from a feed", nil, func(r *sleepRig) { r.send(feedTrackResolvedMsg{tracks: tracksOf("e1")}) }, true},
+		{"IPC clears the queue", nil, func(r *sleepRig) { r.send(v2(r.t, "runtime.playlist.clear", "")) }, true},
+		{"IPC removes the playing track", nil, func(r *sleepRig) { r.send(v2(r.t, "runtime.playlist.remove", `{"index":1}`)) }, true},
+		{"IPC removes another track", nil, func(r *sleepRig) { r.send(v2(r.t, "runtime.playlist.remove", `{"index":2}`)) }, false},
+		{"IPC enqueues", nil, func(r *sleepRig) { r.send(v2(r.t, "runtime.queue.enqueue", `{"index":2}`)) }, false},
+		{"older IPC clears the queue", nil, func(r *sleepRig) {
+			r.send(ipc.QueueRequestMsg{Op: "queue.clear", Reply: make(chan ipc.Response, 1)})
+		}, true},
+		{"older IPC enqueues", nil, func(r *sleepRig) {
+			r.send(ipc.QueueRequestMsg{Op: "queue.enqueue", Index: 2, Reply: make(chan ipc.Response, 1)})
+		}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newSleepRig(t, 30*time.Second)
+			r.fading()
+			if tt.prep != nil {
+				tt.prep(r)
+			}
+			tt.do(r)
+			if cancelled := !r.armed() && !r.m.sleep.fading; cancelled != tt.cancels {
+				t.Fatalf("cancelled %v, want %v (fades %q)", cancelled, tt.cancels, r.e.fades)
+			}
+			if tt.cancels && !slices.Equal(r.e.fades, []string{"until 15m0s", "cancel"}) {
+				t.Errorf("fades %q, want the fade cancelled", r.e.fades)
+			}
+		})
 	}
 }
