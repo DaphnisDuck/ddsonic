@@ -162,13 +162,13 @@ func (m *Model) libHeaderLine() string {
 	if ol, ok := f.level.(library.OrderedLevel); ok {
 		label += " · " + ol.OrderName()
 	}
-	if badge := joinHeaderBadges(m.libSyncBadge(), m.sleepBadge()); badge != "" { // ddsonic: and the sleep timer
+	if badge := m.libSyncBadge(); badge != "" {
 		label += "  " + badge
 	}
 	if _, pending := m.libPending(f); (f.loading() && len(f.entries) == 0) || f.err != nil || pending {
-		return sepHeader(label)
+		return m.sleepSepHeader(label) // with the sleep timer's countdown kept whole (sleep_ddsonic.go)
 	}
-	return sepHeaderN(label, f.cursor+1, len(f.entries))
+	return m.sleepSepHeader(sepLabelN(label, f.cursor+1, len(f.entries)))
 }
 
 // libSyncBadge is the small catalog sync indicator: ↻ while syncing, the

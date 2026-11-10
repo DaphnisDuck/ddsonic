@@ -639,6 +639,7 @@ func (m *Model) libraryActivate() tea.Cmd {
 	}
 	e := f.entries[f.cursor]
 	source := cmp.Or(e.Source, f.source)
+	m.libSleepCommand(e) // a row that plays is a transport command (sleep_ddsonic.go)
 	switch {
 	case e.Open != nil:
 		if sl, ok := e.Open.(library.SearchLevel); ok {
@@ -684,6 +685,7 @@ func (m *Model) retireLibraryPlay() { m.lib.playGen = 0 }
 // plugin). Unlike the automatic advance at a track's end, it is a newer
 // intent, so it retires a pending library play.
 func (m *Model) skipByUser(next bool) tea.Cmd {
+	m.sleepCommand() // a transport command (sleep_ddsonic.go)
 	m.retireLibraryPlay()
 	if next {
 		return m.nextTrack()

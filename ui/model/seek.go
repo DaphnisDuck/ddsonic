@@ -48,6 +48,7 @@ func (m *Model) streamSeekAbsolute(target time.Duration) tea.Cmd {
 }
 
 func (m *Model) seekRelative(d time.Duration, debounceTicks int) tea.Cmd {
+	m.sleepCommand() // ddsonic: a transport command (sleep_ddsonic.go)
 	if m.player.IsStreamSeek() {
 		return m.streamSeekRelative(d)
 	}
@@ -75,6 +76,7 @@ func (m *Model) needsDebouncedSeek() bool {
 }
 
 func (m *Model) seekAbsolute(target time.Duration) tea.Cmd {
+	m.sleepCommand() // ddsonic: a transport command (sleep_ddsonic.go)
 	if m.player.IsStreamSeek() {
 		return m.streamSeekAbsolute(target)
 	}

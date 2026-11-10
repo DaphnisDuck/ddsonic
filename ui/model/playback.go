@@ -177,7 +177,7 @@ func (m *Model) playCurrentTrack() tea.Cmd {
 // playTrackImmediate appends a track to the playlist and starts playing it now,
 // stopping any current playback. Used by search-result "Play now" actions.
 func (m *Model) playTrackImmediate(track playlist.Track) tea.Cmd {
-	m.retireLibraryPlay() // ddsonic: every caller is an explicit play
+	m.chooseTrack() // ddsonic: every caller is an explicit play
 	m.player.Stop()
 	m.player.ClearPreload()
 	m.playlist.Add(track)
@@ -216,7 +216,7 @@ func (m *Model) appendTrack(track playlist.Track) tea.Cmd {
 // its first track. Like playTrackImmediate it adds rather than replaces, so a
 // queue built up over an evening survives picking an album from search.
 func (m *Model) playAlbumImmediate(album playlist.Track, tracks []playlist.Track) tea.Cmd {
-	m.retireLibraryPlay() // ddsonic: every caller is an explicit play
+	m.chooseTrack() // ddsonic: every caller is an explicit play
 	m.player.Stop()
 	m.player.ClearPreload()
 	idx := m.playlist.Len()
@@ -621,6 +621,7 @@ func (m *Model) fetchLyricsForTrack(track playlist.Track, artist, title string) 
 // For live streams and long-paused yt-dlp streams, unpausing reconnects instead
 // of playing stale data sitting in OS/decoder buffers from before the pause.
 func (m *Model) togglePlayPause() tea.Cmd {
+	m.sleepCommand() // ddsonic: a transport command (sleep_ddsonic.go)
 	if m.buffering {
 		return nil
 	}

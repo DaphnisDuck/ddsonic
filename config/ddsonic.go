@@ -18,6 +18,10 @@ const (
 	// DefaultSleepFade is the sleep timer's fade-out unless the config
 	// says otherwise.
 	DefaultSleepFade = 30 * time.Second
+	// MaxSleepFadeSeconds is the longest fade sleep_fade_seconds may ask
+	// for: an hour, more than the longest timer needs. A larger value
+	// keeps the default, like any other invalid one.
+	MaxSleepFadeSeconds = 3600
 )
 
 // DdsonicConfig is the [ddsonic] section.
@@ -65,7 +69,7 @@ func (c *DdsonicConfig) parseKey(key, val string) {
 	case "netease_lyrics":
 		setBool(&c.NetEaseLyrics, val)
 	case "sleep_fade_seconds":
-		setSeconds(&c.SleepFade, val)
+		setSeconds(&c.SleepFade, val, MaxSleepFadeSeconds)
 	}
 }
 
@@ -87,10 +91,11 @@ func setBool(b *bool, val string) {
 	}
 }
 
-// setSeconds sets d from a whole number of seconds, keeping d when it is
-// invalid or negative.
-func setSeconds(d *time.Duration, val string) {
-	if v, err := strconv.Atoi(parseString(val)); err == nil && v >= 0 {
+// setSeconds sets d from a whole number of seconds up to maxSeconds,
+// keeping d when it is invalid, negative or too large. The bound comes
+// before the multiplication, so a huge value cannot overflow time.Duration.
+func setSeconds(d *time.Duration, val string, maxSeconds int) {
+	if v, err := strconv.Atoi(parseString(val)); err == nil && v >= 0 && v <= maxSeconds {
 		*d = time.Duration(v) * time.Second
 	}
 }

@@ -793,7 +793,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 				break
 			}
 			refresh := m.scrobbleCurrent()
-			m.retireLibraryPlay() // ddsonic: the chosen track wins over an album still loading
+			m.chooseTrack() // ddsonic: the chosen track wins over an album still loading, and is a command for the sleep timer
 			m.playlist.SetIndex(m.plCursor)
 			cmd := m.playCurrentTrack()
 			m.notifyPlayback()
@@ -801,11 +801,11 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 
 	case "+", "=":
-		m.player.SetVolume(m.player.Volume() + 1)
+		m.setVolumeByUser(m.player.Volume() + 1) // ddsonic: and a command for the sleep timer
 		m.notifyPlayback()
 
 	case "-":
-		m.player.SetVolume(m.player.Volume() - 1)
+		m.setVolumeByUser(m.player.Volume() - 1) // ddsonic: and a command for the sleep timer
 		m.notifyPlayback()
 
 	case "r":
@@ -1066,10 +1066,10 @@ func (m *Model) handleFullVisualizerKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "shift+right":
 		return m.doSeek(m.seekStepLarge)
 	case "+", "=":
-		m.player.SetVolume(m.player.Volume() + 1)
+		m.setVolumeByUser(m.player.Volume() + 1) // ddsonic: and a command for the sleep timer
 		m.notifyPlayback()
 	case "-":
-		m.player.SetVolume(m.player.Volume() - 1)
+		m.setVolumeByUser(m.player.Volume() - 1) // ddsonic: and a command for the sleep timer
 		m.notifyPlayback()
 	case "v":
 		m.vis.CycleMode()
@@ -1228,6 +1228,7 @@ func (m *Model) handleJumpKey(msg tea.KeyPressMsg) tea.Cmd {
 			m.status.Warning(m.jumpErr, statusTTLDefault)
 			return nil
 		}
+		m.sleepCommand() // ddsonic: a transport command (sleep_ddsonic.go)
 		if err := m.player.Seek(target - m.player.Position()); err != nil {
 			m.jumpErr = "Seek failed: " + err.Error()
 			m.status.Warning(m.jumpErr, statusTTLDefault)
@@ -1574,7 +1575,7 @@ func (m *Model) handleSearchKey(msg tea.KeyPressMsg) tea.Cmd {
 		var cmd tea.Cmd
 		if len(m.search.results) > 0 {
 			idx := m.search.results[m.search.cursor]
-			m.retireLibraryPlay() // ddsonic: the chosen track wins over an album still loading
+			m.chooseTrack() // ddsonic: the chosen track wins over an album still loading, and is a command for the sleep timer
 			m.playlist.SetIndex(idx)
 			m.plCursor = idx
 			cmd = m.playCurrentTrack()

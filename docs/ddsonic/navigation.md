@@ -119,8 +119,10 @@ Each view's keys come from one table in `ui/model/library_keymap.go`: the librar
 
 ## Sleep timer
 
-`Z` (Shift+Z) sets the sleep timer, in the library and the queue: each press steps through 15, 30, 45, 60 and 90 minutes, then off. Each choice counts from the moment you press it, so pressing again sets a new time from now. The header shows the time left (`[Sleep 23m]`, and seconds in the last minute).
+`Z` (Shift+Z) sets the sleep timer, in the library and the queue: each press steps through 15, 30, 45, 60 and 90 minutes, then off. Each choice counts from the moment you press it, so pressing again sets a new time from now. The header shows the time left (`[Sleep 23m]`, and seconds in the last minute); in a narrow window the header's other badges, or the library's path, give way to it first.
 
-When the time is up, playback pauses: the track, its position and the queue stay as they were, and `Space` resumes. For the last 30 seconds before that the music fades out, ending at the moment it pauses. The fade does not change your volume setting. Turning the timer off, or choosing another time, during the fade brings the sound straight back; so does changing the volume, pausing, stopping, skipping or seeking, which also turns the timer off. Changing tracks before the fade starts leaves the timer as it is. If playback is already paused or stopped when the time is up, the timer just ends.
+When the time is up, playback pauses: the track, its position and the queue stay as they were, and `Space` resumes. For the last 30 seconds before that the music fades out, reaching silence at the moment it pauses, by the clock, even if playback stalls during the fade. The fade does not change your volume setting. If a track is still starting when the time is up, it stays silent and pauses as soon as it has started. If playback is already paused or stopped, the timer just ends.
 
-The fade's length is `sleep_fade_seconds` in the `[ddsonic]` section of config.toml (default 30; `0` pauses without a fade). The timer is not kept when ddsonic quits.
+During the fade, turning the timer off or choosing another time brings the sound straight back. So does any volume or playback command, from a key, the media keys (MPRIS) or `ddsonic` commands: volume up or down (even at its limit), play, pause, stop, next, previous, seeking, or picking a track to play. These also turn the timer off. Moving around the lists, typing a search, and the queue moving on by itself do not. Before the fade starts, nothing but `Z` changes the timer.
+
+The fade's length is `sleep_fade_seconds` in the `[ddsonic]` section of config.toml: whole seconds from 0 (pause without a fade) to 3600, 30 by default; another value keeps the default. The timer is not kept when ddsonic quits.

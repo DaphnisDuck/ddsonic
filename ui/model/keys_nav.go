@@ -548,7 +548,7 @@ func (m *Model) handleNavTrackListKey(msg tea.KeyPressMsg) tea.Cmd {
 			m.loadedPlaylist = ""
 			m.addToHeaderState(toAdd)
 			newIdx := m.playlist.Len() - len(toAdd)
-			m.retireLibraryPlay() // ddsonic: the chosen track wins over an album still loading
+			m.chooseTrack() // ddsonic: the chosen track wins over an album still loading, and is a command for the sleep timer
 			m.playlist.SetIndex(newIdx)
 			m.plCursor = newIdx
 			m.adjustScroll()

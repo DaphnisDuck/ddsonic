@@ -4,13 +4,16 @@ package model
 // minutes; each choice counts from the moment it is made. When the time is
 // up, playback pauses: the track, its position and the queue stay, and
 // Space resumes. Before that the player fades out over [ddsonic]
-// sleep_fade_seconds (30 by default; 0 pauses without a fade), ending at
-// the deadline. The fade is the player's own gain (player/fade_ddsonic.go):
-// the user's volume never changes.
+// sleep_fade_seconds (30 by default; 0 pauses without a fade), reaching
+// silence at the deadline by the clock (player/fade_ddsonic.go). The fade
+// is the player's own gain: the user's volume never changes.
 //
 // The Model owns the timer and checks its deadline on the ticks the UI
-// already runs: no goroutine, so nothing to lock or race. Update calls in
-// through two hooks (sleepWatch before a message, sleepUpdate after it).
+// already runs: no goroutine, so nothing to lock or race. During a fade, a
+// volume or transport command from the user cancels the fade and the
+// timer: the handlers that carry out such commands call sleepCommand, and
+// MPRIS and IPC commands are recognised as they arrive (sleepRemote).
+// Automatic playback (a track ending and the next starting) never cancels.
 // The timer does not survive a restart.
 
 import (
@@ -18,21 +21,24 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/bjarneo/cliamp/internal/playback"
+	"github.com/bjarneo/cliamp/ipc"
+	"github.com/bjarneo/cliamp/library"
+	"github.com/bjarneo/cliamp/ui"
 )
 
 // sleepPresets are the durations Z steps through, after Off.
 var sleepPresets = []time.Duration{15 * time.Minute, 30 * time.Minute, 45 * time.Minute, 60 * time.Minute, 90 * time.Minute}
 
-// sleepSeekJump is how far the position must jump during one message for
-// the message to count as a seek.
-const sleepSeekJump = 1500 * time.Millisecond
-
 type sleepTimer struct {
 	preset   int       // 0 is off, else 1 + an index into sleepPresets
 	deadline time.Time // when playback pauses; zero when off
-	fading   bool      // the player is fading out toward the deadline
+	fading   bool      // the player's fade gain is ramping down or held at 0
+	// pausePending: the deadline passed while a track was starting; it is
+	// paused, silent, as soon as the start finishes.
+	pausePending bool
 
 	fade time.Duration    // how long the fade lasts; 0 is no fade (config)
 	now  func() time.Time // the clock; nil is time.Now (tests set it)
@@ -42,7 +48,7 @@ type sleepTimer struct {
 // asks for it rather than widening player.Engine; an engine without it
 // pauses at the deadline without a fade.
 type playerFader interface {
-	FadeOut(d time.Duration)
+	FadeOutUntil(end time.Time)
 	CancelFade()
 	ResetFade()
 }
@@ -66,7 +72,7 @@ func (m *Model) sleepFader() playerFader {
 // cycleSleepTimer is Z: the next preset, counted from now, or Off after the
 // last. A fade under way stops, smoothly.
 func (m *Model) cycleSleepTimer() {
-	m.stopSleepFade()
+	m.endSleepFade()
 	m.sleep.preset = (m.sleep.preset + 1) % (len(sleepPresets) + 1)
 	if m.sleep.preset == 0 {
 		m.sleep.deadline = time.Time{}
@@ -78,9 +84,10 @@ func (m *Model) cycleSleepTimer() {
 	m.status.Showf(statusTTLDefault, "Sleep timer: pausing in %d min", int(d/time.Minute))
 }
 
-// stopSleepFade brings the level back over a short ramp if a fade is under
-// way.
-func (m *Model) stopSleepFade() {
+// endSleepFade brings the level back over a short ramp if a fade is under
+// way, and drops a pause waiting for a track to start.
+func (m *Model) endSleepFade() {
+	m.sleep.pausePending = false
 	if !m.sleep.fading {
 		return
 	}
@@ -92,34 +99,130 @@ func (m *Model) stopSleepFade() {
 
 // clearSleep turns the timer off, keeping its configuration.
 func (m *Model) clearSleep() {
-	m.sleep.preset, m.sleep.deadline, m.sleep.fading = 0, time.Time{}, false
+	m.sleep.preset, m.sleep.deadline, m.sleep.fading, m.sleep.pausePending = 0, time.Time{}, false, false
+}
+
+// sleepCommand records a volume or transport command the user gave: during
+// a fade (or a pause waiting at the deadline) it cancels the fade and the
+// timer. Before the fade it changes nothing. Handlers call it when they
+// accept the command, whatever it then does: a volume already at its
+// limit, a Play while playing, a seek, a play that finishes later.
+func (m *Model) sleepCommand() {
+	if !m.sleep.fading && !m.sleep.pausePending {
+		return
+	}
+	m.endSleepFade()
+	m.clearSleep()
+	m.status.Showf(statusTTLDefault, "Sleep timer cancelled")
+}
+
+// setVolumeByUser is a volume command from a key.
+func (m *Model) setVolumeByUser(db float64) {
+	m.sleepCommand()
+	m.player.SetVolume(db)
+}
+
+// chooseTrack is a track the user picked to play now: it retires a library
+// play still loading and is a transport command for the sleep timer.
+func (m *Model) chooseTrack() {
+	m.sleepCommand()
+	m.retireLibraryPlay()
+}
+
+// libSleepCommand: Enter on a library row that plays is a transport
+// command; one that opens a list is navigation.
+func (m *Model) libSleepCommand(e library.Entry) {
+	if e.Open == nil && (e.Track != nil || e.Play != nil) {
+		m.sleepCommand()
+	}
+}
+
+// sleepRemote runs before Update handles msg: an MPRIS or IPC volume or
+// transport command is a command like a key's.
+func (m *Model) sleepRemote(msg tea.Msg) {
+	if (m.sleep.fading || m.sleep.pausePending) && sleepRemoteCommand(msg) {
+		m.sleepCommand()
+	}
+}
+
+// sleepRemoteCommand reports whether msg is a volume or transport command
+// from MPRIS or IPC.
+func sleepRemoteCommand(msg tea.Msg) bool {
+	switch msg := msg.(type) {
+	case playback.PlayPauseMsg, playback.PlayMsg, playback.PauseMsg, playback.StopMsg,
+		playback.NextMsg, playback.PrevMsg, playback.SeekMsg, playback.SetPositionMsg,
+		playback.SetVolumeMsg, ipc.LoadMsg:
+		return true
+	case ipc.URLRequestMsg:
+		return msg.Play
+	case V2RequestMsg:
+		request, err := v2OperationRequest(msg.Request)
+		if err != nil {
+			return false
+		}
+		switch request.Cmd {
+		case "play", "pause", "toggle", "stop", "next", "prev",
+			"volume", "volume.adjust", "seek", "seek.absolute",
+			"track.play", "queue.play", "load":
+			return true
+		case "url.load":
+			return request.Play
+		}
+	}
+	return false
 }
 
 func (m *Model) sleepPlaying() bool {
 	return m.player != nil && m.player.IsPlaying() && !m.player.IsPaused() && !m.buffering
 }
 
-// tickSleep runs on every UI tick: it starts the fade when its time has
-// come, and pauses at the deadline.
+// sleepTick runs after Update has handled msg: on a UI tick it starts the
+// fade when its time has come, and pauses at the deadline.
+func (m *Model) sleepTick(msg tea.Msg) {
+	if t, ok := msg.(tickMsg); ok {
+		m.tickSleep(time.Time(t))
+	}
+}
+
 func (m *Model) tickSleep(now time.Time) {
+	if m.sleep.pausePending {
+		if !m.buffering {
+			m.finishSleep()
+		}
+		return
+	}
 	if m.sleep.deadline.IsZero() {
 		return
 	}
 	if left := m.sleep.deadline.Sub(now); left > 0 {
-		// Fade over what is left, so the fade ends at the deadline even when
-		// the tick that starts it comes late, or the fade is longer than the
-		// time that was left.
+		// The fade ends at the deadline by the clock, so a late tick, or a
+		// fade longer than the time left, shortens it rather than moving
+		// its end.
 		if !m.sleep.fading && m.sleep.fade > 0 && left <= m.sleep.fade && m.sleepPlaying() {
 			if f := m.sleepFader(); f != nil {
-				f.FadeOut(left)
+				f.FadeOutUntil(m.sleep.deadline)
 				m.sleep.fading = true
 			}
 		}
 		return
 	}
 	if m.buffering {
-		return // a track is starting: decide once it has, or has failed
+		// A track is starting. Hold the output silent from now (with a
+		// fade it already is), and pause as soon as the start finishes:
+		// the new track is never heard.
+		if f := m.sleepFader(); f != nil && !m.sleep.fading {
+			f.FadeOutUntil(now)
+			m.sleep.fading = true
+		}
+		m.sleep.preset, m.sleep.deadline, m.sleep.pausePending = 0, time.Time{}, true
+		return
 	}
+	m.finishSleep()
+}
+
+// finishSleep is the deadline: pause what is playing, end the timer, and
+// put the level back for when playback resumes.
+func (m *Model) finishSleep() {
 	fading := m.sleep.fading
 	m.clearSleep()
 	if m.sleepPlaying() {
@@ -137,76 +240,6 @@ func (m *Model) tickSleep(now time.Time) {
 	}
 }
 
-// sleepState is what a command can change about playback.
-type sleepState struct {
-	watched bool
-	volume  float64
-	playing bool
-	paused  bool
-	index   int
-	path    string
-	pos     time.Duration
-}
-
-func (m *Model) sleepPlaybackState() sleepState {
-	track, _ := m.currentPlaybackTrack()
-	return sleepState{
-		watched: true,
-		volume:  m.player.Volume(),
-		playing: m.player.IsPlaying(),
-		paused:  m.player.IsPaused(),
-		index:   m.playlist.Index(),
-		path:    track.Path,
-		pos:     m.player.Position(),
-	}
-}
-
-// sleepCommand reports whether msg is something the user did: a key, the
-// mouse, or a command from MPRIS or IPC. Ticks and the results of work
-// already under way (a track ending and the next starting) are not.
-func sleepCommand(msg tea.Msg) bool {
-	switch msg.(type) {
-	case tea.KeyPressMsg, tea.MouseMsg,
-		playback.PlayPauseMsg, playback.PlayMsg, playback.PauseMsg, playback.StopMsg,
-		playback.NextMsg, playback.PrevMsg, playback.SeekMsg, playback.SetPositionMsg,
-		playback.SetVolumeMsg, V2RequestMsg:
-		return true
-	}
-	return false
-}
-
-// sleepWatch runs before Update handles msg: during a fade, it notes the
-// playback state a command could change.
-func (m *Model) sleepWatch(msg tea.Msg) sleepState {
-	if !m.sleep.fading || m.player == nil || !sleepCommand(msg) {
-		return sleepState{}
-	}
-	return m.sleepPlaybackState()
-}
-
-// sleepUpdate runs after Update has handled msg. A tick advances the timer.
-// During a fade, a command that changed the volume, paused, resumed,
-// stopped, skipped or seeked cancels the fade and the timer: someone is
-// awake.
-func (m *Model) sleepUpdate(msg tea.Msg, was sleepState) {
-	if t, ok := msg.(tickMsg); ok {
-		m.tickSleep(time.Time(t))
-		return
-	}
-	if !was.watched || !m.sleep.fading {
-		return
-	}
-	now := m.sleepPlaybackState()
-	jump := now.pos - was.pos
-	if now.volume == was.volume && now.playing == was.playing && now.paused == was.paused &&
-		now.index == was.index && now.path == was.path && jump < sleepSeekJump && jump > -sleepSeekJump {
-		return
-	}
-	m.stopSleepFade()
-	m.clearSleep()
-	m.status.Showf(statusTTLDefault, "Sleep timer cancelled")
-}
-
 // sleepBadge is the time left, for the headers: "[Sleep 23m]", and seconds
 // in the last minute. Empty when the timer is off.
 func (m Model) sleepBadge() string {
@@ -220,17 +253,26 @@ func (m Model) sleepBadge() string {
 	return fmt.Sprintf("[Sleep %ds]", (left+time.Second-1)/time.Second)
 }
 
-// joinHeaderBadges joins the library header's badges that are present.
-func joinHeaderBadges(badges ...string) string {
-	out := ""
-	for _, b := range badges {
-		if b == "" {
-			continue
-		}
-		if out != "" {
-			out += "  "
-		}
-		out += b
+// sleepSepHeader is sepHeader for the library's header line with the
+// sleep timer's countdown kept whole at its end: the rest of the label is
+// shortened first (Unicode-aware, with "…") to leave it room.
+func (m Model) sleepSepHeader(label string) string {
+	badge := m.sleepBadge()
+	if badge == "" {
+		return sepHeader(label)
 	}
-	return out
+	// "── " + label + "  " + badge + " ", as labeledSeparator draws it.
+	room := ui.PanelWidth - lipgloss.Width("── ") - 2 - lipgloss.Width(badge) - 1
+	if room <= 0 {
+		return sepHeader(badge)
+	}
+	return sepHeader(truncate(label, room) + "  " + badge)
+}
+
+// sepLabelN is sepHeaderN's label: the position counter after the label.
+func sepLabelN(label string, pos, total int) string {
+	if total <= 0 {
+		return label
+	}
+	return fmt.Sprintf("%s  %d/%d", label, pos, total)
 }

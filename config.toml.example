@@ -114,7 +114,8 @@ eq = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 # netease_lyrics = false
 #
 # The sleep timer (Z) fades out over this many seconds before it pauses
-# playback; 0 pauses without a fade (default: 30). See docs/ddsonic/navigation.md.
+# playback; 0 pauses without a fade, at most 3600 (default: 30).
+# See docs/ddsonic/navigation.md.
 # sleep_fade_seconds = 30
 
 # --- Spotify (optional; needs a Premium account) ---

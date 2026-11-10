@@ -114,6 +114,7 @@ func (m *Model) notifyPlayback() {
 // stopping, it tells plugins so they can drop any continuation they planned.
 // A queue running out never comes through here.
 func (m *Model) stopByUser() {
+	m.sleepCommand()        // ddsonic: a transport command (sleep_ddsonic.go)
 	m.retireLibraryPlay()   // ddsonic: Stop also stops an album still loading
 	m.stopSpotSearchAlbum() // ddsonic: …and one the search overlay is opening
 	m.stopPlayback()
