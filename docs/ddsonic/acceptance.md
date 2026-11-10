@@ -261,6 +261,7 @@ The two decoder items under [Owed by the next candidate's live and platform acce
   - Report, per arm, RssAnon, VmHWM, VmRSS and the Go live heap at each N, and the slope of RssAnon per open in KiB: a trend, not a pass or fail.
   - About 141 KiB per open (a test fixture, the host's libvorbis) is investigative context only, not an acceptance threshold for the release binary. Material or unbounded growth stays subject to the existing release gate (the release rule in the Vorbis item above) and a separate owner decision.
   - Spotify MP3 must be tested through Spotify, with tracks Spotify serves as MP3, never with Local files.
+  - **BLOCKED until the codec a track opened can be verified.** Nothing outside the process shows it: go-librespot picks the file whose bitrate is nearest the preferred one, not by codec, and on a tie the first file listed wins (at the default 320 kbps, an Ogg Vorbis 320 and an MP3 320 file tie) (`selectBestMediaFormat` in `third_party/go-librespot/player/format.go`); ddsonic gives the SDK a `NullLogger`, so the choice is not logged; and the release binary links libvorbis and mpg123 statically and is stripped (`-s -w`), so neither `/proc/<pid>/maps` nor a breakpoint by symbol shows which decoder ran. A track's identity does not settle it. Until a verification method exists, the three arms and the Spotify MP3 measurement are not decoder measurements: a run made anyway is recorded as a process memory trend with the codec unknown.
 
 ## Changing the basis of the evidence
 
