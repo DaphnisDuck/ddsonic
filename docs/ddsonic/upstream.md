@@ -22,12 +22,15 @@ cliamp's release tags (`v1.0.0` to `v2.3.0` and later) share names with ddsonic'
 
 ## Sync workflow
 
+The baseline for a sync is upstream's latest release tag, reviewed before it is merged: what it brings is triaged against ddsonic's changes, as in the [pre-1.0 triage](upstream-triage.md). `upstream/main` is never merged. It may be inspected for relevant changes, such as a fix that has not reached a release yet, and such a fix is ported on its own (cherry-picked or rewritten, tagged `// ddsonic:`) after review. This is the owner's standing policy (restated 2026-11-09).
+
 ```sh
-git fetch upstream
+git fetch upstream                                         # files upstream's tags under refs/upstream-tags/
+git log --oneline refs/upstream-tags/<tag>..upstream/main  # inspect only: what upstream has after the tag
 git switch -c sync/upstream-$(date +%Y%m%d) main
-git merge upstream/main          # merge, don't rebase: main is public
-make check                       # gofmt + vet + tests must pass
-git push -u origin HEAD          # open a PR into main
+git merge refs/upstream-tags/<tag>                         # the reviewed release tag; merge, don't rebase: main is public
+make check                                                 # gofmt + vet + tests must pass
+git push -u origin HEAD                                    # open a PR into main
 ```
 
 When a merge conflicts, start by searching for `// ddsonic:` markers. Every ddsonic edit to an upstream file carries one.
