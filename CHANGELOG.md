@@ -4,6 +4,33 @@ Notable changes to ddsonic (DaphnisDuck's Music Player). The format follows [Kee
 
 ddsonic is a fork of [cliamp](https://github.com/bjarneo/cliamp). Versions before 0.6 were released as omatunes, and 0.6 up to the candidate 1.0.0-rc.1 as ddmus; their entries below keep the name they were released under.
 
+## [1.1.0] - unreleased
+
+### Added
+- A sleep timer. `Z` (Shift+Z), in the library and the queue, steps through 15, 30, 45, 60 and 90 minutes, then off; each choice counts from the moment it is made. The header shows the time left. When the time is up, playback pauses, keeping the track, its position and the queue, and `Space` resumes. Before that the music fades out, reaching silence when it pauses, without changing your volume setting. The fade lasts 30 seconds by default; `[ddsonic] sleep_fade_seconds` sets it (0 to 3600, and 0 pauses without a fade). During the fade, a volume or playback command, from a key, the media keys or `ddsonic` commands, brings the sound back and turns the timer off. The timer is not kept across a restart.
+- In the library's Queue view, `X` clears the whole queue and Up next, stopping playback; a loaded saved playlist is left as it was. `Ctrl+Z` brings the cleared queue back (its tracks, order, position, shuffle, repeat, Up next and playlist name) without restarting playback, until the queue next changes.
+- Radio lists sort A–Z by the name they show: Favorites, the cliamp radio channels, a country's or a tag's stations, and the results of "Search the radio directory". A country's or a tag's stations and a directory search are still the directory's 200 most-voted, and say so above their rows ("Top 200 by votes, listed A–Z."). Genres & Tags still lists the most-used tags first, countries stay grouped by region, the live channels queued at startup keep cliamp radio's order, and the library search's Stations section keeps its ranking.
+
+### Changed
+- Local > Folders (and `o`) lists folders and playable audio files, and leaves out other files such as covers, logs and cue sheets; the header says how many it left out. `f` shows all files, and back, for the session. Dotfiles stay hidden either way.
+- Library rows keep their columns: on every row of a list, a row's detail and a track's number, source and duration each start at the same place. Rows are as wide as their text needs, up to 160 columns or the window, and text is shortened only when the row has no room left. A title or detail that does not fit is cut after a whole word, with "…"; a single word wider than its column, or text without spaces, is cut within it. The queue and Up next are unchanged.
+- The NetEase lyrics fallback is off by default, because it sends the artist and title over unencrypted HTTP. `[ddsonic] netease_lyrics = true` turns it back on. Lyrics that only NetEase has now show "No lyrics found" unless it is on. See [docs/ddsonic/lyrics.md](docs/ddsonic/lyrics.md).
+- When the Spotify sign-in could not be renewed for the moment (network or Spotify trouble), the message no longer advises `ddsonic spotify reset`, which deletes the stored sign-in; it says the sign-in is kept and ddsonic tries again later. When Spotify cannot be reached, the error says Spotify is unavailable for now and the sign-in is kept, rather than "sign-in unavailable".
+- `ddsonic upgrade` points to the releases page and to building from source, and no longer mentions a package manager or the AUR, where no ddsonic package exists yet.
+- A build from source reports its version counted from the latest stable release, as `v1.0.0-<commits since>-g<commit>` (it was counted from `v1.0.0-rc.3`). Release builds are unchanged.
+
+### Removed
+- The offer to install yt-dlp at startup. When yt-dlp is missing, ddsonic now prints how to install it and starts with YouTube off. It never runs a package manager, `sudo` or `pip`, and never waits for input for this.
+
+### Fixed
+- A busy or unreachable lyrics service (a network error, a timeout, or a 429 or 5xx answer from LRCLIB) showed "No lyrics found". When no other source has the lyrics, it now shows "Lyrics service unavailable, try again later."
+- The undo of `x` and of Up next's `d` and `c` could bring back an old queue after another list had been played. The queue's undo now holds only until the queue next changes; `Ctrl+Z` then says "Nothing to undo".
+- The Linux third-party notices omitted the notice of mpg123's `icy2utf8.c`. Release builds now include it, and the release script refuses notices without it. The published v1.0.0 files are unchanged.
+
+### Known limitations
+- The Spotify limitations listed under 1.0.0 still apply.
+- A brief stutter on pause and resume, and a fragment of the previous track after switching tracks by hand, can still be heard. Both have been seen on Linux and macOS; the cause is not yet known.
+
 ## [1.0.0] - 2026-10-31
 
 The first release for people who don't build from source. 1.0 adds no features to 0.10: it settles the command line, removes what ddsonic doesn't support, and ships a tested Linux build.
@@ -167,6 +194,7 @@ Released as omatunes. The first release of the fork, based on cliamp just after 
 ### Removed
 - cliamp's self-updater: `upgrade` refuses to run, because it would install cliamp over the fork.
 
+[1.1.0]: https://github.com/DaphnisDuck/ddsonic/compare/v1.0.0...main
 [1.0.0]: https://github.com/DaphnisDuck/ddsonic/releases/tag/v1.0.0
 [0.10.0]: https://github.com/DaphnisDuck/ddsonic/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/DaphnisDuck/ddsonic/compare/v0.8.0...v0.9.0
