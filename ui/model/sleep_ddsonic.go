@@ -76,12 +76,12 @@ func (m *Model) cycleSleepTimer() {
 	m.sleep.preset = (m.sleep.preset + 1) % (len(sleepPresets) + 1)
 	if m.sleep.preset == 0 {
 		m.sleep.deadline = time.Time{}
-		m.status.Showf(statusTTLDefault, "Sleep timer off")
+		m.status.Showf(statusTTLDefault, "Sleep timer off. Press Z to set.")
 		return
 	}
 	d := sleepPresets[m.sleep.preset-1]
 	m.sleep.deadline = m.sleepNow().Add(d)
-	m.status.Showf(statusTTLDefault, "Sleep timer: pausing in %d min", int(d/time.Minute))
+	m.status.Showf(statusTTLDefault, "Sleep timer: %d min. Press Z again for more time.", int(d/time.Minute))
 }
 
 // endSleepFade brings the level back over a short ramp if a fade is under

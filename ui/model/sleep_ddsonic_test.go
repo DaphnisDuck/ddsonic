@@ -120,13 +120,13 @@ func TestSleepKeyCyclesPresetsFromNow(t *testing.T) {
 		left   time.Duration // 0: off
 		status string
 	}{
-		{0, 15 * time.Minute, "Sleep timer: pausing in 15 min"},
-		{2 * time.Minute, 30 * time.Minute, "Sleep timer: pausing in 30 min"},
-		{3 * time.Minute, 45 * time.Minute, "Sleep timer: pausing in 45 min"},
-		{3 * time.Minute, 60 * time.Minute, "Sleep timer: pausing in 60 min"},
-		{10 * time.Minute, 90 * time.Minute, "Sleep timer: pausing in 90 min"},
-		{11 * time.Minute, 0, "Sleep timer off"},
-		{12 * time.Minute, 15 * time.Minute, "Sleep timer: pausing in 15 min"},
+		{0, 15 * time.Minute, "Sleep timer: 15 min. Press Z again for more time."},
+		{2 * time.Minute, 30 * time.Minute, "Sleep timer: 30 min. Press Z again for more time."},
+		{3 * time.Minute, 45 * time.Minute, "Sleep timer: 45 min. Press Z again for more time."},
+		{3 * time.Minute, 60 * time.Minute, "Sleep timer: 60 min. Press Z again for more time."},
+		{10 * time.Minute, 90 * time.Minute, "Sleep timer: 90 min. Press Z again for more time."},
+		{11 * time.Minute, 0, "Sleep timer off. Press Z to set."},
+		{12 * time.Minute, 15 * time.Minute, "Sleep timer: 15 min. Press Z again for more time."},
 	}
 	for i, w := range want {
 		r.now = sleepT0.Add(w.after)
