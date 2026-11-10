@@ -54,7 +54,11 @@ func (m Model) libSelectedStation() (station radio.CatalogStation, ok bool) {
 	if f.loading() || f.err != nil || f.cursor < 0 || f.cursor >= len(f.entries) {
 		return station, false
 	}
-	if track := f.entries[f.cursor].Track; track != nil {
+	e := f.entries[f.cursor]
+	if e.FavoriteTrack != nil { // a live cliamp radio channel's row (#135)
+		return radio.StationFromTrack(*e.FavoriteTrack)
+	}
+	if track := e.Track; track != nil {
 		return radio.StationFromTrack(*track)
 	}
 	return station, false

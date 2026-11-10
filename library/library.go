@@ -119,6 +119,10 @@ type Entry struct {
 	// Play resolves tracks and plays them from the first, replacing the
 	// queue. Used for rows that are playable but not browsable (stations).
 	Play func(ctx context.Context) ([]playlist.Track, error)
+	// FavoriteTrack, when set, is the station f stars on this row (a live
+	// cliamp radio channel, #135). It is for favorites only: Enter and
+	// playback never read it.
+	FavoriteTrack *playlist.Track
 	// Intent asks the UI to do something outside the hierarchy.
 	Intent Intent
 	// Provider owns the entry's content; set for Intent rows that need one.

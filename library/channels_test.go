@@ -18,8 +18,9 @@ func (f *fakeLiveChannels) LiveStationTrack(id string) (playlist.Track, bool) {
 	return t, ok
 }
 
-// A live channel's row holds its station, for f; a song channel's row holds
-// none. Either way Enter plays that channel alone (#135).
+// A live channel's row names its station for f (FavoriteTrack) and plays as
+// before (Play); a song channel's row names none. Neither row is a Track
+// row, so Enter plays that channel alone (#135).
 func TestCliampRadioChannelRows(t *testing.T) {
 	groove := st("Groove", "https://groove")
 	channels := &fakeLiveChannels{
@@ -37,16 +38,17 @@ func TestCliampRadioChannelRows(t *testing.T) {
 	}
 
 	live := rows[0]
-	if live.Track == nil || live.Track.Path != groove.Path || live.PlayFrom == nil || live.Open != nil {
-		t.Fatalf("live channel row = %+v, want its station and a play of the channel", live)
+	if live.FavoriteTrack == nil || live.FavoriteTrack.Path != groove.Path || live.Play == nil ||
+		live.Track != nil || live.PlayFrom != nil || live.Open != nil {
+		t.Fatalf("live channel row = %+v, want its station for f and the play it always had", live)
 	}
-	played, at, err := live.PlayFrom(t.Context())
-	if err != nil || at != 0 || len(played) != 1 || played[0].Path != groove.Path {
-		t.Errorf("live row plays %+v from %d, %v; want the channel alone", played, at, err)
+	played, err := live.Play(t.Context())
+	if err != nil || len(played) != 1 || played[0].Path != groove.Path {
+		t.Errorf("live row plays %+v, %v; want the channel alone", played, err)
 	}
 
 	songs := rows[1]
-	if songs.Track != nil || songs.Play == nil {
+	if songs.FavoriteTrack != nil || songs.Track != nil || songs.PlayFrom != nil || songs.Play == nil {
 		t.Fatalf("song channel row = %+v, want a play-only row with no station", songs)
 	}
 	if played, err := songs.Play(t.Context()); err != nil || len(played) != 2 {

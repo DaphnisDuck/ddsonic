@@ -113,7 +113,7 @@ func TestFavoriteKeyIgnoresASongChannel(t *testing.T) {
 }
 
 // Enter on a live channel's row plays that channel alone, as it did when
-// the row held no station.
+// the row named no station.
 func TestLiveChannelRowPlaysTheChannelAlone(t *testing.T) {
 	m, fx := newFavModel(t)
 	m = libOpenChannels(t, m)
@@ -121,6 +121,39 @@ func TestLiveChannelRowPlaysTheChannelAlone(t *testing.T) {
 	cur, _ := m.playlist.Current()
 	if m.playlist.Len() != 1 || cur.Path != fx.groove.URL || !cur.Realtime {
 		t.Fatalf("Enter queued %d tracks, current %+v; want the Groove stream alone", m.playlist.Len(), cur)
+	}
+}
+
+// Enter on a channel row takes the row's Play, live or of songs, as before
+// #135: it says it is loading the channel, then queues only that channel.
+// The live row's station is for f alone.
+func TestChannelRowEnterSaysLoading(t *testing.T) {
+	for _, tt := range []struct{ row, status string }{
+		{"Groove · live", "Loading Groove · live…"},
+		{"Mixtape", "Loading Mixtape…"},
+	} {
+		t.Run(tt.row, func(t *testing.T) {
+			m, fx := newFavModel(t)
+			m = libOpenChannels(t, m)
+			libSelect(t, &m, tt.row)
+			updated, cmd := m.Update(libKey("enter"))
+			m = updated.(Model)
+			if m.status.text != tt.status || cmd == nil {
+				t.Fatalf("Enter: status %q, command %v; want %q and a play", m.status.text, cmd != nil, tt.status)
+			}
+			if tt.row != "Groove · live" {
+				return // a song channel's play downloads its songs
+			}
+			msg, ok := cmd().(libraryPlayMsg)
+			if !ok {
+				t.Fatal("Enter on the live row is not the row's Play")
+			}
+			updated, next := m.Update(msg)
+			m = libRun(t, updated.(Model), next)
+			if cur, _ := m.playlist.Current(); m.playlist.Len() != 1 || cur.Path != fx.groove.URL {
+				t.Errorf("Enter queued %d tracks, current %q; want the Groove stream alone", m.playlist.Len(), cur.Path)
+			}
+		})
 	}
 }
 
