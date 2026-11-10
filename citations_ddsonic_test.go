@@ -5,7 +5,7 @@ package main
 // line: it may rewrite one in place, but not insert or delete lines above
 // it. CHANGELOG.md is the exception (shiftedFiles): a release adds its
 // section at the top, so its cited lines may move, but their text must not
-// change. This test compares the working tree with a base: DDSONIC_CITATION_BASE
+// change. Its line numbers are read at a fixed origin commit, not the base. This test compares the working tree with a base: DDSONIC_CITATION_BASE
 // when set (make validate sets it), else the merge base with origin/main.
 // Without either it is skipped and says "citation check: SKIPPED", unless
 // DDSONIC_CITATION_STRICT=1, as make validate and CI's docs profile set: then
@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -42,10 +43,19 @@ func gitOut(t *testing.T, args ...string) (string, error) {
 	return string(out), err
 }
 
-// shiftedFiles are cited files that grow at the top: a cited line in them
-// may move with lines inserted or deleted above it, but must keep its text
-// exactly, at the line the diff moves it to. Editing or deleting it fails.
-var shiftedFiles = map[string]bool{"CHANGELOG.md": true}
+// changelogCitationOrigin is the commit whose CHANGELOG.md the catalog's
+// CHANGELOG line numbers describe. The archived catalog is never renumbered,
+// so its numbers stay in this commit's coordinates however far the file
+// grows: they must be translated from here, not from the validation base,
+// which moves with every merge (from a base after the 1.1.0 section, the
+// catalog's "44" would name some other line). Never change it.
+const changelogCitationOrigin = "4ac92beb87313c74027dcfd4262b76732d1f5fe4"
+
+// shiftedFiles are cited files that grow at the top, each with the commit
+// its citations' line numbers belong to. A cited line may move with lines
+// inserted or deleted above it, but must keep its text exactly, at the
+// line the diff from that commit moves it to. Editing or deleting it fails.
+var shiftedFiles = map[string]string{"CHANGELOG.md": changelogCitationOrigin}
 
 // shift is one hunk of git diff -U0: old lines [start, start+count) became
 // newCount lines.
@@ -127,6 +137,41 @@ func shiftedCitation(n int, hunks []shift, base, cur string) string {
 	return ""
 }
 
+// numberedAt is the commit a file's citations are numbered at: a shifted
+// file's fixed origin, else the validation base.
+func numberedAt(file, base string) (string, bool) {
+	if origin, ok := shiftedFiles[file]; ok {
+		return origin, true
+	}
+	return base, false
+}
+
+// shiftedFailures checks a shifted file's cited lines ns, numbered at
+// origin, against cur, the file's text now: each is translated through git
+// diff -U0 origin. git runs git in the repository. An origin the clone does
+// not have is an error, never a pass.
+func shiftedFailures(git func(...string) (string, error), file, origin, cur string, ns []int) ([]string, error) {
+	if _, err := git("cat-file", "-e", origin+"^{commit}"); err != nil {
+		return nil, fmt.Errorf("%s: its citation origin %.12s is not in this clone (fetch it, or the whole history): %v", file, origin, err)
+	}
+	diff, err := git("diff", "-U0", "--no-ext-diff", origin, "--", file)
+	if err != nil {
+		return nil, fmt.Errorf("git diff %.12s -- %s: %v", origin, file, err)
+	}
+	originText, err := git("show", origin+":"+file)
+	if err != nil {
+		return nil, fmt.Errorf("git show %.12s:%s: %v", origin, file, err)
+	}
+	hunks := parseHunks(diff)
+	var bad []string
+	for _, n := range ns {
+		if why := shiftedCitation(n, hunks, originText, cur); why != "" {
+			bad = append(bad, fmt.Sprintf("%s:%d is cited by POST-1.0-CATALOG.md and %s since %.12s, the commit its citations are numbered at: keep cited lines as they are", file, n, why, origin))
+		}
+	}
+	return bad, nil
+}
+
 // citationBase chooses the base: the variable, else the merge base. It
 // returns a reason to skip when there is none, or an error in strict mode.
 func citationBase(getenv func(string) string, mergeBase func() (string, error)) (base, skip string, err error) {
@@ -178,28 +223,31 @@ func TestCatalogCitationsDoNotMove(t *testing.T) {
 	}
 	checked := 0
 	for file, ns := range lines {
+		if origin, shifted := numberedAt(file, base); shifted {
+			cur, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var sorted []int
+			for n := range ns {
+				sorted = append(sorted, n)
+			}
+			sort.Ints(sorted)
+			checked += len(sorted)
+			bad, err := shiftedFailures(func(args ...string) (string, error) { return gitOut(t, args...) }, file, origin, string(cur), sorted)
+			if err != nil {
+				t.Error(err)
+			}
+			for _, b := range bad {
+				t.Error(b)
+			}
+			continue
+		}
 		diff, err := gitOut(t, "diff", "-U0", "--no-ext-diff", base, "--", file)
 		if err != nil {
 			t.Fatalf("git diff %s: %v", file, err)
 		}
 		hunks := parseHunks(diff)
-		if shiftedFiles[file] {
-			baseText, err := gitOut(t, "show", base+":"+file)
-			if err != nil {
-				t.Fatalf("git show %s:%s: %v", base, file, err)
-			}
-			cur, err := os.ReadFile(file)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for n := range ns {
-				checked++
-				if why := shiftedCitation(n, hunks, baseText, string(cur)); why != "" {
-					t.Errorf("%s:%d is cited by POST-1.0-CATALOG.md and %s since %.12s: keep cited lines as they are", file, n, why, base)
-				}
-			}
-			continue
-		}
 		for n := range ns {
 			checked++
 			if moved(n, hunks) {
@@ -361,5 +409,74 @@ func TestShiftedCitationComparesText(t *testing.T) {
 		if why := shiftedCitation(2, tt.hunks, base, tt.cur); (why == "") != tt.pass {
 			t.Errorf("%s: %q, want pass %v", tt.name, why, tt.pass)
 		}
+	}
+}
+
+// The catalog's CHANGELOG numbers belong to a fixed origin, not to the
+// validation base: once a release section is merged, the base moves to the
+// merge, and an edit of a historical cited line must still fail.
+func TestShiftedCitationFromAFixedOrigin(t *testing.T) {
+	lines := []string{"# Changelog", "", "Notable changes.", "", "## [1.0.0] - 2026-10-31", "", "### Added", "- A release build.", "- `setup`.", "",
+		"### Known limitations", "- Spotify.", "- Ogg.", "", "[1.0.0]: https://example.invalid", ""}
+	const cite = 12 // "- Spotify.", in the origin's numbers
+	join := func(l []string) string { return strings.Join(l, "\n") }
+	section := []string{"## [1.1.0] - unreleased", "", "### Added", "- A sleep timer.", ""}
+	merged := append(append(append([]string(nil), lines[:4]...), section...), lines[4:]...)
+	at := cite + len(section) // where the cited line is after the merge
+
+	dir := t.TempDir()
+	git := func(args ...string) (string, error) {
+		cmd := exec.Command("git", append([]string{"-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"}, args...)...)
+		cmd.Dir, cmd.Env = dir, gitEnv()
+		out, err := cmd.Output()
+		return string(out), err
+	}
+	f := &fixture{t: t, dir: dir}
+	f.git("init", "-q")
+	f.write("CHANGELOG.md", join(lines))
+	origin := f.commit("origin: the catalog's numbers")
+	f.write("CHANGELOG.md", join(merged))
+	base := f.commit("the 1.1.0 section, merged: the validation base moves here")
+
+	edited := append([]string(nil), merged...)
+	edited[at-1] += " (edited)"
+	deleted := append(append([]string(nil), merged[:at-1]...), merged[at:]...)
+	tests := []struct {
+		name string
+		from string // the commit the citations are read at
+		text string
+		pass bool
+	}{
+		{"the merge, nothing else", origin, join(merged), true},
+		{"after the merge, the historical line edited", origin, join(edited), false},
+		{"after the merge, the historical line deleted", origin, join(deleted), false},
+		{"after the merge, a line added above it", origin, join(append([]string{"# Changelog", "x"}, merged[1:]...)), true},
+		// What a moving base would do: it reads "12" in the merge's
+		// numbers, another line, and lets the edit through.
+		{"the bug this prevents: the edit, read from the moved base", base, join(edited), true},
+	}
+	for _, tt := range tests {
+		f.write("CHANGELOG.md", tt.text)
+		bad, err := shiftedFailures(git, "CHANGELOG.md", tt.from, tt.text, []int{cite})
+		if err != nil {
+			t.Fatalf("%s: %v", tt.name, err)
+		}
+		if (len(bad) == 0) != tt.pass {
+			t.Errorf("%s: %q, want pass %v", tt.name, bad, tt.pass)
+		}
+	}
+
+	// An origin the clone does not have fails closed.
+	f.write("CHANGELOG.md", join(merged))
+	if bad, err := shiftedFailures(git, "CHANGELOG.md", strings.Repeat("0", 40), join(merged), []int{cite}); err == nil {
+		t.Errorf("a missing origin: no error, failures %q", bad)
+	}
+	// The check reads CHANGELOG.md's citations at the origin whatever the
+	// base, and every other file's at the base.
+	if at, shifted := numberedAt("CHANGELOG.md", base); at != changelogCitationOrigin || !shifted {
+		t.Errorf("CHANGELOG.md's citations are read at %q (shifted %v), want the fixed origin %s", at, shifted, changelogCitationOrigin)
+	}
+	if at, shifted := numberedAt("plan.md", base); at != base || shifted {
+		t.Errorf("plan.md's citations are read at %q (shifted %v), want the base", at, shifted)
 	}
 }
