@@ -24,11 +24,12 @@ var (
 	libUnfavoriteKey = libKeyHelp{[]string{"f"}, "f", "Unfavorite"}
 )
 
-// libSelectedStation is the directory station selected in the view in
-// front, as the directory names it: never a row's decorated title or the
-// song a stream is playing. ok is false for everything else (a menu row, a
-// cliamp radio channel, a radios.toml station, any other stream or file)
-// and on a list that is loading or failed. While the query is being typed
+// libSelectedStation is the directory station, or live cliamp radio
+// channel (#135), selected in the view in front, as the directory or the
+// channel list names it: never a row's decorated title or the song a stream
+// is playing. ok is false for everything else (a menu row, a cliamp radio
+// song channel, a radios.toml station, any other stream or file) and on a
+// list that is loading or failed. While the query is being typed
 // no row is selected: the input takes f as text and its key table is its
 // own (handleLibraryKey, libraryKeyView).
 func (m Model) libSelectedStation() (station radio.CatalogStation, ok bool) {

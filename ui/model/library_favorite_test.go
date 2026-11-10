@@ -31,7 +31,8 @@ import (
 type favFixture struct {
 	favs     *radio.Favorites
 	uno, dos radio.CatalogStation
-	loads    *[]string // the search level's queries, one per load
+	groove   radio.CatalogStation // the live cliamp radio channel (#135)
+	loads    *[]string            // the search level's queries, one per load
 }
 
 // newFavModel is a library over a real radio provider and favorites store,
@@ -39,17 +40,26 @@ type favFixture struct {
 //
 //	Radio          the library's own Radio menu (Favorites, Browse Stations)
 //	Chile          a directory list, titled as a country list decorates it
-//	cliamp radio   a channel row, which plays but is no directory station
-//	Mixed          a directory station among streams that are not
+//	cliamp radio   the channel rows: Groove, live, and Mixtape, of songs
+//	Mixed          a directory station and the live channel among streams
+//	               that are not stations
 //	Search         results holding a station row and a directory search
 func newFavModel(t *testing.T) (Model, favFixture) {
 	t.Helper()
 	t.Setenv("CLIAMP_CONFIG_DIR", t.TempDir())
+	return favModelOver(t, radio.LoadFavorites())
+}
+
+// favModelOver is newFavModel over favs, a store already loaded: a fresh
+// start reads the config directory a model before it saved to.
+func favModelOver(t *testing.T, favs *radio.Favorites) (Model, favFixture) {
+	t.Helper()
 	fx := favFixture{
-		favs:  radio.LoadFavorites(),
-		uno:   radio.CatalogStation{Name: "Radio Uno", URL: "https://uno.example/stream", Country: "Chile", Codec: "MP3", Bitrate: 128, Tags: "news"},
-		dos:   radio.CatalogStation{Name: "Radio Dos", URL: "https://dos.example/stream", Country: "Chile"},
-		loads: &[]string{},
+		favs:   favs,
+		groove: radio.CatalogStation{Name: "Groove", URL: "https://channel.example/groove"},
+		uno:    radio.CatalogStation{Name: "Radio Uno", URL: "https://uno.example/stream", Country: "Chile", Codec: "MP3", Bitrate: 128, Tags: "news"},
+		dos:    radio.CatalogStation{Name: "Radio Dos", URL: "https://dos.example/stream", Country: "Chile"},
+		loads:  &[]string{},
 	}
 	prov := radio.New(radio.Options{Favorites: fx.favs, Country: radio.CountryDeclined})
 	prov.AppendCatalog([]radio.CatalogStation{fx.uno, fx.dos})
@@ -62,12 +72,20 @@ func newFavModel(t *testing.T) (Model, favFixture) {
 		return tracks[0]
 	}
 	uno, dos := station("c:0", "Radio Uno [Chile · MP3 128k]"), station("c:1", "Radio Dos [Chile]")
-	channel := playlist.Track{Path: "https://channel.example/groove", Title: "Groove", Stream: true, Realtime: true}
+	channels := radio.NewChannelsFrom([]radio.Channel{
+		{ID: "groove", Name: "Groove", Stream: fx.groove.URL},
+		{ID: "mixtape", Name: "Mixtape", Stream: "https://channel.example/mixtape", Tracks: 2, TracksURL: "https://channel.example/mixtape/tracks"},
+	})
+	queued, err := channels.Tracks("groove") // the live channel, as Enter queues it
+	if err != nil || len(queued) != 1 {
+		t.Fatalf("channel groove: %v, %v", queued, err)
+	}
+	channel := queued[0]
 	custom := prov.LocalStationTracks()[0] // the built-in station, as radios.toml's are
 	httpTrack := playlist.Track{Path: "https://files.example/song.mp3", Title: "A song", Stream: true}
 	file := playlist.Track{Path: "/music/song.flac", Title: "A file"}
 
-	entries, err := library.Root(library.Sources{Radio: prov}).Load(context.Background())
+	entries, err := library.Root(library.Sources{Radio: prov, Channels: channels}).Load(context.Background())
 	if err != nil || len(entries) == 0 || entries[0].Title != "Radio" {
 		t.Fatalf("library root = %+v, %v; want Radio first", entries, err)
 	}
@@ -86,14 +104,29 @@ func newFavModel(t *testing.T) (Model, favFixture) {
 	root := library.Menu("Music",
 		library.Entry{Title: "Radio", Open: entries[0].Open, Source: catalog.Radio},
 		library.Entry{Title: "Chile", Open: tracks("Chile", uno, dos), Source: catalog.Radio},
-		library.Entry{Title: "cliamp radio", Open: library.Menu("cliamp radio", library.Entry{Title: "Groove",
-			Play: func(context.Context) ([]playlist.Track, error) { return []playlist.Track{channel}, nil }})},
+		library.Entry{Title: "cliamp radio", Open: favChannelsLevel(t, entries[0].Open)},
 		library.Entry{Title: "Mixed", Open: tracks("Mixed", uno, channel, custom, httpTrack, file)},
 		library.Entry{Title: "Search", Open: search},
 	)
 	m := newLibraryModel(root)
 	m.SetRadioFavorites(fx.favs)
 	return m, fx
+}
+
+// favChannelsLevel is Radio > Browse Stations > cliamp radio, as the
+// library builds it over the channel list.
+func favChannelsLevel(t *testing.T, radioMenu library.Level) library.Level {
+	t.Helper()
+	level := radioMenu
+	for _, title := range []string{"Browse Stations", "cliamp radio"} {
+		rows, err := level.Load(context.Background())
+		i := slices.IndexFunc(rows, func(e library.Entry) bool { return e.Title == title })
+		if err != nil || i < 0 {
+			t.Fatalf("no row %q in %q: %v", title, level.Title(), err)
+		}
+		level = rows[i].Open
+	}
+	return level
 }
 
 // catalogSearch is a search level read from every source's catalog, as the
@@ -319,8 +352,7 @@ func TestFavoriteKeyIgnoresWhatIsNotADirectoryStation(t *testing.T) {
 	}{
 		{"menu row", func(t *testing.T, m Model) Model { libSelect(t, &m, "Radio"); return m }},
 		{"Favorites menu row", rowAt("Radio", "Favorites")},
-		{"cliamp radio channel row", rowAt("cliamp radio", "Groove")},
-		{"cliamp radio channel stream row", rowAt("Mixed", "Groove")},
+		{"cliamp radio song channel row", rowAt("cliamp radio", "Mixtape")},
 		{"radios.toml station row", rowAt("Mixed", "cliamp radio")},
 		{"HTTP track row", rowAt("Mixed", "A song")},
 		{"file row", rowAt("Mixed", "A file")},
@@ -330,7 +362,6 @@ func TestFavoriteKeyIgnoresWhatIsNotADirectoryStation(t *testing.T) {
 			libSelect(t, &m, "Search the radio directory")
 			return m
 		}},
-		{"queued cliamp radio channel stream", queueAt("Groove")},
 		{"queued radios.toml station", queueAt("cliamp radio")},
 		{"queued HTTP track", queueAt("A song")},
 		{"queued file", queueAt("A file")},

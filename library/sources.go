@@ -267,11 +267,7 @@ func browseStations(prov, channels playlist.Provider) Level {
 		// The channels list A–Z, as stations do. The startup queue of live
 		// channels (main.go, streams.m3u) is a separate list and keeps the
 		// server's order.
-		entries = append(entries, Entry{Title: channels.Name(), Open: playlistsLevel(channels.Name(), sortedPlaylists{channels}, nil, func(info playlist.PlaylistInfo) Entry {
-			return Entry{Title: info.Name, Play: func(context.Context) ([]playlist.Track, error) {
-				return channels.Tracks(info.ID)
-			}}
-		})})
+		entries = append(entries, Entry{Title: channels.Name(), Open: playlistsLevel(channels.Name(), sortedPlaylists{channels}, nil, channelEntry(channels))})
 	}
 	// The provider advertises its category routes (countries, tags) as
 	// browse entries; each resolves to its own GenreBrowser.

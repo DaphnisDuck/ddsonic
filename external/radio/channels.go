@@ -103,7 +103,7 @@ func (p *ChannelProvider) Tracks(id string) ([]playlist.Track, error) {
 	}
 
 	if !channel.hasSongs() {
-		return []playlist.Track{{Path: channel.Stream, Title: channel.Name, Stream: true, Realtime: true}}, nil
+		return []playlist.Track{channel.liveTrack()}, nil // ddsonic: a station, so it can be a favorite (channels_ddsonic.go, #135)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
