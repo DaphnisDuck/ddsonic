@@ -40,7 +40,7 @@ The checklist is now [Release Acceptance](acceptance.md), and it runs on the can
 These checks are mandatory before a release, a source archive or the repository is made public. The privacy audit was done on 2026-11-05 (its status is below); the agent docs cleanup is still pending.
 
 - **Privacy:** check for personal names, usernames, email addresses, machine hostnames, home-directory paths and private account or device identifiers in the public source and docs, the release pages, the generated SBOM and notices, the source archive, and the paths embedded in the binary. Exposure in Git history is a separate question: history is not rewritten without the owner's approval. Status (2026-11-05): a read-only audit of these places and of the public Git history found no live secret and no urgent exposure, and the owner accepted what it found (catalog R-09). The earlier note (2026-10-19) that the audit was blocked by a platform denial no longer applies; what that denial was is unverified.
-- **Agent docs cleanup** (agreed, pending): one canonical, concise set of agent instructions; a practical checklist; a prioritized backlog; history archived. Retire the PV-5/AUTH-PV5 requirements still written as active, keeping their historical evidence. Progress reports stay light, with full technical handoffs for ChatGPT and a clear summary for people. Tracked here only; not started.
+- **Agent docs cleanup** (agreed, pending): one canonical, concise set of agent instructions; a practical checklist; a prioritized backlog; history archived. Retire the PV-5/AUTH-PV5 requirements still written as active, keeping their historical evidence. Progress reports stay light, with full technical handoffs for ChatGPT and a clear summary for people. Tracked here only; not started. *(Owner, 2026-11-10: the broader cleanup is not a v1.1.0 release gate. The remaining work stays deferred under E-04 (#30); this entry is the historical requirement and is not marked completed.)*
 
 ## A dry run on your machine
 
@@ -93,3 +93,34 @@ ddsonic follows [Semantic Versioning](https://semver.org/) (owner, 2026-11-03):
 - **v2.0.0** is reserved for changes that break an established compatibility commitment.
 
 A change moves through three separate statuses: development complete (reviewed, and accepted by the owner), integrated (merged into `main`), and released (published as part of a version). Reaching one does not imply the next.
+
+## v1.1.0 release readiness (provisional until feature freeze)
+
+This consolidates requirements that already exist, with their sources. It adds none. It is provisional: the scope is not frozen, and the owner's own acceptance decides each gate. Execution has not started, and nothing here authorizes a tag, a publication or the final release. One integrated candidate is intended, not a campaign of candidates.
+
+**Before the tag**
+
+- [ ] **Scope frozen.** The milestone items are done or deferred. Deferred, by owner decision: #83 (R-12), #90 (release provenance), #135 (channel favorites), #131 (marquee). The umbrellas #27 and #82 and the agent-docs cleanup (#30) are not blockers.
+- [ ] **Bounded UltraReview**, run by the owner after the freeze and before the tag, on the exact diff from the published `v1.0.0` (`9ae61bcf6604e032b6e690394d10cb0bade80543`) to the frozen v1.1.0 commit. The Dispatcher reports the delta's size before the owner invokes it. If a blocker needs a code change, the affected review and acceptance evidence are revalidated before continuing. The candidate is built from the frozen, reviewed commit.
+- [ ] **`CHANGELOG.md`** has a `## [1.1.0]` section.
+- [ ] **Required CI is green** on the frozen commit (`go`, `sdk-contract`, CodeQL). The macOS workflow is evidence, not a substitute for the macOS acceptance below.
+- [ ] **Privacy and packaging checks:** [Before anything is made public](#before-anything-is-made-public) for the new public files, the release page, the SBOM, the notices, the source archive and the paths embedded in the binary.
+- [ ] **#87**, source-build version: on a real checkout of `main` with tags, `make build` and `./ddsonic --version` report `<highest stable tag>-<N>-g<sha>` (today `v1.0.0-<N>-g<sha>`). Release builds set the version explicitly and are unaffected.
+
+**The candidate** (the tag is the owner's: switch the tag ruleset off and back on; the Release workflow then builds a **draft** release)
+
+- [ ] **Artifacts:** download the draft's archive and `SHA256SUMS`; `sha256sum -c`; `RELEASE-MANIFEST.json`, the binary's `--version` and the expected commit agree.
+- [ ] **Linux scripted acceptance** on the binary extracted from that archive, as in [Cutting a release](#cutting-a-release) and [acceptance.md](acceptance.md#running-it): `go run ./acceptance/cmd/acceptance run --archive <archive> --sums SHA256SUMS --version v1.1.0 --source-sha <40-character commit> --manual manual-results.yaml --triage triage.yaml`.
+- [ ] **Linux live and human acceptance** (owner, on Titan), including what [acceptance.md](acceptance.md#owed-by-the-next-candidates-live-and-platform-acceptance) records as owed. The gate rules apply: only `pass` is a pass, BLOCKER and HIGH block publication, an unfixed MEDIUM needs the owner's written waiver, nothing may remain `investigate`.
+- [ ] **#121**, Linux notices (mandatory): the generated `THIRD_PARTY_NOTICES`, both inside `ddsonic-<v>-linux-amd64.tar.gz` and as `ddsonic-<v>-THIRD_PARTY_NOTICES.txt`, contain the notice of mpg123's `src/libmpg123/icy2utf8.c` byte for byte. The Docker release image was never run for the change, so until this is recorded on #121 the packaging path is not validated. Compare against the original file in the pinned archive (`native/` of the source archive):
+
+  ```sh
+  sha256sum native/mpg123-1.32.6.tar.bz2   # must equal MPG123_SHA256 in packaging/Dockerfile
+  tar -xOjf native/mpg123-1.32.6.tar.bz2 mpg123-1.32.6/src/libmpg123/icy2utf8.c |
+      awk '$0 == "/*-" { on = 1; next } on && $0 == " *-" { exit } on' > icy.expected
+  python3 -I -c 'import sys; n = open(sys.argv[1], "rb").read(); e = open("icy.expected", "rb").read(); h = b"mpg123: src/libmpg123/icy2utf8.c\n"; ok = len(e) > 0 and n.count(h) == 1 and n.count(e) == 1; print("expected bytes", len(e), "| header", n.count(h), "| notice", n.count(e), "|", "OK" if ok else "FAIL"); sys.exit(0 if ok else 1)' <notices file>
+  ```
+
+  Expected: `OK` (a non-empty expected notice, the header once, the notice once) for each of the two files; also compare the notice with lines 8 to 24 of the original file.
+- [ ] **#88**, Apple Silicon macOS qualification (target: macOS 13 or later on Apple Silicon; Intel is out of scope; signing and notarization are not prerequisites). Criteria 5 to 7 as recorded on #88: one acceptance run on the release candidate using the CI package job's artifacts (checksum, extraction, install, launch, one local file, one radio stream, clean quit); the install text states the signing and Gatekeeper limits accurately (a text check); ddsonic cleans up yt-dlp's processes and temporary files on macOS in real use, as a fail-closed count check inside that run (both counts zero before and after). The owner runs it on the physical Mac. The macOS download-reliability concern stays on #88 and is revisited if the real packaging workflow meets it.
+- [ ] **Publication** stays with the owner: check the draft, then publish by hand; commit the acceptance summary into the release record.
