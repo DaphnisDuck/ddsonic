@@ -1,6 +1,7 @@
 package lyrics
 
 import (
+	"errors" // ddsonic
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -200,9 +201,9 @@ func TestFetchLRCLIBHTTPError(t *testing.T) {
 	defer srv.Close()
 	installTestClient(t, srv.URL)
 
-	// LRCLIB returns 500; should fall through to NetEase which returns no songs → ErrNotFound.
+	// LRCLIB returns 500; ddsonic: a busy LRCLIB is ErrUnavailable, not "no lyrics" (#82).
 	_, err := Fetch("a", "b")
-	if err != ErrNotFound {
-		t.Errorf("Fetch after 500 → NetEase empty = %v, want ErrNotFound", err)
+	if err != ErrUnavailable || !errors.Is(err, ErrNotFound) {
+		t.Errorf("Fetch after 500 = %v, want ErrUnavailable (also ErrNotFound)", err)
 	}
 }

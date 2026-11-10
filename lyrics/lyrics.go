@@ -74,7 +74,7 @@ func cleanQuery(str string) string {
 // Fetch requests lyrics for the given artist and title.
 // It tries LRCLIB first, then falls back to NetEase Cloud Music when that is
 // turned on (ddsonic: SetNetEaseFallback, off by default).
-// Returns ErrNotFound if neither source has lyrics.
+// Returns ErrNotFound if neither source has lyrics (ddsonic: ErrUnavailable, #82).
 //
 // For YouTube/SoundCloud tracks where Artist is the uploader and Title
 // contains "Artist - Song", the title is split to build a better query.
@@ -108,14 +108,14 @@ func Fetch(artist, title string) ([]Line, error) {
 
 	// Fallback to NetEase Cloud Music.
 	if !netEaseFallback.Load() { // ddsonic: plain HTTP, so only when asked for (netease_ddsonic.go, #136)
-		return nil, ErrNotFound
+		return nil, notFoundAfter(err) // ddsonic: ErrUnavailable when LRCLIB was busy (#82)
 	}
-	lines, err = fetchNetEase(query)
-	if err == nil && len(lines) > 0 {
+	lines, neteaseErr := fetchNetEase(query) // ddsonic: err stays LRCLIB's (#82)
+	if neteaseErr == nil && len(lines) > 0 {
 		return lines, nil
 	}
 
-	return nil, ErrNotFound
+	return nil, notFoundAfter(err) // ddsonic: ErrUnavailable when LRCLIB was busy (#82)
 }
 
 // ParseEmbedded converts lyrics read from local file tags into display lines.
@@ -152,7 +152,7 @@ func fetchLRCLIB(query string) ([]Line, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("lrclib: %s", resp.Status)
+		return nil, newLRCLIBStatusError(resp) // ddsonic: keeps the status code (#82)
 	}
 
 	var results []lrcResponse

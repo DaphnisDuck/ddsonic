@@ -10,3 +10,5 @@ netease_lyrics = true
 With it on, ddsonic asks NetEase after any LRCLIB lookup that fails: when LRCLIB answers with an error, cannot be reached, or has no lyrics for the track.
 
 **Privacy.** The NetEase lookup uses plain HTTP, not HTTPS. The track's artist and title are sent to music.163.com unencrypted, and the lyrics come back the same way: anyone on the network path, such as a public Wi-Fi operator or your network provider, can see which song you are playing and could change the lyrics shown. Leave the setting off (the default) to keep lyrics lookups encrypted.
+
+**When LRCLIB is busy.** If LRCLIB cannot be reached, times out, or answers that it is overloaded (HTTP 429 or a server error), and no other source has lyrics, the lyrics view says "Lyrics service unavailable, try again later." instead of "No lyrics found for this track."; press `r` to try again.
