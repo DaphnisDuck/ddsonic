@@ -131,7 +131,7 @@ This consolidates requirements that already exist, with their sources. It adds n
   if exp != [""] and len(heads) == 1:
       end = next((j for j in range(heads[0] + 1, len(lines)) if lines[j] == SEP), len(lines))
       inside = len(hits(lines[heads[0] + 1:end]))
-      ok = inside == 1 and len(hits(lines)) == 1
+      ok = inside == 1 and len(hits(lines)) == 1 and lines.count("mpg123: src/libmpg123/icy2utf8.c") == 1
   print("expected lines", len(exp), "| headings", len(heads), "| notice in its section", inside, "| notice anywhere", len(hits(lines)), "|", "OK" if ok else "FAIL")
   sys.exit(0 if ok else 1)
   PY
