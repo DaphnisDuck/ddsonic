@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -146,13 +147,27 @@ func numberedAt(file, base string) (string, bool) {
 	return base, false
 }
 
+// errNoOrigin: the clone does not have a shifted file's citation origin.
+var errNoOrigin = errors.New("no citation origin")
+
+// skipMissingOrigin decides a missing citation origin as a missing base is
+// decided: a shallow clone, which cannot have the history, skips, unless the
+// check is strict; a full clone fails, since the origin should be there.
+func skipMissingOrigin(shallow, strict bool) bool { return shallow && !strict }
+
+// shallowClone reports whether git's repository is a shallow clone.
+func shallowClone(git func(...string) (string, error)) bool {
+	out, err := git("rev-parse", "--is-shallow-repository")
+	return err == nil && strings.TrimSpace(out) == "true"
+}
+
 // shiftedFailures checks a shifted file's cited lines ns, numbered at
 // origin, against cur, the file's text now: each is translated through git
 // diff -U0 origin. git runs git in the repository. An origin the clone does
 // not have is an error, never a pass.
 func shiftedFailures(git func(...string) (string, error), file, origin, cur string, ns []int) ([]string, error) {
 	if _, err := git("cat-file", "-e", origin+"^{commit}"); err != nil {
-		return nil, fmt.Errorf("%s: its citation origin %.12s is not in this clone (fetch it, or the whole history): %v", file, origin, err)
+		return nil, fmt.Errorf("%s: its citation origin %.12s is not in this clone (fetch it, or the whole history): %w", file, origin, errNoOrigin)
 	}
 	diff, err := git("diff", "-U0", "--no-ext-diff", origin, "--", file)
 	if err != nil {
@@ -221,7 +236,7 @@ func TestCatalogCitationsDoNotMove(t *testing.T) {
 			}
 		}
 	}
-	checked := 0
+	checked, skipped := 0, ""
 	for file, ns := range lines {
 		if origin, shifted := numberedAt(file, base); shifted {
 			cur, err := os.ReadFile(file)
@@ -234,8 +249,14 @@ func TestCatalogCitationsDoNotMove(t *testing.T) {
 			}
 			sort.Ints(sorted)
 			checked += len(sorted)
-			bad, err := shiftedFailures(func(args ...string) (string, error) { return gitOut(t, args...) }, file, origin, string(cur), sorted)
-			if err != nil {
+			git := func(args ...string) (string, error) { return gitOut(t, args...) }
+			bad, err := shiftedFailures(git, file, origin, string(cur), sorted)
+			switch {
+			case errors.Is(err, errNoOrigin) && skipMissingOrigin(shallowClone(git), os.Getenv("DDSONIC_CITATION_STRICT") == "1"):
+				// The other files are still checked; the skip comes last,
+				// so it never hides their failures.
+				skipped = "citation check: SKIPPED for " + file + ": " + err.Error() + "; this is a shallow clone"
+			case err != nil:
 				t.Error(err)
 			}
 			for _, b := range bad {
@@ -257,6 +278,9 @@ func TestCatalogCitationsDoNotMove(t *testing.T) {
 	}
 	if checked == 0 {
 		t.Fatal("no citation found: the pattern no longer matches the catalog")
+	}
+	if skipped != "" {
+		t.Skip(skipped)
 	}
 	t.Logf("%d cited lines in %d files, none moved since %.12s", checked, len(lines), base)
 }
@@ -478,5 +502,57 @@ func TestShiftedCitationFromAFixedOrigin(t *testing.T) {
 	}
 	if at, shifted := numberedAt("plan.md", base); at != base || shifted {
 		t.Errorf("plan.md's citations are read at %q (shifted %v), want the base", at, shifted)
+	}
+}
+
+// A missing citation origin is decided as a missing base is: a shallow
+// clone skips unless strict; a full clone, or strict mode, fails.
+func TestMissingCitationOrigin(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		shallow, strict bool
+		skip            bool
+	}{
+		{"shallow: a skip", true, false, true},
+		{"full clone: a failure", false, false, false},
+		{"strict and shallow: a failure", true, true, false},
+		{"strict, full clone: a failure", false, true, false},
+	} {
+		if got := skipMissingOrigin(tt.shallow, tt.strict); got != tt.skip {
+			t.Errorf("%s: skip = %v", tt.name, got)
+		}
+	}
+
+	// Real clones: a depth-1 clone lacks the origin and says it is shallow;
+	// a full clone of the same history has it.
+	src := &fixture{t: t, dir: t.TempDir()}
+	src.git("init", "-q")
+	src.write("CHANGELOG.md", "# Changelog\n\n- one\n")
+	origin := src.commit("origin")
+	src.write("CHANGELOG.md", "# Changelog\n\n## new\n\n- one\n")
+	src.commit("a section above")
+	in := func(dir string) func(...string) (string, error) {
+		return func(args ...string) (string, error) {
+			cmd := exec.Command("git", args...)
+			cmd.Dir, cmd.Env = dir, gitEnv()
+			out, err := cmd.Output()
+			return string(out), err
+		}
+	}
+	for _, c := range []struct {
+		name, depth string
+		shallow     bool
+		missing     bool
+	}{{"a depth-1 clone", "--depth=1", true, true}, {"a full clone", "--no-local", false, false}} {
+		dst := filepath.Join(t.TempDir(), "clone")
+		src.git("clone", "-q", c.depth, "file://"+src.dir, dst)
+		git := in(dst)
+		if got := shallowClone(git); got != c.shallow {
+			t.Errorf("%s: shallow = %v, want %v", c.name, got, c.shallow)
+		}
+		_, err := shiftedFailures(git, "CHANGELOG.md", origin, "# Changelog\n\n## new\n\n- one\n", []int{3})
+		if errors.Is(err, errNoOrigin) != c.missing {
+			t.Errorf("%s: err %v, want a missing origin %v", c.name, err, c.missing)
+		}
 	}
 }
