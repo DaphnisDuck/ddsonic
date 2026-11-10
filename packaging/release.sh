@@ -108,6 +108,11 @@ for nested in github.com/dop251/goja/ftoa/internal/fast/LICENSE_V8 \
 		exit 1
 	fi
 done
+# ddsonic: mpg123's icy2utf8.c notice must be reproduced (notices.sh, #121).
+if ! grep -qxF "mpg123: src/libmpg123/icy2utf8.c" "$work/$bin/THIRD_PARTY_NOTICES"; then
+	echo "release: THIRD_PARTY_NOTICES lacks the notice of mpg123's icy2utf8.c" >&2
+	exit 1
+fi
 cp "$work/$bin/THIRD_PARTY_NOTICES" "$tree/THIRD_PARTY_NOTICES"
 
 pack "$bin.tar.gz" "$bin"
