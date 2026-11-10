@@ -32,9 +32,11 @@ func (m *Model) scheduleReconnect(now time.Time) {
 // Update handles messages: key presses, ticks, and window resizes. After each
 // message it drops a gapless preload that no longer matches the next track.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	sleepWas := m.sleepWatch(msg) // ddsonic: the sleep timer (sleep_ddsonic.go)
 	next, cmd := m.update(msg)
 	if nm, ok := next.(Model); ok {
 		nm.dropStalePreload()
+		nm.sleepUpdate(msg, sleepWas)     // ddsonic
 		cmd = nm.libArtworkSync(msg, cmd) // ddsonic: the info view's artwork (library_info.go)
 		if nm.quitting {
 			nm.libStop() // ddsonic: cancels foreground library work

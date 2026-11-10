@@ -365,6 +365,8 @@ type Model struct {
 
 	lib libraryState // ddsonic: library navigation stack
 
+	sleep sleepTimer // ddsonic: the sleep timer (sleep_ddsonic.go)
+
 	// Jump to time mode
 	jumping   bool
 	jumpInput string

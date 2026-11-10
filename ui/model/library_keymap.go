@@ -74,6 +74,7 @@ var (
 	libPlayerKeys = []libKeyHelp{
 		{[]string{"s"}, "s", "Stop"},
 		{[]string{"+", "=", "-"}, "+ -", "Volume"},
+		{[]string{"Z"}, "Z", "Sleep"}, // the sleep timer (sleep_ddsonic.go)
 		{[]string{"ctrl+g"}, "Ctrl+G", "Hide keys"},
 	}
 

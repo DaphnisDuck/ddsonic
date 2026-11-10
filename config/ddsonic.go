@@ -4,7 +4,10 @@
 
 package config
 
-import "time"
+import (
+	"strconv"
+	"time"
+)
 
 // Defaults for how old a source's last sync may get before startup syncs
 // again: Spotify rate-limits development-mode apps, YouTube's reads cost
@@ -12,6 +15,9 @@ import "time"
 const (
 	DefaultSpotifyRefresh = 2 * time.Hour
 	DefaultYouTubeRefresh = 2 * time.Hour
+	// DefaultSleepFade is the sleep timer's fade-out unless the config
+	// says otherwise.
+	DefaultSleepFade = 30 * time.Second
 )
 
 // DdsonicConfig is the [ddsonic] section.
@@ -33,10 +39,13 @@ type DdsonicConfig struct {
 	// none. Off by default: the lookup is plain HTTP, so the artist and
 	// title go over the network unencrypted (#136).
 	NetEaseLyrics bool
+	// SleepFade is how long the sleep timer fades out before it pauses
+	// playback; 0 pauses at once (sleep_fade_seconds, #35).
+	SleepFade time.Duration
 }
 
 func defaultDdsonicConfig() DdsonicConfig {
-	return DdsonicConfig{SpotifyRefresh: DefaultSpotifyRefresh, YouTubeRefresh: DefaultYouTubeRefresh, Border: true, Artwork: true}
+	return DdsonicConfig{SpotifyRefresh: DefaultSpotifyRefresh, YouTubeRefresh: DefaultYouTubeRefresh, Border: true, Artwork: true, SleepFade: DefaultSleepFade}
 }
 
 // parseKey applies one key of the [ddsonic] section. Invalid values keep
@@ -55,6 +64,8 @@ func (c *DdsonicConfig) parseKey(key, val string) {
 		setBool(&c.Artwork, val)
 	case "netease_lyrics":
 		setBool(&c.NetEaseLyrics, val)
+	case "sleep_fade_seconds":
+		setSeconds(&c.SleepFade, val)
 	}
 }
 
@@ -73,5 +84,13 @@ func setBool(b *bool, val string) {
 		*b = true
 	case "false":
 		*b = false
+	}
+}
+
+// setSeconds sets d from a whole number of seconds, keeping d when it is
+// invalid or negative.
+func setSeconds(d *time.Duration, val string) {
+	if v, err := strconv.Atoi(parseString(val)); err == nil && v >= 0 {
+		*d = time.Duration(v) * time.Second
 	}
 }

@@ -819,6 +819,9 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.saveConfigKey("shuffle", fmt.Sprintf("%v", m.playlist.Shuffled()))
 		return m.rearmPreload()
 
+	case "Z": // ddsonic: the sleep timer (sleep_ddsonic.go)
+		m.cycleSleepTimer()
+
 	case "tab":
 		m.focus = m.nextMainFocus(m.focus)
 	case "shift+tab":

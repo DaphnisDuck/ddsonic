@@ -846,6 +846,9 @@ func (m Model) renderPlaybackHeader() string {
 	if count := len(m.favSet); count > 0 {
 		badges = append(badges, activeToggle.Render(fmt.Sprintf("[%s %d]", favHeart, count)))
 	}
+	if badge := m.sleepBadge(); badge != "" { // ddsonic: the sleep timer
+		badges = append(badges, activeToggle.Render(badge))
+	}
 	if total := m.playlist.Len(); total > 0 {
 		badges = append(badges, dimStyle.Render(fmt.Sprintf("[%d/%d]", m.playlist.Index()+1, total)))
 	}

@@ -112,6 +112,10 @@ eq = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 # When LRCLIB has no lyrics, also look on NetEase Cloud Music (default: false).
 # Plain HTTP: the artist and title are sent unencrypted. See docs/lyrics.md.
 # netease_lyrics = false
+#
+# The sleep timer (Z) fades out over this many seconds before it pauses
+# playback; 0 pauses without a fade (default: 30). See docs/ddsonic/navigation.md.
+# sleep_fade_seconds = 30
 
 # --- Spotify (optional; needs a Premium account) ---
 #

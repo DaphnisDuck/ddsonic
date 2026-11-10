@@ -116,3 +116,11 @@ The settings panel shows the queue's settings: **SRC** is the playing track's so
 Keys that jump to other parts of cliamp are disabled, including provider switching (`S`, `R`, `L`, `N`, …), the pickers (`t`, `Ctrl+V`, `d`), the full-screen visualizer (`V`), `u`, `w`, the playlist manager and the favorite-tracks playlist (their `p` and `n` are previous and next here; `f` stars radio stations, see above), Mono (`m`), Metadata (`Ctrl+I`, which terminals send as Tab) and the keymap overlay (`?`, `Ctrl+K`). The key bar replaces the overlay; `Ctrl+K` still opens it over cliamp's own screens.
 
 Each view's keys come from one table in `ui/model/library_keymap.go`: the library's own keys, then the cliamp keys it passes through. The gate passes exactly the cliamp keys the table lists, and the key bar shows the same table, so a cliamp key works in a view if and only if its bar lists it. The library's own keys are handled in `handleLibraryKey` (`ui/model/library_nav.go`); a new one needs a row in the table too. To bring a cliamp key back, add a row to the view's table.
+
+## Sleep timer
+
+`Z` (Shift+Z) sets the sleep timer, in the library and the queue: each press steps through 15, 30, 45, 60 and 90 minutes, then off. Each choice counts from the moment you press it, so pressing again sets a new time from now. The header shows the time left (`[Sleep 23m]`, and seconds in the last minute).
+
+When the time is up, playback pauses: the track, its position and the queue stay as they were, and `Space` resumes. For the last 30 seconds before that the music fades out, ending at the moment it pauses. The fade does not change your volume setting. Turning the timer off, or choosing another time, during the fade brings the sound straight back; so does changing the volume, pausing, stopping, skipping or seeking, which also turns the timer off. Changing tracks before the fade starts leaves the timer as it is. If playback is already paused or stopped when the time is up, the timer just ends.
+
+The fade's length is `sleep_fade_seconds` in the `[ddsonic]` section of config.toml (default 30; `0` pauses without a fade). The timer is not kept when ddsonic quits.

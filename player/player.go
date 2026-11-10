@@ -51,6 +51,7 @@ type Player struct {
 	playing         atomic.Bool
 	paused          atomic.Bool
 	mono            atomic.Bool
+	fade            fadeGain // ddsonic: the sleep timer's fade-out (fade_ddsonic.go)
 	resampleQuality int
 	bitDepth        int // 16 or 32
 	tapBufferFrames int
@@ -347,7 +348,7 @@ func (p *Player) playPipelineForGeneration(tp *trackPipeline, generation uint64)
 		}
 
 		p.tap = newTap(s, p.tapBufferFrames, int(p.sr), p.speakerBufferFrames)
-		s = &volumeStreamer{s: p.tap, vol: &p.volume, mono: &p.mono, cachedDB: math.NaN()}
+		s = &volumeStreamer{s: p.tap, vol: &p.volume, mono: &p.mono, cachedDB: math.NaN(), fade: &p.fade} // ddsonic: fade
 		p.ctrl = &beep.Ctrl{Streamer: s}
 		p.started = true
 		p.current = tp

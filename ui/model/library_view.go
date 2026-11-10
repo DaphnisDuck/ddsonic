@@ -162,7 +162,7 @@ func (m *Model) libHeaderLine() string {
 	if ol, ok := f.level.(library.OrderedLevel); ok {
 		label += " · " + ol.OrderName()
 	}
-	if badge := m.libSyncBadge(); badge != "" {
+	if badge := joinHeaderBadges(m.libSyncBadge(), m.sleepBadge()); badge != "" { // ddsonic: and the sleep timer
 		label += "  " + badge
 	}
 	if _, pending := m.libPending(f); (f.loading() && len(f.entries) == 0) || f.err != nil || pending {
