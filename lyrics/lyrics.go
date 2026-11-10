@@ -72,7 +72,8 @@ func cleanQuery(str string) string {
 }
 
 // Fetch requests lyrics for the given artist and title.
-// It tries LRCLIB first, then falls back to NetEase Cloud Music.
+// It tries LRCLIB first, then falls back to NetEase Cloud Music when that is
+// turned on (ddsonic: SetNetEaseFallback, off by default).
 // Returns ErrNotFound if neither source has lyrics.
 //
 // For YouTube/SoundCloud tracks where Artist is the uploader and Title
@@ -106,6 +107,9 @@ func Fetch(artist, title string) ([]Line, error) {
 	}
 
 	// Fallback to NetEase Cloud Music.
+	if !netEaseFallback.Load() { // ddsonic: plain HTTP, so only when asked for (netease_ddsonic.go, #136)
+		return nil, ErrNotFound
+	}
 	lines, err = fetchNetEase(query)
 	if err == nil && len(lines) > 0 {
 		return lines, nil

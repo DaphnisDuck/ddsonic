@@ -108,6 +108,10 @@ eq = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 #
 # Album artwork in the track info view, in Kitty and Ghostty (default: true)
 # artwork = true
+#
+# When LRCLIB has no lyrics, also look on NetEase Cloud Music (default: false).
+# Plain HTTP: the artist and title are sent unencrypted. See docs/lyrics.md.
+# netease_lyrics = false
 
 # --- Spotify (optional; needs a Premium account) ---
 #

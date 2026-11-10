@@ -29,6 +29,10 @@ type DdsonicConfig struct {
 	// Artwork shows album artwork in the track info view, in terminals
 	// that can draw images.
 	Artwork bool
+	// NetEaseLyrics looks lyrics up on NetEase Cloud Music when LRCLIB has
+	// none. Off by default: the lookup is plain HTTP, so the artist and
+	// title go over the network unencrypted (#136).
+	NetEaseLyrics bool
 }
 
 func defaultDdsonicConfig() DdsonicConfig {
@@ -49,6 +53,8 @@ func (c *DdsonicConfig) parseKey(key, val string) {
 		setBool(&c.Border, val)
 	case "artwork":
 		setBool(&c.Artwork, val)
+	case "netease_lyrics":
+		setBool(&c.NetEaseLyrics, val)
 	}
 }
 

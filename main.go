@@ -40,6 +40,7 @@ import (
 	"github.com/bjarneo/cliamp/ipc"
 	"github.com/bjarneo/cliamp/library"
 	"github.com/bjarneo/cliamp/luaplugin"
+	"github.com/bjarneo/cliamp/lyrics"
 	"github.com/bjarneo/cliamp/mediactl"
 	"github.com/bjarneo/cliamp/player"
 	"github.com/bjarneo/cliamp/playlist"
@@ -115,6 +116,8 @@ func run(overrides config.Overrides, positional []string, daemon, visualizer60FP
 	}
 	overrides.Apply(&cfg)
 	hideProviders(&cfg) // ddsonic: only 1.0's providers (providers_ddsonic.go)
+	// ddsonic: the plain-HTTP NetEase lyrics only when asked for (#136).
+	lyrics.SetNetEaseFallback(cfg.Ddsonic.NetEaseLyrics)
 
 	closeLog, appliedLevel, logErr := initLogging(cfg.LogLevel)
 	defer closeLog()
@@ -273,20 +276,7 @@ func run(overrides config.Overrides, positional []string, daemon, visualizer60FP
 		if !explicitOAuth && !hasCookies && !hasFallbackOAuth {
 			fmt.Fprintf(os.Stderr, "YouTube: no credentials available (configure client_id/client_secret or cookies_from in config.toml)\n")
 		} else {
-			if !player.YTDLPAvailable() {
-				fmt.Fprintf(os.Stderr, "\nYouTube requires yt-dlp for audio playback.\n")
-				fmt.Fprintf(os.Stderr, "Install command: %s\n\n", player.YtdlpInstallHint())
-				fmt.Fprintf(os.Stderr, "Press Enter to install automatically, or Ctrl+C to skip... ")
-				fmt.Scanln()
-				fmt.Fprintf(os.Stderr, "Installing yt-dlp...\n")
-				if err := player.InstallYTDLP(); err != nil {
-					fmt.Fprintf(os.Stderr, "Installation failed: %v\n", err)
-					fmt.Fprintf(os.Stderr, "YouTube providers disabled. Install manually and restart.\n\n")
-				} else {
-					fmt.Fprintf(os.Stderr, "yt-dlp installed successfully!\n\n")
-				}
-			}
-			if player.YTDLPAvailable() {
+			if ytdlpReady(os.Stderr) { // ddsonic: instructions only, never an install (ytdlp_missing_ddsonic.go, #82)
 				var all, video, music playlist.Provider
 				if explicitOAuth {
 					oauthProviders := ytmusic.New(nil, ytClientID, ytClientSecret, hasCookies)

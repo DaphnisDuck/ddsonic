@@ -1,8 +1,19 @@
 # Lyrics
 
-Press `y` to show lyrics for the current track. For a local file, cliamp first uses lyrics embedded in file tags. If the file has no embedded lyrics, cliamp fetches lyrics from LRCLIB and NetEase Cloud Music.
+Press `y` to show lyrics for the current track. For a local file, cliamp first uses lyrics embedded in file tags. If the file has no embedded lyrics, cliamp fetches lyrics from LRCLIB.
 
 For Spotify tracks, cliamp asks Spotify directly for synced lyrics first (requires being signed in to the Spotify provider); if that fails it falls back to the same lookup as every other source.
+
+### NetEase Cloud Music (off by default)
+
+When LRCLIB has no lyrics, ddsonic can also look on NetEase Cloud Music. It does not unless you turn it on:
+
+```toml
+[ddsonic]
+netease_lyrics = true
+```
+
+This lookup uses plain HTTP, not HTTPS. The track's artist and title are sent to music.163.com unencrypted, and the lyrics come back the same way: anyone on the network path, such as a public Wi-Fi operator or your network provider, can read which song you are playing and could change the lyrics shown. The LRCLIB lookup uses HTTPS.
 
 ## Modes
 

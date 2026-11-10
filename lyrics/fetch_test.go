@@ -125,6 +125,7 @@ func TestFetchReturnsNotFoundWhenBothSourcesEmpty(t *testing.T) {
 }
 
 func TestFetchNetEaseFallback(t *testing.T) {
+	withNetEase(t) // ddsonic: off unless the config turns it on (#136)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/api/search":
