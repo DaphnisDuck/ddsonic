@@ -94,6 +94,15 @@ ddsonic follows [Semantic Versioning](https://semver.org/) (owner, 2026-11-03):
 
 A change moves through three separate statuses: development complete (reviewed, and accepted by the owner), integrated (merged into `main`), and released (published as part of a version). Reaching one does not imply the next.
 
+## UltraReview policy
+
+Owner policy (2026-11-10) for every ddsonic release. UltraReview is advisory: the release gates and the owner's approval remain authoritative.
+
+- **When.** Once per meaningful release, after the source freeze and before the tag. A small or low-risk maintenance release may skip it by an explicit, risk-based owner decision. An additional run needs a specific justification and the owner's authorization.
+- **Who and budget.** Only the owner launches a run. No paid review, automatic retry or additional run is started without the owner's explicit approval. v1.1.0 uses two of the three included free runs, because its accumulated delta exceeded the size limit and had to be split into two runs; the last included free run is reserved for v1.2.0. After v1.2.0 the owner evaluates the demonstrated value of UltraReview before adopting paid reviews for later releases.
+- **Scope.** Confirm the scope and the size limits before launch (the documented default is 500 files and 8,000 changed lines). Review from clean checkouts of the public repository, against explicit comparison bases. The full v1.1.0 delta, `v1.0.0` to `b0d541d`, was 131 files and 12,473 changed lines, so it was split into two sequential runs: `v1.0.0` to `6ddc453`, then `6ddc453` to `b0d541d`.
+- **Records.** Preserve the original evidence privately where appropriate. Record the findings, their verification, dispositions and remediation in GitHub (v1.1.0: #156). Changes made after the UltraReview get an independent review, and their exact delta is recorded.
+
 ## v1.1.0 release readiness
 
 This consolidates requirements that already exist, with their sources. It adds none. The owner has declared the v1.1.0 feature freeze (release-specific documentation is still allowed); the owner's own acceptance decides each gate, including the scope gate below. Execution has not started, and nothing here authorizes a tag, a publication or the final release. One integrated candidate is intended, not a campaign of candidates.
@@ -101,7 +110,7 @@ This consolidates requirements that already exist, with their sources. It adds n
 **Before the tag**
 
 - [ ] **Scope frozen.** The milestone items are done or deferred. Deferred, by owner decision: #83 (R-12), #90 (release provenance), #135 (channel favorites), #131 (marquee). The umbrellas #27 and #82 and the agent-docs cleanup (#30) are not blockers.
-- [ ] **Bounded UltraReview**, run by the owner after the freeze and before the tag, on the exact diff from the published `v1.0.0` (`9ae61bcf6604e032b6e690394d10cb0bade80543`) to the frozen v1.1.0 commit. The Dispatcher reports the delta's size before the owner invokes it. If a blocker needs a code change, the affected review and acceptance evidence are revalidated before continuing. The candidate is built from the frozen, reviewed commit.
+- [ ] **Bounded UltraReview**, run by the owner after the freeze and before the tag, on the exact diff from the published `v1.0.0` (`9ae61bcf6604e032b6e690394d10cb0bade80543`) to the frozen v1.1.0 commit. The Dispatcher reports the delta's size before the owner invokes it. If a blocker needs a code change, the affected review and acceptance evidence are revalidated before continuing. The candidate is built from the frozen, reviewed commit. How it is run, budgeted and recorded: [UltraReview policy](#ultrareview-policy).
 - [ ] **`CHANGELOG.md`** has a `## [1.1.0]` section.
 - [ ] **Required CI is green** on the frozen commit (`go`, `sdk-contract`, CodeQL). The macOS workflow is evidence, not a substitute for the macOS acceptance below.
 - [ ] **Privacy and packaging checks:** [Before anything is made public](#before-anything-is-made-public) for the new public files, the release page, the SBOM, the notices, the source archive and the paths embedded in the binary.
