@@ -17,7 +17,7 @@ ddsonic is a fork of [cliamp](https://github.com/bjarneo/cliamp). Versions befor
 - The NetEase lyrics fallback is off by default, because it sends the artist and title over unencrypted HTTP. `[ddsonic] netease_lyrics = true` turns it back on. Lyrics that only NetEase has now show "No lyrics found" unless it is on. See [docs/ddsonic/lyrics.md](docs/ddsonic/lyrics.md).
 - When the Spotify sign-in could not be renewed for the moment (network or Spotify trouble), the message no longer advises `ddsonic spotify reset`, which deletes the stored sign-in; it says the sign-in is kept and ddsonic tries again later. When Spotify cannot be reached, the error says Spotify is unavailable for now and the sign-in is kept, rather than "sign-in unavailable".
 - `ddsonic upgrade` points to the releases page and to building from source, and no longer mentions a package manager or the AUR, where no ddsonic package exists yet.
-- A build from source reports its version counted from the latest stable release tag, as `<tag>-<commits since>-g<commit>` (it was counted from `v1.0.0-rc.3`). Release builds are unchanged.
+- With a reachable stable tag, `make build` reports the highest such tag, followed by `-<commits since>-g<commit>` on later commits (it was counted from `v1.0.0-rc.3`). Release builds are unchanged.
 
 ### Removed
 - The offer to install yt-dlp at startup. When yt-dlp is missing, ddsonic now prints how to install it and starts with YouTube off. It never runs a package manager, `sudo` or `pip`, and never waits for input for this.
