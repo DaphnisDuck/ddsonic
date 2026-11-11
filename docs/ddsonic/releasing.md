@@ -48,7 +48,7 @@ These checks are mandatory before a release, a source archive or the repository 
 docker build -t ddsonic-build -f packaging/Dockerfile packaging
 mkdir -p dist
 docker run --rm -v "$PWD":/src:ro -v "$PWD/dist":/out ddsonic-build \
-    /src/packaging/release.sh v1.0.0-test.1 "$(git log -1 --format=%ct)"
+    /src/packaging/release.sh v1.1.0-test.1 "$(git log -1 --format=%ct)"
 ```
 
 This builds the committed tree (`HEAD`); `dist/` is ignored by git. The files are owned by root, as Docker wrote them. Uncommitted work is built only from a commit that holds all of it, passed as the third argument; `git stash create` leaves untracked files out.
@@ -94,9 +94,9 @@ ddsonic follows [Semantic Versioning](https://semver.org/) (owner, 2026-11-03):
 
 A change moves through three separate statuses: development complete (reviewed, and accepted by the owner), integrated (merged into `main`), and released (published as part of a version). Reaching one does not imply the next.
 
-## v1.1.0 release readiness (provisional until feature freeze)
+## v1.1.0 release readiness
 
-This consolidates requirements that already exist, with their sources. It adds none. It is provisional: the scope is not frozen, and the owner's own acceptance decides each gate. Execution has not started, and nothing here authorizes a tag, a publication or the final release. One integrated candidate is intended, not a campaign of candidates.
+This consolidates requirements that already exist, with their sources. It adds none. The owner has declared the v1.1.0 feature freeze (release-specific documentation is still allowed); the owner's own acceptance decides each gate, including the scope gate below. Execution has not started, and nothing here authorizes a tag, a publication or the final release. One integrated candidate is intended, not a campaign of candidates.
 
 **Before the tag**
 
