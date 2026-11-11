@@ -151,9 +151,9 @@ jobs:
           if [ "$EVENT" != pull_request ]; then
             test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
           fi
-      - name: Go, as pinned in mise.toml, checked against its SHA-256
+      - name: Go, as pinned in the built commit's mise.toml, checked against its SHA-256
         run: |
-          sh packaging/darwin-arm64/ci-go.sh "$RUNNER_TEMP"
+          sh packaging/darwin-arm64/ci-go.sh "$RUNNER_TEMP" "$EXPECTED_COMMIT" # ddsonic: release.sh requires the tag's own Go
       - name: Codec libraries from their pinned sources (up to 3 attempts, for network resets)
         run: |
           for attempt in 1 2 3; do
