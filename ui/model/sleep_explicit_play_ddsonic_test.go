@@ -189,6 +189,61 @@ func TestSleepExplicitPlayLeavesTheFade(t *testing.T) {
 	}
 }
 
+// A provider load refused before it starts (its job or its context already
+// cancelled when the UI reaches it) is not a command: the fade, the timer
+// and the queue stay, and nothing is loaded.
+func TestSleepRefusedProviderLoadLeavesTheFade(t *testing.T) {
+	cancelledJob := func(op, params string) func(r *sleepRig) {
+		return func(r *sleepRig) {
+			msg := v2(r.t, op, params)
+			if err := msg.Jobs.Cancel(msg.JobID); err != nil {
+				r.t.Fatal(err)
+			}
+			r.update(msg)
+		}
+	}
+	cancelledRequest := func(op, id string) func(r *sleepRig) {
+		return func(r *sleepRig) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			req := libraryLoad(op, "spotify", id)
+			req.Context = ctx
+			r.update(req)
+		}
+	}
+	tests := []struct {
+		name string
+		do   func(r *sleepRig)
+	}{
+		{"IPC provider.load, job cancelled", cancelledJob("provider.load", `{"provider":"spotify","playlist":"p1"}`)},
+		{"IPC provider.load_album, job cancelled", cancelledJob("provider.load_album", `{"provider":"spotify","album":"a1"}`)},
+		{"older IPC provider.load, context cancelled", cancelledRequest("provider.load", "p1")},
+		{"older IPC provider.load_album, context cancelled", cancelledRequest("provider.load_album", "a1")},
+	}
+	for _, state := range []string{"fading", "pause pending"} {
+		for _, tt := range tests {
+			t.Run(state+"/"+tt.name, func(t *testing.T) {
+				r := sleepPlayRig(t)
+				if state == "fading" {
+					r.fading()
+				} else {
+					r.pending()
+				}
+				tt.do(r)
+				if !r.m.sleep.fading || len(r.e.fades) != 1 {
+					t.Fatalf("the refused load cancelled the fade: armed %v, fading %v, pending %v (fades %q)", r.armed(), r.m.sleep.fading, r.m.sleep.pausePending, r.e.fades)
+				}
+				if state == "fading" && !r.armed() || state == "pause pending" && !r.m.sleep.pausePending {
+					t.Errorf("the timer changed: armed %v, pending %v", r.armed(), r.m.sleep.pausePending)
+				}
+				if got := queuePaths(r.m); !slices.Equal(got, []string{"Q1", "Q2", "Q3"}) {
+					t.Errorf("queue %v, want it unchanged", got)
+				}
+			})
+		}
+	}
+}
+
 // A play accepted before the fade whose result arrives during it is not a
 // command given during the fade: the timer goes on, as for a library row
 // whose tracks load late.
