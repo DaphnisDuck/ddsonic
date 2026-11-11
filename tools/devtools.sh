@@ -59,7 +59,7 @@ github.com/stretchr/testify/@v/v1.12.1
 root=$(cd "$(dirname "$0")/.." && pwd)
 devtools=${DDSONIC_DEVTOOLS:-$HOME/.local/share/ddsonic/devtools}
 
-# go_pin is the Go version mise.toml pins, e.g. 1.27.3.
+# go_pin is the Go version mise.toml pins, e.g. 1.27.4.
 go_pin() {
 	sed -n 's/^go *= *"\([^"]*\)".*/\1/p' "$root/mise.toml"
 }

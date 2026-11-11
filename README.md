@@ -81,7 +81,7 @@ An AUR package, `ddsonic-bin`, is planned; it is not in the AUR yet.
 
 **From source**
 
-You need [Go](https://go.dev/dl/) 1.26.6 or later (ddsonic is built and tested with 1.27.3), a C compiler, `pkg-config`, and the ALSA and codec headers:
+You need [Go](https://go.dev/dl/) 1.26.6 or later (ddsonic is built and tested with 1.27.4), a C compiler, `pkg-config`, and the ALSA and codec headers:
 
 ```sh
 # Debian/Ubuntu

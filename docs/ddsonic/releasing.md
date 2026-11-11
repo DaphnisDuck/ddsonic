@@ -14,7 +14,7 @@ ddsonic's release build is Linux x86-64, from the pinned environment in `packagi
 
 ## How the binary is built
 
-- **Toolchain:** Go 1.27.3, from an image pinned by digest.
+- **Toolchain:** Go 1.27.4, from an image pinned by digest.
 - **Codecs:** FLAC, Vorbis and Ogg from one Debian 12 snapshot and mpg123 from a checksummed source archive, all linked statically, so the binary doesn't depend on the codec versions of the machine it runs on.
 - **Dynamic:** ALSA and glibc. Debian 12 sets the baseline, glibc 2.36. Tested on Arch and Debian 13.
 - **Reproducible:** two builds of the same commit in this image give the same bytes, and the source archive rebuilds to the same binary with no network.

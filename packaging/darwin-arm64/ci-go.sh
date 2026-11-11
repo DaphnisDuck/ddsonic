@@ -16,7 +16,7 @@ fail() { echo "ci-go: $*" >&2; exit 1; }
 
 version=$(awk -F'"' '$1 ~ /^go *= */ { print $2 }' mise.toml)
 case "$version" in
-1.27.3) sum=dd3908cf20959d798c1e06ebe5b72213f0505ce01373b40ce3110975a6cd99c2 ;;
+1.27.4) sum=91a44a2b8a716600ad94a4f143e156116620db8828086a6e3602291be9bd0bb4 ;;
 *) fail "mise.toml pins Go '$version', which has no SHA-256 here" ;;
 esac
 [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ] || fail "this installs Go for macOS on Apple Silicon only"

@@ -95,7 +95,7 @@ make check        # fmt + vet + test
 make install      # installs binary into ~/.local/bin
 ```
 
-- Go version: **1.27.3**, pinned in `mise.toml` (bumped deliberately; `go.mod` keeps upstream's minimum, 1.26).
+- Go version: **1.27.4**, pinned in `mise.toml` (bumped deliberately; `go.mod` keeps upstream's minimum, 1.26).
 - Linux build needs `libasound2-dev` / `alsa-lib` at build time.
 - For audio at runtime on PipeWire or PulseAudio, install `pipewire-alsa` or `pulseaudio-alsa` (README, Troubleshooting).
 - Optional runtime deps: `ffmpeg` (AAC/ALAC/Opus/WMA), `yt-dlp` (YT/SC/Bandcamp/Bilibili).
