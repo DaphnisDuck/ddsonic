@@ -26,6 +26,7 @@ import (
 	"github.com/bjarneo/cliamp/internal/playback"
 	"github.com/bjarneo/cliamp/ipc"
 	"github.com/bjarneo/cliamp/library"
+	"github.com/bjarneo/cliamp/provider"
 	"github.com/bjarneo/cliamp/ui"
 )
 
@@ -148,8 +149,9 @@ func (m *Model) sleepRemote(msg tea.Msg) {
 // sleepRemoteCommand reports whether msg is a volume or transport command
 // from MPRIS or IPC: anything that sets the volume, pauses, plays, stops,
 // skips or seeks, including the queue operations that stop playback
-// (clearing the queue, removing the playing track) or start it. Reading,
-// enqueueing and moving do not count.
+// (clearing the queue, removing the playing track) or start it, and a
+// provider load the handler accepts (it replaces the queue and plays).
+// Reading, browsing, enqueueing and moving do not count.
 func (m *Model) sleepRemoteCommand(msg tea.Msg) bool {
 	switch msg := msg.(type) {
 	case playback.PlayPauseMsg, playback.PlayMsg, playback.PauseMsg, playback.StopMsg,
@@ -160,6 +162,8 @@ func (m *Model) sleepRemoteCommand(msg tea.Msg) bool {
 		return msg.Play
 	case ipc.QueueRequestMsg: // the older IPC protocol (ipc_extended.go)
 		return m.sleepQueueCommand(msg.Op, msg.Index)
+	case ipc.LibraryRequestMsg: // the older IPC protocol
+		return m.sleepProviderLoad(msg.Op, msg.Provider)
 	case V2RequestMsg:
 		request, err := v2OperationRequest(msg.Request)
 		if err != nil {
@@ -171,6 +175,8 @@ func (m *Model) sleepRemoteCommand(msg tea.Msg) bool {
 			return true
 		case "url.load":
 			return request.Play
+		case "provider.load", "provider.load_album":
+			return m.sleepProviderLoad(request.Cmd, request.Provider)
 		}
 		return m.sleepQueueCommand(request.Cmd, request.Index)
 	}
@@ -187,6 +193,23 @@ func (m *Model) sleepQueueCommand(op string, index int) bool {
 		return m.playlist != nil && index == m.playlist.Index()
 	}
 	return false
+}
+
+// sleepProviderLoad reports whether a provider load would be accepted:
+// handleIPCLibrary refuses an unknown provider, and an album from one that
+// cannot load albums, before anything plays.
+func (m *Model) sleepProviderLoad(op, key string) bool {
+	if op != "provider.load" && op != "provider.load_album" {
+		return false
+	}
+	entry, ok := m.ipcProvider(key)
+	if !ok {
+		return false
+	}
+	if op == "provider.load_album" {
+		_, ok = entry.Provider.(provider.AlbumTrackLoader)
+	}
+	return ok
 }
 
 func (m *Model) sleepPlaying() bool {

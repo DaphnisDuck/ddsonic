@@ -102,6 +102,8 @@ func (m *Model) handleSpotSearchResultsKey(msg tea.KeyPressMsg) tea.Cmd {
 				return m.expandSpotAlbum(track, spotAlbumPlay)
 			}
 			m.closeSpotSearch()
+			// ddsonic: Enter plays now, a transport command for the sleep timer (#35)
+			m.sleepCommand()
 			return m.spotSearchPlay([]playlist.Track{track}) // ddsonic: Enter replaces the queue
 		}
 	case "a":
@@ -196,6 +198,9 @@ func (m *Model) expandSpotAlbum(album playlist.Track, action spotAlbumAction) te
 	if !ok {
 		m.setSpotSearchError("This provider cannot open albums.")
 		return nil
+	}
+	if action == spotAlbumPlay {
+		m.sleepCommand() // ddsonic: Enter accepted an album to play, a transport command for the sleep timer (#35)
 	}
 	m.spotSearch.albumLoading = true
 	m.spotSearch.err = ""
