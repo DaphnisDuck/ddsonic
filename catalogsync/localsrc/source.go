@@ -36,6 +36,8 @@ type Source struct {
 	dir      string
 	index    Index
 	readTags func(paths []string) []playlist.Track // replaced in tests
+	// implicit: dir is the default ~/Music, not a folder the user named.
+	implicit bool
 }
 
 var _ catalogsync.Source = (*Source)(nil)
@@ -51,6 +53,15 @@ func New(dir string, index Index) *Source {
 	return &Source{dir: dir, index: index, readTags: readTags}
 }
 
+// NewDefault returns a Source for the default music folder, which nobody
+// configured: while it does not exist and nothing is indexed, the library
+// is empty rather than failing to sync (#82). It is never created.
+func NewDefault(dir string, index Index) *Source {
+	s := New(dir, index)
+	s.implicit = true
+	return s
+}
+
 // Provider implements catalogsync.Source.
 func (*Source) Provider() string { return catalog.Local }
 
@@ -58,9 +69,10 @@ func (*Source) Provider() string { return catalog.Local }
 func (*Source) Collections() []string { return []string{Files} }
 
 // Fetch implements catalogsync.Source. It fails, leaving the catalog as it
-// is, when the folder is missing, or is empty while the catalog holds files
-// (an unmounted drive looks like that). Files under a subfolder it cannot
-// read are kept as last indexed rather than dropped.
+// is, when the folder is missing (except NewDefault's, never indexed), or is
+// empty while the catalog holds files (an unmounted drive looks like that).
+// Files under a subfolder it cannot read are kept as last indexed rather
+// than dropped.
 func (s *Source) Fetch(ctx context.Context, collection string, known catalogsync.Known) (catalog.Snapshot, error) {
 	if collection != Files {
 		return catalog.Snapshot{}, fmt.Errorf("unknown collection %q", collection)
@@ -70,7 +82,7 @@ func (s *Source) Fetch(ctx context.Context, collection string, known catalogsync
 		return catalog.Snapshot{}, err
 	}
 	found, unreadable, err := walk(ctx, s.dir)
-	if err != nil {
+	if err != nil && !s.neverCreated(err, indexed) {
 		return catalog.Snapshot{}, err
 	}
 	if len(found) == 0 && len(indexed) > 0 {
@@ -130,6 +142,14 @@ func (s *Source) Fetch(ctx context.Context, collection string, known catalogsync
 	snap := snapshot(files)
 	snap.Version = indexerVersion
 	return snap, nil
+}
+
+// neverCreated reports whether walkErr is the default folder not existing
+// while nothing was ever indexed from it: an empty library, as an empty
+// folder is (#82). A library that was indexed keeps failing when its folder
+// goes, and so do a configured folder, an unreadable one and a file.
+func (s *Source) neverCreated(walkErr error, indexed []catalog.IndexedFile) bool {
+	return s.implicit && len(indexed) == 0 && errors.Is(walkErr, fs.ErrNotExist)
 }
 
 // file is one indexed audio file and its track.

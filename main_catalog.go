@@ -169,10 +169,14 @@ func openCatalog(sp *spotify.SpotifyProvider, rp *radio.Provider, cfg config.Con
 			refresh: cfg.Ddsonic.YouTubeRefresh, worker: enricher,
 			lists: []string{catalog.CollectionAlbums, catalog.CollectionArtists}})
 	}
-	if dir := local.MusicDir(cfg.InitialDirectory); dir != "" {
+	if dir, implicit := local.ResolveMusicDir(cfg.InitialDirectory); dir != "" {
 		// Indexed at every startup: it rereads only changed files and
 		// writes nothing when none changed.
-		sources = append(sources, source{Source: localsrc.New(dir, rt.store)})
+		src := localsrc.New(dir, rt.store)
+		if implicit {
+			src = localsrc.NewDefault(dir, rt.store) // ddsonic: an absent ~/Music is empty (#82)
+		}
+		sources = append(sources, source{Source: src})
 	}
 	if rp != nil {
 		// Favorites and radios.toml, read from local files at every startup.
