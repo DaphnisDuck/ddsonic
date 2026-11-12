@@ -110,6 +110,11 @@ func run(overrides config.Overrides, positional []string, daemon, visualizer60FP
 	if err := startupChecks(); err != nil {
 		return err
 	}
+	stopMemDiag, err := startMemDiag(os.Getenv) // ddsonic: #168, off unless DDSONIC_MEMDIAG is set
+	if err != nil {
+		return err
+	}
+	defer stopMemDiag()
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("config: %w", err)

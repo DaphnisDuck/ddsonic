@@ -1,0 +1,172 @@
+--- a/player/player.go
++++ b/player/player.go
+@@ -1,6 +1,6 @@
+ // Modified by ddsonic on 2026-10-14: the CDN quarantine map is guarded by
+ // cdnMu for each access, never across network work
+-// (patches/go-librespot/0001-player-guard-cdn-quarantine-map.patch).
++// (patches/go-librespot/0001-player-guard-cdn-quarantine-map.patch); on 2026-11-12: opt-in diagnostic points in NewStream, no behaviour change (0004-player-diagnostic-hook.patch).
+ 
+ package player
+ 
+@@ -829,7 +829,7 @@
+ 
+ 	p.events.PostStreamResolveAudioFile(playbackId, int32(bitrate), media, file)
+ 
+-	log.Debugf("selected format %s (%x)", file.Format.String(), file.FileId)
++	log.Debugf("selected format %s (%x)", diagSelected(ctx, file).Format.String(), file.FileId)
+ 
+ 	audioKey, err := p.retrieveAudioKey(ctx, spotId, file.FileId)
+ 	if err != nil {
+@@ -907,30 +907,30 @@
+ 			return nil, fmt.Errorf("failed reading metadata page: %w", err)
+ 		}
+ 
+-		vorbisStream, err := vorbis.New(log, audioStream, meta, normalisationFactor)
++		vorbisStream, err := diagCtor[*vorbis.Decoder]{ctx, file}.done(vorbis.New(log, audioStream, meta, normalisationFactor))
+ 		if err != nil {
+ 			return nil, fmt.Errorf("failed initializing ogg vorbis stream: %w", err)
+ 		}
+ 
+ 		if vorbisStream.SampleRate != SampleRate {
+-			return nil, fmt.Errorf("unsupported sample rate: %d", vorbisStream.SampleRate)
++			return nil, diagGap(ctx, file, fmt.Errorf("unsupported sample rate: %d", vorbisStream.SampleRate))
+ 		} else if vorbisStream.Channels != Channels {
+-			return nil, fmt.Errorf("unsupported channels: %d", vorbisStream.Channels)
++			return nil, diagGap(ctx, file, fmt.Errorf("unsupported channels: %d", vorbisStream.Channels))
+ 		}
+ 
+ 		stream = vorbisStream
+ 		sampleRate = vorbisStream.SampleRate
+ 	} else if audioFormat == AudioFormatFLAC {
+ 		audioStream := io.NewSectionReader(decryptedStream, 0, rawStream.Size())
+-		flacStream, err := flac.New(log, audioStream, normalisationFactor)
++		flacStream, err := diagCtor[*flac.Decoder]{ctx, file}.done(flac.New(log, audioStream, normalisationFactor))
+ 		if err != nil {
+ 			return nil, fmt.Errorf("failed initializing flac stream: %w", err)
+ 		}
+ 
+ 		if flacStream.SampleRate != SampleRate {
+-			return nil, fmt.Errorf("unsupported sample rate: %d", flacStream.SampleRate)
++			return nil, diagGap(ctx, file, fmt.Errorf("unsupported sample rate: %d", flacStream.SampleRate))
+ 		} else if flacStream.Channels != Channels {
+-			return nil, fmt.Errorf("unsupported channels: %d", flacStream.Channels)
++			return nil, diagGap(ctx, file, fmt.Errorf("unsupported channels: %d", flacStream.Channels))
+ 		}
+ 
+ 		stream = flacStream
+@@ -938,15 +938,15 @@
+ 		bitDepth = flacStream.BitDepth
+ 	} else if audioFormat == AudioFormatMP3 {
+ 		audioStream := io.NewSectionReader(decryptedStream, 0, rawStream.Size())
+-		mp3Stream, err := mp3.New(log, audioStream, normalisationFactor)
++		mp3Stream, err := diagCtor[*mp3.Decoder]{ctx, file}.done(mp3.New(log, audioStream, normalisationFactor))
+ 		if err != nil {
+ 			return nil, fmt.Errorf("failed initializing mp3 stream: %w", err)
+ 		}
+ 
+ 		if mp3Stream.SampleRate != SampleRate {
+-			return nil, fmt.Errorf("unsupported sample rate: %d", mp3Stream.SampleRate)
++			return nil, diagGap(ctx, file, fmt.Errorf("unsupported sample rate: %d", mp3Stream.SampleRate))
+ 		} else if mp3Stream.Channels != Channels {
+-			return nil, fmt.Errorf("unsupported channels: %d", mp3Stream.Channels)
++			return nil, diagGap(ctx, file, fmt.Errorf("unsupported channels: %d", mp3Stream.Channels))
+ 		}
+ 
+ 		stream = mp3Stream
+@@ -958,7 +958,7 @@
+ 	// Seek to the correct position if needed.
+ 	if mediaPosition > 0 {
+ 		if err := stream.SetPositionMs(max(0, min(mediaPosition, int64(media.Duration())))); err != nil {
+-			return nil, fmt.Errorf("failed seeking stream: %w", err)
++			return nil, diagGap(ctx, file, fmt.Errorf("failed seeking stream: %w", err))
+ 		}
+ 	}
+ 
+--- /dev/null
++++ b/player/diag_ddsonic.go
+@@ -0,0 +1,85 @@
++// Added by ddsonic on 2026-11-12: an opt-in diagnostic hook on the stream
++// setup, for a non-release investigation
++// (patches/go-librespot/0004-player-diagnostic-hook.patch).
++
++package player
++
++import (
++	"context"
++	"sync/atomic"
++
++	metadatapb "github.com/devgianlu/go-librespot/proto/spotify/metadata"
++)
++
++// DiagPoint is a point of NewStream that a diagnostic hook is told about.
++type DiagPoint int
++
++const (
++	// DiagFormatSelected: the audio file to decode was chosen.
++	DiagFormatSelected DiagPoint = iota
++	// DiagDecoderOpened: the format's decoder was constructed.
++	DiagDecoderOpened
++	// DiagDecoderFailed: the format's decoder could not be constructed.
++	DiagDecoderFailed
++	// DiagFailedBeforeHandoff: a constructed decoder failed validation or
++	// the initial seek, and NewStream returned an error without it. The
++	// decoder is not closed here, as before.
++	DiagFailedBeforeHandoff
++)
++
++// DiagHook is told the point reached and the selected file's format name
++// (for example "OGG_VORBIS_320"). ctx is NewStream's. It must not block.
++type DiagHook func(ctx context.Context, point DiagPoint, format string)
++
++var diagHook atomic.Pointer[DiagHook]
++
++// SetDiagHook installs h, or removes the hook when h is nil. With no hook,
++// the diagnostic points do nothing.
++func SetDiagHook(h DiagHook) {
++	if h == nil {
++		diagHook.Store(nil)
++		return
++	}
++	diagHook.Store(&h)
++}
++
++func diagNote(ctx context.Context, point DiagPoint, file *metadatapb.AudioFile) {
++	h := diagHook.Load()
++	if h == nil {
++		return
++	}
++	format := "UNKNOWN"
++	if file != nil && file.Format != nil {
++		format = file.Format.String()
++	}
++	(*h)(ctx, point, format)
++}
++
++// diagSelected notes the selected file and returns it.
++func diagSelected(ctx context.Context, file *metadatapb.AudioFile) *metadatapb.AudioFile {
++	diagNote(ctx, DiagFormatSelected, file)
++	return file
++}
++
++// diagCtor passes a decoder constructor's results through, noting whether
++// it succeeded.
++type diagCtor[T any] struct {
++	ctx  context.Context
++	file *metadatapb.AudioFile
++}
++
++func (c diagCtor[T]) done(d T, err error) (T, error) {
++	if err != nil {
++		diagNote(c.ctx, DiagDecoderFailed, c.file)
++	} else {
++		diagNote(c.ctx, DiagDecoderOpened, c.file)
++	}
++	return d, err
++}
++
++// diagGap notes a failure after the decoder was constructed and before the
++// stream was handed off, and returns err.
++func diagGap(ctx context.Context, file *metadatapb.AudioFile, err error) error {
++	diagNote(ctx, DiagFailedBeforeHandoff, file)
++	return err
++}

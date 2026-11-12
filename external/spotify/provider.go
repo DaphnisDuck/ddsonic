@@ -21,6 +21,7 @@ import (
 	"github.com/devgianlu/go-librespot/audio"
 	"github.com/gopxl/beep/v2"
 
+	"github.com/bjarneo/cliamp/internal/memdiag" // ddsonic: #168
 	"github.com/bjarneo/cliamp/playlist"
 	"github.com/bjarneo/cliamp/provider"
 )
@@ -754,13 +755,13 @@ func (p *SpotifyProvider) NewStreamer(uri string) (beep.StreamSeekCloser, beep.F
 		return nil, beep.Format{}, 0, playlist.ErrNeedsAuth
 	}
 	tryStream := func() (*spotifyStreamer, error) {
-		ctx, setupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, setupCancel := context.WithTimeout(memdiag.WithOpen(context.Background()), 30*time.Second) // ddsonic: #168 diagnostics, a no-op when off
 		defer setupCancel()
 		stream, streamCancel, err := sessionNewStream(sess, ctx, *spotID, p.bitrate) // ddsonic: a variable, for tests
 		if err != nil {
 			return nil, err
 		}
-		return newSpotifyStreamer(stream, streamCancel), nil
+		return withDiagSeq(newSpotifyStreamer(stream, streamCancel), ctx), nil // ddsonic: #168
 	}
 
 	s, err := tryStream()

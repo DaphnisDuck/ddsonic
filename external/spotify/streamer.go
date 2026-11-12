@@ -32,6 +32,7 @@ type spotifyStreamer struct {
 	cancel     func()
 	closing    atomic.Bool
 	closed     bool
+	diagSeq    uint64 // ddsonic: the open's #168 diagnostic sequence number, or 0
 }
 
 // newSpotifyStreamer wraps a go-librespot Stream as a beep.StreamSeekCloser.
@@ -158,12 +159,14 @@ func (s *spotifyStreamer) Close() error {
 	// under mu, so no Stream, Seek or Position is using it. Other decoders
 	// are left as before: Vorbis's Close is not safe here (playback_ddsonic.go,
 	// releaseDecoder).
+	noteAcceptedClose(s.diagSeq, s.source, false) // ddsonic: #168 diagnostics, a no-op when off
 	switch d := s.source.(type) {
 	case *mp3.Decoder:
 		closeAcceptedDecoder(d)
 	case *flac.Decoder:
 		closeAcceptedDecoder(d)
 	}
+	noteAcceptedClose(s.diagSeq, s.source, true) // ddsonic: #168
 	s.source = nil
 	s.buf = nil
 	return nil

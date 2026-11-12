@@ -30,6 +30,7 @@ const (
 // PlaybackStreamer is NewStreamer for the player: the stream it plays.
 func (p *SpotifyProvider) PlaybackStreamer(uri string) (beep.StreamSeekCloser, beep.Format, time.Duration, error) {
 	s, format, dur, err := p.NewStreamer(uri)
+	noteStart(err) // #168 diagnostics, a no-op when off
 	if err != nil {
 		return nil, format, dur, err
 	}
@@ -77,6 +78,8 @@ type prefetchedStream struct {
 	faded   bool // the last pull ended in silence: fade the next audio in
 
 	fillDone chan struct{}
+
+	diag *streamDiag // #168 diagnostics; nil when off
 }
 
 func newPlaybackStreamer(s *spotifyStreamer) beep.StreamSeekCloser {
@@ -90,6 +93,7 @@ func newPlaybackStreamer(s *spotifyStreamer) beep.StreamSeekCloser {
 		fillDone: make(chan struct{}),
 	}
 	p.cond = sync.NewCond(&p.mu)
+	p.diag = newStreamDiag(s, int64(capacity)*16) // 16 bytes a [2]float64
 	go p.fill()
 	return p
 }
@@ -270,6 +274,7 @@ func (p *prefetchedStream) Stream(samples [][2]float64) (int, bool) {
 	if queued == 0 {
 		if p.ended {
 			p.err = p.endErr
+			p.diag.endedWith(p.endErr)
 			return 0, false
 		}
 		clear(samples)
@@ -277,6 +282,7 @@ func (p *prefetchedStream) Stream(samples [][2]float64) (int, bool) {
 		return len(samples), true
 	}
 	p.silence = false
+	p.diag.firstAudio()
 
 	n := min(len(samples), queued)
 	for i := range n {
@@ -299,6 +305,7 @@ func (p *prefetchedStream) Stream(samples [][2]float64) (int, bool) {
 	short := len(samples) - n
 	if short > 0 && p.ended && p.endErr == nil {
 		p.faded = false
+		p.diag.endedWith(nil)
 		return n, true // the clean end
 	}
 	if short > 0 {
@@ -377,6 +384,9 @@ func (p *prefetchedStream) Close() error {
 	p.mu.Unlock()
 	err := p.src.Close()
 	<-p.fillDone
+	p.mu.Lock()
+	p.diag.close()
+	p.mu.Unlock()
 	return err
 }
 

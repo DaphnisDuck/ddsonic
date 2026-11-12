@@ -58,6 +58,7 @@ import (
 	"github.com/devgianlu/go-librespot/vorbis"
 
 	"github.com/bjarneo/cliamp/applog"
+	"github.com/bjarneo/cliamp/internal/memdiag"
 )
 
 // errSessionChanged ends a track open whose session was replaced or closed
@@ -160,6 +161,7 @@ func newPlayback(sess *session.Session, username string, data []byte, devID stri
 	ctx, cancel := context.WithCancel(context.Background())
 	b := &playback{sess: sess, username: username, data: data, devID: devID, ctx: ctx, cancel: cancel, gone: make(chan struct{})}
 	serviceAccessPoint(b) // from here on: see the note at the top
+	noteBundle("created", 0)
 	return b
 }
 
@@ -172,6 +174,7 @@ func (b *playback) retireNow() {
 		return
 	}
 	b.retire.Do(func() {
+		noteBundle("retired", 1)
 		b.cancel()
 		tails.Add(1)
 		go b.tail()
@@ -188,6 +191,7 @@ func (b *playback) retireNow() {
 func (b *playback) tail() {
 	defer tails.Done()
 	defer close(b.gone)
+	defer noteBundle("tail_finished", -1)
 	go closeAccessPoint(b)
 	<-accessPointDone(b)
 	b.users.Wait()
@@ -221,8 +225,9 @@ func (h *openHandle) end() { h.once.Do(h.cancel) }
 // its one owner, librespot's call has returned, and no reader was given it:
 // the HTTP context is ended and the decoder closed, once. (An accepted
 // stream's teardown is the streamer's, and is not this.)
-func disposeStream(stream *librespotPlayer.Stream, h *openHandle) {
+func disposeStream(stream *librespotPlayer.Stream, h *openHandle, seq uint64, why string) {
 	h.end()
+	noteDiscarded(seq, why, stream)
 	if stream == nil {
 		return
 	}
@@ -250,10 +255,13 @@ func releaseDecoder(src librespot.AudioSource) {
 	switch src := src.(type) {
 	case *vorbis.Decoder:
 		// not closed: see above
+		noteRelease("skipped", src)
 	case io.Closer: // mp3, flac
+		noteRelease("requested", src)
 		if err := src.Close(); err != nil {
 			applog.Warn("spotify: closing an unused stream: %v", err)
 		}
+		noteRelease("completed", src)
 	case interface{ Close() }:
 		src.Close()
 	}
@@ -284,6 +292,7 @@ func (s *Session) holdPlayback(ctx context.Context) (*playback, uint64, error) {
 	default:
 	}
 	b.users.Add(1) // under the lock a retirement detaches the bundle with
+	noteBundle("worker", 1)
 	return b, s.gen, nil
 }
 
@@ -305,6 +314,8 @@ func (s *Session) NewStream(ctx context.Context, spotID librespot.SpotifyId, bit
 	if err != nil {
 		return nil, nil, err
 	}
+	seq := memdiag.OpenSeq(ctx)
+	noteOpenAttempt(seq)
 
 	streamCtx, streamCancel := context.WithCancel(context.Background())
 	h := &openHandle{cancel: streamCancel}
@@ -317,6 +328,7 @@ func (s *Session) NewStream(ctx context.Context, spotID librespot.SpotifyId, bit
 	results := make(chan openResult, 1)
 	go func() {
 		defer b.users.Done() // the reference lasts as long as the worker
+		defer noteBundle("worker", -1)
 		var res openResult
 		defer func() {
 			// A panic in librespot's stream setup would otherwise take down
@@ -333,7 +345,7 @@ func (s *Session) NewStream(ctx context.Context, spotID librespot.SpotifyId, bit
 				openHook("worker-before-publish")
 			}
 			if !state.CompareAndSwap(openPending, openReady) {
-				disposeStream(res.stream, h) // the caller gave up: ours to release
+				disposeStream(res.stream, h, seq, "caller_gave_up_first") // the caller gave up: ours to release
 				return
 			}
 			if openHook != nil {
@@ -342,6 +354,7 @@ func (s *Session) NewStream(ctx context.Context, spotID librespot.SpotifyId, bit
 			results <- res // never blocks; the caller owns it from the swap
 		}()
 		res.stream, res.err = playerNewStream(b, setupCtx, client, spotID, bitrate)
+		noteSetupResult(seq, res)
 	}()
 	defer func() {
 		stopOnRetire()
@@ -355,7 +368,7 @@ func (s *Session) NewStream(ctx context.Context, spotID librespot.SpotifyId, bit
 		}
 		if !state.CompareAndSwap(openPending, openAbandoned) {
 			res := <-results // published already: ours, and not wanted
-			disposeStream(res.stream, h)
+			disposeStream(res.stream, h, seq, "caller_gave_up_after_result")
 		}
 		return nil, nil, outcome
 	}
@@ -384,12 +397,14 @@ func (s *Session) NewStream(ctx context.Context, spotID librespot.SpotifyId, bit
 	s.mu.Unlock() // the stream is accepted here, or not at all
 	switch {
 	case outcome != nil:
-		disposeStream(res.stream, h)
+		disposeStream(res.stream, h, seq, "rejected_at_accept")
 		return nil, nil, outcome
 	case res.err != nil:
+		noteAccepted(seq, res)
 		// the worker ended the HTTP lifetime; the error is accepted, and
 		// carries its origin
 		return nil, nil, &originError{gen: gen, origin: b, cause: res.err}
 	}
+	noteAccepted(seq, res)
 	return res.stream, h.end, nil
 }

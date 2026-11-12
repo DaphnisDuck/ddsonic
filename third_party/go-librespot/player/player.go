@@ -1,6 +1,6 @@
 // Modified by ddsonic on 2026-10-14: the CDN quarantine map is guarded by
 // cdnMu for each access, never across network work
-// (patches/go-librespot/0001-player-guard-cdn-quarantine-map.patch).
+// (patches/go-librespot/0001-player-guard-cdn-quarantine-map.patch); on 2026-11-12: opt-in diagnostic points in NewStream, no behaviour change (0004-player-diagnostic-hook.patch).
 
 package player
 
@@ -829,7 +829,7 @@ func (p *Player) NewStream(ctx context.Context, client *http.Client, spotId libr
 
 	p.events.PostStreamResolveAudioFile(playbackId, int32(bitrate), media, file)
 
-	log.Debugf("selected format %s (%x)", file.Format.String(), file.FileId)
+	log.Debugf("selected format %s (%x)", diagSelected(ctx, file).Format.String(), file.FileId)
 
 	audioKey, err := p.retrieveAudioKey(ctx, spotId, file.FileId)
 	if err != nil {
@@ -907,30 +907,30 @@ func (p *Player) NewStream(ctx context.Context, client *http.Client, spotId libr
 			return nil, fmt.Errorf("failed reading metadata page: %w", err)
 		}
 
-		vorbisStream, err := vorbis.New(log, audioStream, meta, normalisationFactor)
+		vorbisStream, err := diagCtor[*vorbis.Decoder]{ctx, file}.done(vorbis.New(log, audioStream, meta, normalisationFactor))
 		if err != nil {
 			return nil, fmt.Errorf("failed initializing ogg vorbis stream: %w", err)
 		}
 
 		if vorbisStream.SampleRate != SampleRate {
-			return nil, fmt.Errorf("unsupported sample rate: %d", vorbisStream.SampleRate)
+			return nil, diagGap(ctx, file, fmt.Errorf("unsupported sample rate: %d", vorbisStream.SampleRate))
 		} else if vorbisStream.Channels != Channels {
-			return nil, fmt.Errorf("unsupported channels: %d", vorbisStream.Channels)
+			return nil, diagGap(ctx, file, fmt.Errorf("unsupported channels: %d", vorbisStream.Channels))
 		}
 
 		stream = vorbisStream
 		sampleRate = vorbisStream.SampleRate
 	} else if audioFormat == AudioFormatFLAC {
 		audioStream := io.NewSectionReader(decryptedStream, 0, rawStream.Size())
-		flacStream, err := flac.New(log, audioStream, normalisationFactor)
+		flacStream, err := diagCtor[*flac.Decoder]{ctx, file}.done(flac.New(log, audioStream, normalisationFactor))
 		if err != nil {
 			return nil, fmt.Errorf("failed initializing flac stream: %w", err)
 		}
 
 		if flacStream.SampleRate != SampleRate {
-			return nil, fmt.Errorf("unsupported sample rate: %d", flacStream.SampleRate)
+			return nil, diagGap(ctx, file, fmt.Errorf("unsupported sample rate: %d", flacStream.SampleRate))
 		} else if flacStream.Channels != Channels {
-			return nil, fmt.Errorf("unsupported channels: %d", flacStream.Channels)
+			return nil, diagGap(ctx, file, fmt.Errorf("unsupported channels: %d", flacStream.Channels))
 		}
 
 		stream = flacStream
@@ -938,15 +938,15 @@ func (p *Player) NewStream(ctx context.Context, client *http.Client, spotId libr
 		bitDepth = flacStream.BitDepth
 	} else if audioFormat == AudioFormatMP3 {
 		audioStream := io.NewSectionReader(decryptedStream, 0, rawStream.Size())
-		mp3Stream, err := mp3.New(log, audioStream, normalisationFactor)
+		mp3Stream, err := diagCtor[*mp3.Decoder]{ctx, file}.done(mp3.New(log, audioStream, normalisationFactor))
 		if err != nil {
 			return nil, fmt.Errorf("failed initializing mp3 stream: %w", err)
 		}
 
 		if mp3Stream.SampleRate != SampleRate {
-			return nil, fmt.Errorf("unsupported sample rate: %d", mp3Stream.SampleRate)
+			return nil, diagGap(ctx, file, fmt.Errorf("unsupported sample rate: %d", mp3Stream.SampleRate))
 		} else if mp3Stream.Channels != Channels {
-			return nil, fmt.Errorf("unsupported channels: %d", mp3Stream.Channels)
+			return nil, diagGap(ctx, file, fmt.Errorf("unsupported channels: %d", mp3Stream.Channels))
 		}
 
 		stream = mp3Stream
@@ -958,7 +958,7 @@ func (p *Player) NewStream(ctx context.Context, client *http.Client, spotId libr
 	// Seek to the correct position if needed.
 	if mediaPosition > 0 {
 		if err := stream.SetPositionMs(max(0, min(mediaPosition, int64(media.Duration())))); err != nil {
-			return nil, fmt.Errorf("failed seeking stream: %w", err)
+			return nil, diagGap(ctx, file, fmt.Errorf("failed seeking stream: %w", err))
 		}
 	}
 
