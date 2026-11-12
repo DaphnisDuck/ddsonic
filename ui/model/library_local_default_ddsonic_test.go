@@ -6,6 +6,7 @@ package model
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bjarneo/cliamp/catalog"
@@ -39,11 +40,19 @@ func indexedLocalModel(t *testing.T, dir string, src func(string, localsrc.Index
 const indexingRow = "Indexing your music… (press r to retry if this persists)"
 
 func TestLocalWithoutDefaultMusicFolder(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "Music")
-	wantView(t, "Local's menu", indexedLocalModel(t, dir, localsrc.NewDefault), []string{"Albums", "✓ synced"}, "sync failed", "cached")
-	for _, list := range []string{"Albums", "Artists", "Genres"} {
-		in := openRow(t, indexedLocalModel(t, dir, localsrc.NewDefault), list)
-		wantView(t, list, in, []string{"No music found in " + dir, "✓ synced"}, "sync failed", indexingRow, "cached")
+	// A long home, as macOS's temporary folders are, must pass too.
+	long := filepath.Join(t.TempDir(), strings.Repeat("h", 100))
+	for _, dir := range []string{filepath.Join(t.TempDir(), "Music"), filepath.Join(long, "Music")} {
+		wantView(t, "Local's menu", indexedLocalModel(t, dir, localsrc.NewDefault), []string{"Albums", "✓ synced"}, "sync failed", "cached")
+		for _, list := range []string{"Albums", "Artists", "Genres"} {
+			in := openRow(t, indexedLocalModel(t, dir, localsrc.NewDefault), list)
+			// The screen cuts a long row to its width, so it is checked by
+			// its start; the row itself must name the folder in full.
+			wantView(t, list, in, []string{"No music found in", "✓ synced"}, "sync failed", indexingRow, "cached")
+			if rows := in.libTop().entries; len(rows) != 1 || rows[0].Title != "No music found in "+dir {
+				t.Errorf("%s (%d-character folder): rows = %+v, want one row naming the folder", list, len(dir), rows)
+			}
+		}
 	}
 }
 
