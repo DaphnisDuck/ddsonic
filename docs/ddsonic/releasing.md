@@ -105,7 +105,7 @@ Owner policy (2026-11-10) for every ddsonic release. UltraReview is advisory: th
 
 ## v1.1.0 release readiness
 
-This consolidates requirements that already exist, with their sources. It adds none. The owner has declared the v1.1.0 feature freeze (release-specific documentation is still allowed); the owner's own acceptance decides each gate, including the scope gate below. Execution has not started, and nothing here authorizes a tag, a publication or the final release. One integrated candidate is intended, not a campaign of candidates.
+This consolidates requirements that already exist, with their sources. It adds none. The owner has declared the v1.1.0 feature freeze (release-specific documentation is still allowed); the owner's own acceptance decides each gate, including the scope gate below. Execution has not started, and nothing here authorizes a tag, a publication or the final release. One integrated candidate is intended, not a campaign of candidates. The procedures, step by step, are in the [v1.1.0 acceptance runbook](releases/v1.1.0-acceptance-runbook.md).
 
 **Before the tag**
 
