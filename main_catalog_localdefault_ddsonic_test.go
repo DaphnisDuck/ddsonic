@@ -26,9 +26,9 @@ func isolatedHome(t *testing.T) string {
 	return home
 }
 
-// syncLocal opens the catalog with cfg, indexes Local once and returns the
-// sync's error and Local's stored status after a restart.
-func syncLocal(t *testing.T, cfg config.Config) (error, string) {
+// syncLocal opens the catalog with cfg, indexes Local once and returns
+// Local's stored error after a restart and the sync's error.
+func syncLocal(t *testing.T, cfg config.Config) (string, error) {
 	t.Helper()
 	rt := openCatalog(nil, nil, cfg)
 	if rt.engine == nil {
@@ -45,14 +45,14 @@ func syncLocal(t *testing.T, cfg config.Config) (error, string) {
 	if err == nil && ps.startup.LastSuccess.IsZero() {
 		t.Errorf("a successful index left no success: %+v", ps.startup)
 	}
-	return err, ps.startup.LastError
+	return ps.startup.LastError, err
 }
 
 func TestLocalIndexOfTheDefaultMusicFolder(t *testing.T) {
 	t.Run("implicit ~/Music, never created", func(t *testing.T) {
 		home := isolatedHome(t)
 		for run := 1; run <= 2; run++ {
-			err, lastErr := syncLocal(t, config.Config{})
+			lastErr, err := syncLocal(t, config.Config{})
 			if err != nil || lastErr != "" {
 				t.Fatalf("run %d: sync = %v, stored error %q; want an empty library", run, err, lastErr)
 			}
@@ -63,7 +63,7 @@ func TestLocalIndexOfTheDefaultMusicFolder(t *testing.T) {
 	})
 	t.Run("configured initial_directory, missing", func(t *testing.T) {
 		home := isolatedHome(t)
-		err, lastErr := syncLocal(t, config.Config{InitialDirectory: filepath.Join(home, "Music")})
+		lastErr, err := syncLocal(t, config.Config{InitialDirectory: filepath.Join(home, "Music")})
 		if err == nil || lastErr == "" {
 			t.Errorf("sync = %v, stored error %q; want the failure kept", err, lastErr)
 		}
@@ -71,7 +71,7 @@ func TestLocalIndexOfTheDefaultMusicFolder(t *testing.T) {
 	t.Run("XDG_MUSIC_DIR, missing", func(t *testing.T) {
 		home := isolatedHome(t)
 		t.Setenv("XDG_MUSIC_DIR", filepath.Join(home, "Music"))
-		err, lastErr := syncLocal(t, config.Config{})
+		lastErr, err := syncLocal(t, config.Config{})
 		if err == nil || lastErr == "" {
 			t.Errorf("sync = %v, stored error %q; want the failure kept", err, lastErr)
 		}
