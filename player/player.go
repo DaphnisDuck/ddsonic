@@ -42,6 +42,7 @@ type Player struct {
 	started         bool           // true after first speaker.Play()
 	suspendMu       sync.Mutex     // guards suspended and speaker suspend/resume calls
 	suspended       bool           // true when speaker.Suspend() has been called
+	drainGen        atomic.Uint64  // ddsonic: invalidates a pending suspendAfterDrain (#83)
 	ctrl            *beep.Ctrl
 	volMin          atomic.Uint64     // dB floor stored as Float64bits, range [-90, 0]
 	volume          atomic.Uint64     // dB stored as Float64bits, range [volMin, +6]
@@ -475,20 +476,7 @@ func (p *Player) GaplessAdvanced() bool {
 // When pausing, the speaker is suspended to save CPU; when unpausing
 // it is resumed so the audio callback drains the queued samples.
 func (p *Player) TogglePause() {
-	speaker.Lock()
-	if p.ctrl != nil {
-		p.ctrl.Paused = !p.ctrl.Paused
-		paused := p.ctrl.Paused
-		speaker.Unlock()
-		p.paused.Store(paused)
-		if paused {
-			p.suspendSpeaker()
-		} else {
-			p.resumeSpeaker()
-		}
-	} else {
-		speaker.Unlock()
-	}
+	p.togglePause() // ddsonic: no silence left in the device (#83, output_ddsonic.go)
 }
 
 // Stop halts playback and releases resources. The speaker is suspended so
@@ -536,7 +524,7 @@ func (p *Player) Stop() {
 	p.stopStreamMetadata()
 	closePipelines(oldCurrent, oldNext)
 
-	p.suspendSpeaker()
+	p.suspendAfterDrain() // ddsonic: not with the track's last frames in the device (#83)
 }
 
 // Seek moves the playback position by the given duration (positive or negative).
@@ -1190,7 +1178,7 @@ func (p *Player) suspendSpeaker() {
 	if p.suspended {
 		return
 	}
-	if err := speaker.Suspend(); err != nil {
+	if err := speakerSuspend(); err != nil { // ddsonic: a test seam (speaker_seam_ddsonic.go)
 		// Non-fatal: the ALSA driver may return an error if the context
 		// has already hit a terminal error. Continue without tracking
 		// the suspended state so we don't try to resume a dead context.
@@ -1208,7 +1196,7 @@ func (p *Player) resumeSpeaker() {
 	if !p.suspended {
 		return
 	}
-	if err := speaker.Resume(); err != nil {
+	if err := speakerResume(); err != nil { // ddsonic: a test seam (speaker_seam_ddsonic.go)
 		return
 	}
 	p.suspended = false
