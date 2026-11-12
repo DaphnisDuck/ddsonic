@@ -140,6 +140,7 @@ func (s *spotifyStreamer) Seek(p int) error {
 //
 // ddsonic: except the MP3 and FLAC decoders, which nothing else frees (RC4-S3).
 func (s *spotifyStreamer) Close() error {
+	defer noteCloseEntry(s.diagSeq)() // ddsonic: #168 diagnostics, before the decoder's lock; a no-op when off
 	if s.closing.CompareAndSwap(false, true) {
 		// A decoder read may be waiting on a chunk request while holding mu.
 		// Cancel it before waiting to close the decoder.

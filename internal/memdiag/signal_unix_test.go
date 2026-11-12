@@ -20,7 +20,7 @@ func TestSignalTakesASnapshot(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		snaps := readLines(t, filepath.Join(run, "snapshots.jsonl"))
-		if len(snaps) == 2 && snaps[1]["trigger"] == "signal" {
+		if len(snaps) >= 2 && snaps[1]["trigger"] == "signal" {
 			break
 		}
 		if time.Now().After(deadline) {

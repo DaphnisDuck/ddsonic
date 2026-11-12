@@ -29,8 +29,9 @@ const (
 
 // PlaybackStreamer is NewStreamer for the player: the stream it plays.
 func (p *SpotifyProvider) PlaybackStreamer(uri string) (beep.StreamSeekCloser, beep.Format, time.Duration, error) {
+	noteStartEntry() // #168 diagnostics, a no-op when off
 	s, format, dur, err := p.NewStreamer(uri)
-	noteStart(err) // #168 diagnostics, a no-op when off
+	noteStart(err)
 	if err != nil {
 		return nil, format, dur, err
 	}

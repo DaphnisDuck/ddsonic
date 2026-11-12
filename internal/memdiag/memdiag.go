@@ -73,6 +73,8 @@ type recorder struct {
 
 	stopSig func()
 	sigDone chan struct{}
+
+	exe string // the program's path, kept out of profiles
 }
 
 // Start turns diagnostics on, with dir as the output directory. dir is
@@ -97,6 +99,7 @@ func Start(dir string) (stop func(), err error) {
 		return nil, err
 	}
 	r := &recorder{dir: run, start: now, counters: map[string]int64{}, events: make(chan event, 4096), wrote: make(chan struct{})}
+	r.exe, _ = os.Executable()
 	evF, err := r.create("events.jsonl")
 	if err != nil {
 		return nil, err
@@ -145,7 +148,7 @@ func (r *recorder) stop() {
 		r.stopSig()
 		<-r.sigDone
 	}
-	_ = r.snapshot("exit")
+	_ = r.snapshot("exit") // its failures are counted in it
 	cur.CompareAndSwap(r, nil)
 	r.evMu.Lock()
 	r.evDone = true
@@ -153,8 +156,18 @@ func (r *recorder) stop() {
 	r.evMu.Unlock()
 	<-r.wrote
 	r.snapMu.Lock()
-	r.snapF.Close()
+	end := r.endLine()
+	if err := json.NewEncoder(r.snapF).Encode(end); err != nil {
+		r.add("memdiag_write_errors", "snapshot", 1)
+	}
+	if err := r.snapF.Close(); err != nil {
+		r.add("memdiag_write_errors", "snapshot", 1)
+	}
 	r.snapMu.Unlock()
+	if r.incomplete() {
+		// Fixed text: no path, no error.
+		fmt.Fprintln(os.Stderr, "memdiag: collection incomplete")
+	}
 }
 
 // privateDir makes dir (mode 700) or checks that an existing one is private.
@@ -179,6 +192,40 @@ func (r *recorder) create(name string) (*os.File, error) {
 	return os.OpenFile(filepath.Join(r.dir, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 }
 
+// add adds d to a counter of r's, whether or not r is still current.
+func (r *recorder) add(name, label string, d int64) {
+	k := key(name, label)
+	r.mu.Lock()
+	r.counters[k] += d
+	r.mu.Unlock()
+}
+
+// incomplete reports whether any event was dropped or any collection or
+// write failed so far: a memdiag_* counter is above zero.
+func (r *recorder) incomplete() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for k, v := range r.counters {
+		if strings.HasPrefix(k, "memdiag_") && v > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// endLine is the last line of events.jsonl and of snapshots.jsonl.
+func (r *recorder) endLine() map[string]any {
+	r.mu.Lock()
+	errs := map[string]int64{}
+	for k, v := range r.counters {
+		if strings.HasPrefix(k, "memdiag_") {
+			errs[k] = v
+		}
+	}
+	r.mu.Unlock()
+	return map[string]any{"kind": "end", "t": time.Now().UTC().Format(time.RFC3339Nano), "collection_incomplete": r.incomplete(), "memdiag_counters": errs}
+}
+
 func key(name, label string) string {
 	if label == "" {
 		return name
@@ -195,10 +242,7 @@ func Add(name, label string, d int64) {
 	if r == nil {
 		return
 	}
-	k := key(name, label)
-	r.mu.Lock()
-	r.counters[k] += d
-	r.mu.Unlock()
+	r.add(name, label, d)
 }
 
 // Event logs ev for sequence number seq (0 for none), with an optional codec
@@ -219,16 +263,24 @@ func Event(seq uint64, ev, codec, format string) {
 	select {
 	case r.events <- e:
 	default:
-		Add("memdiag_events_dropped", "", 1)
+		r.add("memdiag_events_dropped", "", 1)
 	}
 }
 
 func (r *recorder) writeEvents(f *os.File) {
 	defer close(r.wrote)
-	defer f.Close()
 	enc := json.NewEncoder(f)
 	for e := range r.events {
-		_ = enc.Encode(e)
+		if err := enc.Encode(e); err != nil {
+			r.add("memdiag_write_errors", "events", 1)
+		}
+	}
+	// The log's last line says whether anything is missing from it.
+	if err := enc.Encode(r.endLine()); err != nil {
+		r.add("memdiag_write_errors", "events", 1)
+	}
+	if err := f.Close(); err != nil {
+		r.add("memdiag_write_errors", "events", 1)
 	}
 }
 

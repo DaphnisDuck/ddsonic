@@ -48,6 +48,9 @@ type snapshot struct {
 	FDs      map[string]int    `json:"fds_by_type,omitempty"`
 	Files    map[string]string `json:"files"`
 	Errors   []string          `json:"errors,omitempty"`
+	// Incomplete: this snapshot, or anything before it, failed to collect
+	// or write something (the memdiag_* counters say what).
+	Incomplete bool `json:"collection_incomplete"`
 }
 
 // Snapshot appends a snapshot to the run's snapshots.jsonl, with its
@@ -113,15 +116,38 @@ func (r *recorder) snapshot(trigger string) error {
 	} else {
 		fail("heap profile failed")
 	}
-	return json.NewEncoder(r.snapF).Encode(s)
+	if len(s.Errors) > 0 {
+		r.add("memdiag_snapshot_errors", "", int64(len(s.Errors)))
+		s.Counters["memdiag_snapshot_errors"] += int64(len(s.Errors))
+	}
+	s.Incomplete = r.incomplete()
+	if err := json.NewEncoder(r.snapF).Encode(s); err != nil {
+		r.add("memdiag_write_errors", "snapshot", 1)
+		return err
+	}
+	return nil
 }
 
+// profile writes pprof profile which, with its paths removed (sanitize.go).
 func (r *recorder) profile(name, which string, debug int) (string, error) {
+	var buf bytes.Buffer
+	if err := pprof.Lookup(which).WriteTo(&buf, debug); err != nil {
+		return "", err
+	}
+	data := buf.Bytes()
+	if debug == 0 {
+		var err error
+		if data, err = sanitizeProfile(data, r.exe); err != nil {
+			return "", err
+		}
+	} else {
+		data = sanitizeStacks(data)
+	}
 	f, err := r.create(name)
 	if err != nil {
 		return "", err
 	}
-	err = pprof.Lookup(which).WriteTo(f, debug)
+	_, err = f.Write(data)
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}

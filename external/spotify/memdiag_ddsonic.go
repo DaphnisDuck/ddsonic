@@ -8,6 +8,7 @@ package spotify
 
 import (
 	"context"
+	"errors"
 
 	librespot "github.com/devgianlu/go-librespot"
 	"github.com/devgianlu/go-librespot/flac"
@@ -105,12 +106,17 @@ func noteAccepted(seq uint64, res openResult) {
 	memdiag.Event(seq, "open_accepted", codec, "")
 }
 
-// noteDiscarded counts a stream set up and then discarded (cancelled or
-// replaced) before it was accepted, by why; releaseDecoder then closes its
-// decoder, or for Vorbis deliberately does not.
-func noteDiscarded(seq uint64, why string, stream *librespotPlayer.Stream) {
-	if !memdiag.On() || stream == nil {
+// noteDiscarded counts an open discarded before it was accepted, by why
+// and, when the caller knows it (outcome not nil), the reason:
+// with its codec when a stream was set up (releaseDecoder then closes its
+// decoder, or for Vorbis deliberately does not), or "none" when the setup
+// returned no stream (it failed, or was cancelled, first).
+func noteDiscarded(seq uint64, why string, outcome error, stream *librespotPlayer.Stream) {
+	if !memdiag.On() {
 		return
+	}
+	if outcome != nil {
+		why += "_" + openReason(outcome)
 	}
 	codec := streamCodec(stream)
 	memdiag.Count("open_discarded_"+why, codec)
@@ -248,12 +254,63 @@ func (d *streamDiag) close() {
 	memdiag.Event(d.seq, "prefetch_close_completed_"+how, d.codec, "")
 }
 
-// noteStart counts a start the player asked for (PlaybackStreamer), and its outcome.
-func noteStart(err error) {
+// openReason names why an open ended unaccepted, from the error it ended
+// with: the caller's cancellation or deadline, or the session's bundle
+// retired (a replacement or a close). Anything else is "other".
+func openReason(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "cancelled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline"
+	case errors.Is(err, errSessionChanged):
+		return "session_changed"
+	}
+	return "other"
+}
+
+// noteGaveUp counts an open its caller gave up on before accepting a result.
+func noteGaveUp(seq uint64, outcome error) {
+	if !memdiag.On() {
+		return
+	}
+	why := openReason(outcome)
+	memdiag.Count("open_gave_up", why)
+	memdiag.Event(seq, "open_gave_up_"+why, "", "")
+}
+
+// noteCloseEntry counts a streamer Close as it starts, before it takes the
+// decoder's lock, so a Close blocked behind a read is seen; the function it
+// returns, deferred, counts its return.
+func noteCloseEntry(seq uint64) func() {
+	if !memdiag.On() {
+		return func() {}
+	}
+	memdiag.Count("streamer_close_entry", "")
+	memdiag.Add("streamer_close_in_progress", "", 1)
+	memdiag.Event(seq, "streamer_close_entry", "", "")
+	return func() {
+		memdiag.Add("streamer_close_in_progress", "", -1)
+		memdiag.Count("streamer_close_returned", "")
+	}
+}
+
+// noteStartEntry counts a start the player asked for (PlaybackStreamer) as
+// it begins; noteStart counts how it ended.
+func noteStartEntry() {
 	if !memdiag.On() {
 		return
 	}
 	memdiag.Count("starts_attempted", "")
+	memdiag.Add("starts_in_progress", "", 1)
+}
+
+// noteStart counts how a start ended.
+func noteStart(err error) {
+	if !memdiag.On() {
+		return
+	}
+	memdiag.Add("starts_in_progress", "", -1)
 	if err != nil {
 		memdiag.Count("starts_failed", "")
 	} else {

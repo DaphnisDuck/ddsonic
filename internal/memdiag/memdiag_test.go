@@ -123,12 +123,12 @@ func TestRunRecordsPrivately(t *testing.T) {
 	}
 
 	evs := readLines(t, filepath.Join(run, "events.jsonl"))
-	if len(evs) != 1 || evs[0]["ev"] != "open" || evs[0]["seq"] != float64(seq) || evs[0]["codec"] != "mp3" || evs[0]["format"] != "MP3_320" {
+	if len(evs) != 2 || evs[1]["kind"] != "end" || evs[1]["collection_incomplete"] != false || evs[0]["ev"] != "open" || evs[0]["seq"] != float64(seq) || evs[0]["codec"] != "mp3" || evs[0]["format"] != "MP3_320" {
 		t.Errorf("events = %v", evs)
 	}
 
 	snaps := readLines(t, filepath.Join(run, "snapshots.jsonl"))
-	if len(snaps) != 3 || snaps[0]["kind"] != "build" || snaps[1]["trigger"] != "test" || snaps[2]["trigger"] != "exit" {
+	if len(snaps) != 4 || snaps[0]["kind"] != "build" || snaps[1]["trigger"] != "test" || snaps[2]["trigger"] != "exit" || snaps[3]["kind"] != "end" || snaps[3]["collection_incomplete"] != false || snaps[1]["collection_incomplete"] != false {
 		t.Fatalf("snapshots = %v", snaps)
 	}
 	for _, k := range []string{"go", "version", "os", "arch"} {

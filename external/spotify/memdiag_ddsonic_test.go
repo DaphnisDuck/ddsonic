@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -163,7 +164,8 @@ func TestDiagCountsAPlayedTrack(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := map[string]int64{
-				"starts_attempted": 1, "starts_ok": 1, "open_attempts": 1,
+				"starts_attempted": 1, "starts_ok": 1, "starts_in_progress": 0, "open_attempts": 1,
+				"streamer_close_entry": 1, "streamer_close_returned": 1, "streamer_close_in_progress": 0,
 				"sdk_format_selected." + codec: 1, "sdk_format_selected_by_format." + diagFormats[codec]: 1,
 				"sdk_decoder_open_ok." + codec: 1, "open_setup_ok." + codec: 1, "open_accepted." + codec: 1,
 				"prefetch_opens." + codec: 1, "prefetch_ring_bytes_allocated_total": ringBytes,
@@ -220,7 +222,7 @@ func TestDiagCountsDiscardedOpens(t *testing.T) {
 			if err := notAccepted(t, "cancelled", fixtureDecoder(t, codec)); err == nil {
 				t.Fatal("the open was accepted")
 			}
-			want := map[string]int64{"open_attempts": 1, "open_setup_ok." + codec: 1, "open_discarded_rejected_at_accept." + codec: 1, "open_accepted." + codec: 0}
+			want := map[string]int64{"open_attempts": 1, "open_setup_ok." + codec: 1, "open_discarded_rejected_at_accept_cancelled." + codec: 1, "open_accepted." + codec: 0}
 			if codec == "vorbis" {
 				want["vorbis_close_skipped.discarded"] = 1
 			} else {
@@ -367,4 +369,119 @@ func TestSDKDiagnosticPointsAreWired(t *testing.T) {
 	if wrapped != 7 {
 		t.Errorf("%d returns go through diagGap, want 7 (sample rate and channels for each codec, and the seek)", wrapped)
 	}
+}
+
+// A start is counted when it begins: while its open is in flight it is
+// attempted and in progress, and neither ok nor failed.
+func TestDiagCountsAStartInFlight(t *testing.T) {
+	p, k := diagProvider(t)
+	inside, release := make(chan struct{}), make(chan struct{})
+	k.open = func(_ *playback, ctx context.Context, _ *http.Client) (*librespotPlayer.Stream, error) {
+		close(inside)
+		<-release
+		return &librespotPlayer.Stream{Source: fixtureDecoder(t, "mp3")}, nil
+	}
+	startDiag(t)
+	done := make(chan beep.StreamSeekCloser, 1)
+	go func() {
+		s, _, _, err := p.PlaybackStreamer(testTrackURI)
+		if err != nil {
+			t.Error(err)
+		}
+		done <- s
+	}()
+	<-inside
+	if c := memdiag.Counters(); c["starts_attempted"] != 1 || c["starts_in_progress"] != 1 || c["starts_ok"] != 0 || c["starts_failed"] != 0 {
+		t.Errorf("in flight: %v", c)
+	}
+	close(release)
+	s := within(t, "the start", done)
+	if s != nil {
+		_ = s.Close()
+	}
+	wantCounters(t, "done", map[string]int64{"starts_attempted": 1, "starts_in_progress": 0, "starts_ok": 1})
+}
+
+// An open its caller cancels while the setup runs, whose setup then
+// returns no stream, is counted as given up (cancelled), its setup's error,
+// and discarded with no stream; a result rejected because the session's bundle was retired
+// says so.
+func TestDiagCountsWhyAnOpenWasNotAccepted(t *testing.T) {
+	t.Run("cancelled, no stream", func(t *testing.T) {
+		k := newPlayKit(t)
+		inside := make(chan struct{})
+		k.open = func(_ *playback, ctx context.Context, _ *http.Client) (*librespotPlayer.Stream, error) {
+			close(inside)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		s := goodSession()
+		t.Cleanup(s.Close)
+		startDiag(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		open := openAsync(s, ctx)
+		<-inside
+		cancel()
+		if o := within(t, "the open", open); o.stream != nil {
+			t.Fatal("a stream was returned")
+		}
+		s.Close()
+		builds.Wait()
+		tails.Wait()
+		// Which of worker and caller is first is a race; either way the open
+		// is discarded once, with no stream.
+		c := memdiag.Counters()
+		if n := c["open_discarded_caller_gave_up_first.none"] + c["open_discarded_caller_gave_up_after_result_cancelled.none"]; n != 1 {
+			t.Errorf("discarded with no stream %d times, want once: %v", n, c)
+		}
+		wantCounters(t, "cancelled", map[string]int64{"open_gave_up.cancelled": 1, "open_setup_error": 1, "open_accepted.none": 0})
+	})
+	t.Run("session changed at accept", func(t *testing.T) {
+		startDiag(t)
+		if err := notAccepted(t, "retired", fixtureDecoder(t, "mp3")); err == nil {
+			t.Fatal("accepted")
+		}
+		wantCounters(t, "retired", map[string]int64{"open_discarded_rejected_at_accept_session_changed.mp3": 1, "decoder_close_completed.discarded.mp3": 1})
+	})
+}
+
+// diagBlockingSource's Read waits until released, as a decoder waiting for a
+// chunk from the network does.
+type diagBlockingSource struct {
+	reading chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *diagBlockingSource) SetPositionMs(int64) error { return nil }
+func (b *diagBlockingSource) PositionMs() int64         { return 0 }
+func (b *diagBlockingSource) Read(p []float32) (int, error) {
+	b.once.Do(func() { close(b.reading) })
+	<-b.release
+	return 0, io.EOF
+}
+
+// A Close blocked behind a decoder read is counted on entry and as still in
+// progress, before it can take the decoder's lock.
+func TestDiagCountsACloseBlockedBehindARead(t *testing.T) {
+	startDiag(t)
+	src := &diagBlockingSource{reading: make(chan struct{}), release: make(chan struct{})}
+	s := newSpotifyStreamer(&librespotPlayer.Stream{Source: src}, nil)
+	go s.Stream(make([][2]float64, 16))
+	<-src.reading
+	closed := make(chan error, 1)
+	go func() { closed <- s.Close() }()
+	deadline := time.Now().Add(5 * time.Second)
+	for memdiag.Counters()["streamer_close_entry"] != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("the Close was not counted on entry")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if c := memdiag.Counters(); c["streamer_close_in_progress"] != 1 || c["streamer_close_returned"] != 0 {
+		t.Errorf("blocked: %v", c)
+	}
+	close(src.release)
+	within(t, "the Close", closed)
+	wantCounters(t, "returned", map[string]int64{"streamer_close_entry": 1, "streamer_close_in_progress": 0, "streamer_close_returned": 1, "decoder_not_closed.accepted.other": 1})
 }

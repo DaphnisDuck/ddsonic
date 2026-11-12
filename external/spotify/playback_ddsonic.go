@@ -225,9 +225,9 @@ func (h *openHandle) end() { h.once.Do(h.cancel) }
 // its one owner, librespot's call has returned, and no reader was given it:
 // the HTTP context is ended and the decoder closed, once. (An accepted
 // stream's teardown is the streamer's, and is not this.)
-func disposeStream(stream *librespotPlayer.Stream, h *openHandle, seq uint64, why string) {
+func disposeStream(stream *librespotPlayer.Stream, h *openHandle, seq uint64, why string, outcome error) {
 	h.end()
-	noteDiscarded(seq, why, stream)
+	noteDiscarded(seq, why, outcome, stream)
 	if stream == nil {
 		return
 	}
@@ -345,7 +345,7 @@ func (s *Session) NewStream(ctx context.Context, spotID librespot.SpotifyId, bit
 				openHook("worker-before-publish")
 			}
 			if !state.CompareAndSwap(openPending, openReady) {
-				disposeStream(res.stream, h, seq, "caller_gave_up_first") // the caller gave up: ours to release
+				disposeStream(res.stream, h, seq, "caller_gave_up_first", nil) // the caller gave up: ours to release
 				return
 			}
 			if openHook != nil {
@@ -363,12 +363,13 @@ func (s *Session) NewStream(ctx context.Context, spotID librespot.SpotifyId, bit
 
 	gaveUp := func(outcome error) (*librespotPlayer.Stream, context.CancelFunc, error) {
 		h.end() // first: this is what releases a worker stalled on its first chunk
+		noteGaveUp(seq, outcome)
 		if openHook != nil {
 			openHook("caller-before-abandon")
 		}
 		if !state.CompareAndSwap(openPending, openAbandoned) {
 			res := <-results // published already: ours, and not wanted
-			disposeStream(res.stream, h, seq, "caller_gave_up_after_result")
+			disposeStream(res.stream, h, seq, "caller_gave_up_after_result", outcome)
 		}
 		return nil, nil, outcome
 	}
@@ -397,7 +398,7 @@ func (s *Session) NewStream(ctx context.Context, spotID librespot.SpotifyId, bit
 	s.mu.Unlock() // the stream is accepted here, or not at all
 	switch {
 	case outcome != nil:
-		disposeStream(res.stream, h, seq, "rejected_at_accept")
+		disposeStream(res.stream, h, seq, "rejected_at_accept", outcome)
 		return nil, nil, outcome
 	case res.err != nil:
 		noteAccepted(seq, res)

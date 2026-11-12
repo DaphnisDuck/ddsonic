@@ -22,7 +22,7 @@ func notifySnapshots(r *recorder) (stop func(), done chan struct{}) {
 		for {
 			select {
 			case <-sig:
-				_ = r.snapshot("signal")
+				_ = r.snapshot("signal") // its failures are counted and flagged in it
 			case <-quit:
 				return
 			}
