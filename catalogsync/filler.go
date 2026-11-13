@@ -207,6 +207,10 @@ func (f *Filler) fill(ctx context.Context, a catalog.Album, st *fillState) error
 			return f.sleep(ctx, f.pace.Delay)
 		case ctx.Err() != nil:
 			return ctx.Err()
+		case errors.As(err, &rl) && rl.Quota:
+			// ddsonic: an exhausted quota gives no reset time and is never
+			// retried in the background: the run ends.
+			return err
 		case errors.As(err, &rl):
 			// Not a failure: wait as long as asked, and at least the backoff.
 			if err := f.sleep(ctx, max(st.next(f.pace), rl.RetryAfter)); err != nil {

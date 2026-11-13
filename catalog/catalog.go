@@ -26,14 +26,21 @@ var ErrForbidden = errors.New("provider refused access")
 
 // RateLimitError means a provider asked the client to slow down. RetryAfter
 // is the provider's requested wait, or zero when it gave none. Until, when
-// set, is when a long block ends, for display.
+// set, is when a long block ends, for display. Quota marks a provider's
+// exhausted quota rather than a temporary rate limit: the provider gave no
+// reset time, and it is not retried automatically.
 type RateLimitError struct {
 	RetryAfter time.Duration
 	Until      time.Time
+	Quota      bool
 }
 
 func (e *RateLimitError) Error() string {
 	switch {
+	case e.Quota && !e.Until.IsZero():
+		return "quota exceeded (no reset time given); rate limited until " + e.Until.Local().Format("Jan 2 15:04") + "; not retried automatically"
+	case e.Quota:
+		return "quota exceeded (no reset time given); not retried automatically"
 	case !e.Until.IsZero():
 		return "rate limited until " + e.Until.Local().Format("Jan 2 15:04")
 	case e.RetryAfter > 0:

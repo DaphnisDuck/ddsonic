@@ -32,3 +32,31 @@ func (s *Store) SetRateLimitedUntil(ctx context.Context, provider string, until 
 	}
 	return nil
 }
+
+// quotaKey is the rate_limits row that marks provider's quota as exhausted
+// (ddsonic): a second row, not a new column, so an older ddsonic opens the
+// catalog unchanged and ignores it. Its until is when the mark was set.
+func quotaKey(provider string) string { return provider + ":quota" }
+
+// QuotaExceeded reports whether provider's quota was recorded as exhausted
+// and not cleared since.
+func (s *Store) QuotaExceeded(ctx context.Context, provider string) (bool, error) {
+	at, err := s.RateLimitedUntil(ctx, quotaKey(provider))
+	if err != nil {
+		return false, fmt.Errorf("quota %s: %w", provider, err)
+	}
+	return !at.IsZero(), nil
+}
+
+// SetQuotaExceeded records provider's quota as exhausted at at.
+func (s *Store) SetQuotaExceeded(ctx context.Context, provider string, at time.Time) error {
+	return s.SetRateLimitedUntil(ctx, quotaKey(provider), at)
+}
+
+// ClearQuotaExceeded removes provider's exhausted-quota mark.
+func (s *Store) ClearQuotaExceeded(ctx context.Context, provider string) error {
+	if _, err := s.wdb.ExecContext(ctx, `DELETE FROM rate_limits WHERE provider = ?`, quotaKey(provider)); err != nil {
+		return fmt.Errorf("clear quota %s: %w", provider, err)
+	}
+	return nil
+}

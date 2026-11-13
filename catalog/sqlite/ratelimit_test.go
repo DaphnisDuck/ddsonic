@@ -31,3 +31,34 @@ func TestRateLimitedUntilRoundTrip(t *testing.T) {
 		t.Errorf("another provider: %v, want zero", got)
 	}
 }
+
+// ddsonic: the quota mark is a row of its own, which RateLimitedUntil of the
+// provider (all an older ddsonic reads) never sees, and it can be cleared.
+func TestQuotaMark(t *testing.T) {
+	ctx := context.Background()
+	s := openTemp(t)
+	if held, err := s.QuotaExceeded(ctx, "spotify"); err != nil || held {
+		t.Fatalf("before any mark: %t, %v", held, err)
+	}
+	if err := s.SetQuotaExceeded(ctx, "spotify", time.UnixMilli(1_790_000_000_000)); err != nil {
+		t.Fatal(err)
+	}
+	if held, err := s.QuotaExceeded(ctx, "spotify"); err != nil || !held {
+		t.Errorf("after the mark: %t, %v; want held", held, err)
+	}
+	if got, err := s.RateLimitedUntil(ctx, "spotify"); err != nil || !got.IsZero() {
+		t.Errorf("the provider's block = %v, %v; want the mark not read as one", got, err)
+	}
+	if held, _ := s.QuotaExceeded(ctx, "youtube"); held {
+		t.Error("another provider is held")
+	}
+	if err := s.ClearQuotaExceeded(ctx, "spotify"); err != nil {
+		t.Fatal(err)
+	}
+	if held, err := s.QuotaExceeded(ctx, "spotify"); err != nil || held {
+		t.Errorf("after clearing: %t, %v", held, err)
+	}
+	if err := s.ClearQuotaExceeded(ctx, "spotify"); err != nil {
+		t.Errorf("clearing twice: %v", err)
+	}
+}

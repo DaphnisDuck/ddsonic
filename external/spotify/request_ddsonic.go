@@ -3,17 +3,23 @@ package spotify
 // ddsonic: one Web API request, from the first send to its last.
 //
 // A logical request is one apiCall. What it has spent on recovering from a
-// 401 and on waiting out rate limits lives in it for as long as the request
-// does, so neither can reset the other: a read renews its token once per
-// sign-in however many rate-limit waits lie in between.
+// 401 lives in it for as long as the request does.
 //
-// The loop goes back to its start only through backAuth or backRate, and
-// each checks its limit before it moves. So a read makes at most 11 attempts
-// (1, 3 after auth, 7 after waits) and a write at most 9 (it is never sent
-// again after a 401; it may add one read-only check). A token is renewed
-// after a 401 at most once per sign-in; a token that has merely expired is
-// refreshed by the coordinator whenever it is asked for, as it always was,
-// and that is not counted against the request.
+// A 429 ends the request: it closes the rate-limit gate (ratelimit.go) and
+// the request fails with a *catalog.RateLimitError. Nothing waits a rate
+// limit out and sends again, in the background or the foreground. The gate
+// is checked immediately before every send, after the token is got, so a
+// request that waited for its token while another request's 429 closed the
+// gate is not sent. A request already sent cannot be recalled; its own 429
+// feeds the gate, which keeps the later end.
+//
+// The loop goes back to its start only through backAuth, which checks its
+// limit before it moves. So a read makes at most 4 attempts (1, 3 after
+// auth) and a write at most 1 (it is never sent again after a 401; it may add
+// one read-only check). A token is renewed after a 401 at most once per
+// sign-in; a token that has merely expired is refreshed by the coordinator
+// whenever it is asked for, as it always was, and that is not counted
+// against the request.
 
 import (
 	"bytes"
@@ -23,33 +29,18 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
-	"time"
 
-	"github.com/bjarneo/cliamp/applog"
 	"github.com/bjarneo/cliamp/internal/appmeta"
 	"github.com/bjarneo/cliamp/playlist"
 )
 
-const (
-	// maxAuthRounds is how often one request goes round again because of
-	// its sign-in: a renewed token, or a sign-in replaced under it.
-	maxAuthRounds = 3
-	// maxRateRetries is how many rate limits a waiting request meets before
-	// it gives up: upstream's eight attempts.
-	maxRateRetries = 8
-)
+// maxAuthRounds is how often one request goes round again because of its
+// sign-in: a renewed token, or a sign-in replaced under it.
+const maxAuthRounds = 3
 
-// rateWait waits out a rate limit, or ends with ctx. A variable so a test
-// need not sleep, and can act during the wait.
-var rateWait = func(ctx context.Context, d time.Duration) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(d):
-		return nil
-	}
-}
+// beforeSend runs immediately before every Web API send, after the last
+// check; nil in production. A test sets it to act at that point.
+var beforeSend func(path string)
 
 // apiCall is one logical Web API request and what it has spent.
 type apiCall struct {
@@ -57,9 +48,6 @@ type apiCall struct {
 	query        url.Values
 	body         []byte
 	contentType  string
-	// waitRate: wait out a short rate limit and send again (webAPIWithBody);
-	// otherwise a 429 is returned as it came (webAPIOnce).
-	waitRate bool
 	// pin is the sign-in a write belongs to; nil for a read.
 	pin *signInPin
 
@@ -67,7 +55,6 @@ type apiCall struct {
 	// 401: its one renewal there is spent.
 	renewedIn *tokenCoordinator
 	authRound int
-	rateTry   int
 }
 
 // backAuth takes the request round again for its sign-in's sake, unless it
@@ -78,6 +65,16 @@ func (c *apiCall) backAuth() error {
 	}
 	c.authRound++
 	return nil
+}
+
+// admit is the last check before a send: the request's context, and the
+// rate-limit gate, which another request's 429 may have closed while this one
+// waited for its token. It holds no lock across the send.
+func (p *SpotifyProvider) admit(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return p.rateLimited()
 }
 
 // send makes one HTTP request to the Web API with access as its token.
@@ -110,9 +107,9 @@ func errNoToken() error {
 
 // request carries one logical request through: it reads the session, keeps
 // a write to its action's sign-in, gets the token, sends, and deals with
-// what the answer says about the sign-in or the rate limit. Any answer other
-// than a 401, and a 429 of a request that does not wait, is returned as it
-// came.
+// what the answer says about the sign-in or the rate limit. A 429 closes the
+// gate and fails the request with a *catalog.RateLimitError; any answer other
+// than a 401 or a 429 is returned as it came.
 //
 // A 401 is answered by renewing the token, once per sign-in for this
 // request, and sending a read again; a 401 the renewed token gets too is
@@ -163,6 +160,12 @@ func (p *SpotifyProvider) request(ctx context.Context, c *apiCall) (*http.Respon
 		if c.pin != nil && !c.pin.holds(sess) { // again, as the last thing before sending
 			return nil, errSignInChanged
 		}
+		if err := p.admit(ctx); err != nil { // the gate may have closed while the token was awaited
+			return nil, err
+		}
+		if beforeSend != nil {
+			beforeSend(c.path)
+		}
 		resp, err := sendWebAPI(ctx, c.method, c.path, c.query, c.body, c.contentType, access)
 		if err != nil {
 			return nil, err
@@ -174,13 +177,7 @@ func (p *SpotifyProvider) request(ctx context.Context, c *apiCall) (*http.Respon
 				return nil, err
 			}
 		case http.StatusTooManyRequests:
-			if !c.waitRate {
-				return resp, nil
-			}
-			resp.Body.Close()
-			if err := p.rateLimitedAnswer(ctx, c, resp.Header.Get("Retry-After")); err != nil {
-				return nil, err
-			}
+			return nil, p.tooManyRequests(resp)
 		default:
 			return resp, nil
 		}
@@ -227,9 +224,20 @@ func (p *SpotifyProvider) unauthorized(ctx context.Context, c *apiCall, sess *Se
 	if err != nil {
 		return rejectedWrite(c.method, err)
 	}
+	// The probe is a Web API request like any other: not sent while the gate
+	// is closed, and its 429 closes the gate.
+	if err := p.admit(ctx); err != nil {
+		return rejectedWrite(c.method, err)
+	}
+	if beforeSend != nil {
+		beforeSend("/v1/me")
+	}
 	resp, err := sendWebAPI(ctx, http.MethodGet, "/v1/me", nil, nil, "", access)
 	if err != nil {
 		return rejectedWrite(c.method, err)
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return rejectedWrite(c.method, p.tooManyRequests(resp))
 	}
 	resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized {
@@ -239,28 +247,4 @@ func (p *SpotifyProvider) unauthorized(ctx context.Context, c *apiCall, sess *Se
 		return errSignInChanged
 	}
 	return notSent("spotify: the request was not authorised, so it was not carried out, and has not been sent again; the sign-in has been renewed, so try once more")
-}
-
-// rateLimitedAnswer handles a 429 for a request that waits: it sleeps the
-// time Spotify asks for and returns nil to send again, or fails when that
-// time is long (the gate closes for it) or the request has waited too often.
-func (p *SpotifyProvider) rateLimitedAnswer(ctx context.Context, c *apiCall, retryAfter string) error {
-	wait := time.Duration(1<<uint(c.rateTry)) * time.Second
-	if retryAfter != "" {
-		if secs, err := strconv.Atoi(retryAfter); err == nil && secs > 0 {
-			wait = time.Duration(min(secs, maxRetryAfterSecs)) * time.Second // capped
-			if wait > maxInlineRetryWait {                                   // a long block fails now
-				return p.block(wait)
-			}
-		}
-	}
-	// On the last attempt there's no retry after the wait, so don't sleep
-	// just to give up; fail now. After reading Retry-After, so a long block
-	// on it closes the gate.
-	if c.rateTry == maxRateRetries-1 {
-		return fmt.Errorf("spotify: web api rate-limited on %s after %d retries (try re-authenticating)", c.path, maxRateRetries)
-	}
-	c.rateTry++
-	applog.UserWarn("spotify: web api rate-limited on %s, retrying in %v (attempt %d/%d)", c.path, wait, c.rateTry, maxRateRetries)
-	return rateWait(ctx, wait)
 }

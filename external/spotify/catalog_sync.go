@@ -245,15 +245,16 @@ func (p *SpotifyProvider) FollowedArtistRecords(ctx context.Context) ([]catalog.
 	return out, nil
 }
 
-// AlbumTrackRecords returns an album's full track list, retrying rate
-// limits as webAPI does. It suits a load the user is waiting on.
+// AlbumTrackRecords returns an album's full track list, for a load the user
+// is waiting on. A rate limit fails it at once with a *catalog.RateLimitError,
+// as every Web API request does.
 func (p *SpotifyProvider) AlbumTrackRecords(ctx context.Context, albumID string) ([]catalog.TrackRecord, error) {
 	return p.albumTrackRecords(ctx, p.webAPI, albumID)
 }
 
-// AlbumTrackRecordsOnce is AlbumTrackRecords for background work: a rate
-// limit fails at once with a *catalog.RateLimitError, so the caller backs
-// off on its own schedule instead of warning the user about retries.
+// AlbumTrackRecordsOnce is AlbumTrackRecords for background work (the
+// filler). Since no request retries a rate limit any more, the two differ
+// only in name; both are kept for the catalog's AlbumSource.
 func (p *SpotifyProvider) AlbumTrackRecordsOnce(ctx context.Context, albumID string) ([]catalog.TrackRecord, error) {
 	return p.albumTrackRecords(ctx, p.webAPIOnce, albumID)
 }
@@ -278,31 +279,11 @@ const maxRetryAfterSecs = 48 * 3600
 // MaxRateLimit is the longest block the provider keeps (ddsonic).
 const MaxRateLimit = maxRetryAfterSecs * time.Second
 
-// webAPIOnce is webAPI without the 429 retries: a rate limit returns a
-// *catalog.RateLimitError carrying Spotify's Retry-After. Other statuses
-// are a *StatusError, as webAPI's are.
+// webAPIOnce is webAPI: a rate limit returns a *catalog.RateLimitError
+// (request), other statuses a *StatusError. Kept so the background paths
+// name what they rely on.
 func (p *SpotifyProvider) webAPIOnce(ctx context.Context, method, path string, query url.Values) (*http.Response, error) {
-	if err := p.rateLimited(); err != nil {
-		return nil, err
-	}
-	// The request and what its answer says about the sign-in are the shared
-	// path's (request); only the rule for rate limits below is this one's.
-	resp, err := p.request(ctx, &apiCall{method: method, path: path, query: query})
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode == http.StatusOK {
-		return resp, nil
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusTooManyRequests {
-		if secs, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && secs > 0 {
-			return nil, p.block(time.Duration(min(secs, maxRetryAfterSecs)) * time.Second)
-		}
-		return nil, &catalog.RateLimitError{}
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 512))
-	return nil, statusError(resp.StatusCode, resp.Status, body, err)
+	return p.webAPI(ctx, method, path, query)
 }
 
 // pageRecords GETs path through get with offset paging and maps each item

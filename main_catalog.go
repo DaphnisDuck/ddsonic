@@ -83,6 +83,10 @@ type source struct {
 	// quiet sources (radio: local files, instant) report no sync status
 	// to the UI.
 	quiet bool
+	// held: the provider's quota was found exhausted (ddsonic), so nothing
+	// syncs or works in the background until a sync the user starts
+	// succeeds.
+	held bool
 }
 
 // worker is a source's background job.
@@ -118,6 +122,11 @@ type providerSync struct {
 	// requiredSeq counts the syncs a sign-in required; serving is its value
 	// when the running sync began, which the UI gets as the run's ticket.
 	requiredSeq, serving uint64
+
+	// held (ddsonic): the provider's quota is exhausted. No sync or worker
+	// runs automatically (startup, retry, after a sync) until a sync
+	// succeeds; one the user asks for still runs.
+	held bool
 }
 
 // syncKind is who asks for a sync.
@@ -152,10 +161,10 @@ func openCatalog(sp *spotify.SpotifyProvider, rp *radio.Provider, cfg config.Con
 	}
 	var sources []source
 	if sp != nil {
-		rt.keepRateLimit(sp)
+		held := rt.keepRateLimit(sp)
 		src := spotifysrc.New(sp)
 		rt.filler = catalogsync.NewFiller(rt.store, src, catalogsync.DefaultPacing)
-		sources = append(sources, source{Source: src, refresh: cfg.Ddsonic.SpotifyRefresh, worker: rt.filler})
+		sources = append(sources, source{Source: src, refresh: cfg.Ddsonic.SpotifyRefresh, worker: rt.filler, held: held})
 	}
 	if client := youtubeClient(cfg.YouTubeMusic); client != nil {
 		// Tracks are enriched with their artist, album and year through
@@ -225,7 +234,7 @@ func (rt *catalogRuntime) setSources(sources ...source) {
 	}
 	rt.engine = catalogsync.New(rt.store, rt.notify, engineSources...)
 	for _, src := range sources {
-		ps := &providerSync{worker: src.worker, lists: src.lists, quiet: src.quiet, collections: src.Collections()}
+		ps := &providerSync{worker: src.worker, lists: src.lists, quiet: src.quiet, collections: src.Collections(), held: src.held}
 		var complete bool
 		ps.startup, complete = rt.status(src.Provider(), len(ps.collections))
 		// A sync that failed last time runs again, whatever its age: its
@@ -319,7 +328,19 @@ func (rt *catalogRuntime) start(prog *tea.Program) {
 		return
 	}
 	rt.send = prog.Send
+	rt.startSyncs()
+}
+
+// startSyncs is start's work once events have somewhere to go.
+func (rt *catalogRuntime) startSyncs() {
 	for provider, ps := range rt.providers {
+		rt.mu.Lock()
+		held := ps.held
+		rt.mu.Unlock()
+		if held {
+			applog.Info("catalog sync %s: quota exceeded earlier; not syncing automatically (press r to sync)", provider)
+			continue
+		}
 		if ps.stale {
 			rt.sync(provider)
 		} else if ps.worker != nil {
@@ -393,6 +414,7 @@ func (rt *catalogRuntime) request(provider string, kind syncKind) (ticket uint64
 			release = ps.worker.Hold()
 		}
 		var err error
+		var held, cleared bool
 		for {
 			rt.mu.Lock()
 			seen := ps.requests
@@ -412,6 +434,7 @@ func (rt *catalogRuntime) request(provider string, kind syncKind) (ticket uint64
 				ps.announced, ps.serving = false, ps.requiredSeq
 			}
 			ps.owed = false
+			wasHeld := ps.held
 			if !again {
 				// The retry is settled before the provider is given up:
 				// settled later, this sync's result could undo the retry
@@ -421,19 +444,23 @@ func (rt *catalogRuntime) request(provider string, kind syncKind) (ticket uint64
 				}
 				ps.running = false
 			}
+			held, cleared = ps.held, wasHeld && !ps.held
 			rt.mu.Unlock()
 			if !again {
 				break
 			}
 		}
 		release()
+		if cleared {
+			rt.clearQuota(provider)
+		}
 		if errors.Is(err, catalogsync.ErrRunning) || rt.ctx.Err() != nil {
 			return
 		}
 		if err != nil {
 			applog.Info("catalog sync: %v", err)
 		}
-		if ps.worker != nil {
+		if ps.worker != nil && !held {
 			rt.runWorker(provider, ps.worker)
 		}
 	}()
@@ -443,7 +470,9 @@ func (rt *catalogRuntime) request(provider string, kind syncKind) (ticket uint64
 // scheduleRetry arranges provider's next sync after one finished with err:
 // after a failure, a retry on a doubling delay, or when the provider's rate
 // limit lasts longer, at its end; after a success, none, and the delay
-// resets. It returns the retry's delay, zero when none is armed.
+// resets. An exhausted quota holds the provider: no retry is armed, for that
+// or any later failure, until a sync succeeds. It returns the retry's delay,
+// zero when none is armed.
 func (rt *catalogRuntime) scheduleRetry(provider string, err error) time.Duration {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -462,9 +491,17 @@ func (rt *catalogRuntime) scheduleRetryLocked(ps *providerSync, provider string,
 	}
 	if err == nil {
 		ps.retryDelay = 0
+		ps.held = false
 		return 0
 	}
 	if rt.closed {
+		return 0
+	}
+	if quotaExceeded(err) {
+		ps.held = true
+	}
+	if ps.held {
+		applog.Info("catalog sync %s: quota exceeded; not retrying automatically (press r to sync)", provider)
 		return 0
 	}
 	ps.retryDelay = catalogsync.NextBackoff(ps.retryDelay, rt.retryMin, rt.retryMax)
@@ -477,26 +514,74 @@ func (rt *catalogRuntime) scheduleRetryLocked(ps *providerSync, provider string,
 	return delay
 }
 
-// keepRateLimit restores Spotify's rate-limit block from the catalog and
-// records each new one there, so a restart waits it out too.
-func (rt *catalogRuntime) keepRateLimit(sp *spotify.SpotifyProvider) {
+// rateLimitKeeper is the part of the Spotify provider keepRateLimit uses.
+type rateLimitKeeper interface {
+	SetRateLimitedUntil(until time.Time, quota bool)
+	OnRateLimited(fn func(until time.Time, quota bool))
+}
+
+// keepRateLimit restores Spotify's rate-limit block, and its exhausted-quota
+// mark, from the catalog, and records each new one there, short blocks
+// included, so a restart waits it out too. It reports whether the quota is
+// held. A store that cannot be read is taken conservatively: the gate closes
+// for spotify.MinCooldown, and the quota is held. A failed write is logged;
+// the provider's own gate stays closed whatever the store does.
+func (rt *catalogRuntime) keepRateLimit(sp rateLimitKeeper) (held bool) {
+	now := time.Now()
+	held, err := rt.store.QuotaExceeded(rt.ctx, catalog.Spotify)
+	if err != nil {
+		applog.Warn("catalog: %v; holding Spotify's automatic syncs", err)
+		held = true
+	}
 	until, err := rt.store.RateLimitedUntil(rt.ctx, catalog.Spotify)
 	if err != nil {
-		applog.Warn("catalog: %v", err)
-	} else if time.Until(until) > 0 {
-		// A clock set wrong once must not block Spotify for good.
-		if limit := time.Now().Add(spotify.MaxRateLimit); until.After(limit) {
-			until = limit
-		}
-		applog.Info("spotify: rate limited until %s", until.Format(time.DateTime))
-		sp.SetRateLimitedUntil(until)
+		applog.Warn("catalog: %v; pausing Spotify for %v", err, spotify.MinCooldown)
+		until = now.Add(spotify.MinCooldown)
 	}
-	sp.OnRateLimited(func(until time.Time) {
-		applog.Warn("spotify: rate limited until %s", until.Format(time.DateTime))
+	// A clock set wrong once must not block Spotify for good.
+	if limit := now.Add(spotify.MaxRateLimit); until.After(limit) {
+		until = limit
+	}
+	if until.After(now) {
+		applog.Info("spotify: rate limited until %s", until.Format(time.DateTime))
+		sp.SetRateLimitedUntil(until, held)
+	}
+	sp.OnRateLimited(func(until time.Time, quota bool) {
+		applog.Warn("spotify: rate limited until %s (quota exceeded: %t)", until.Format(time.DateTime), quota)
 		if err := rt.store.SetRateLimitedUntil(rt.ctx, catalog.Spotify, until); err != nil {
 			applog.Warn("catalog: %v", err)
 		}
+		if quota {
+			if err := rt.store.SetQuotaExceeded(rt.ctx, catalog.Spotify, time.Now()); err != nil {
+				applog.Warn("catalog: %v", err)
+			}
+		}
 	})
+	return held
+}
+
+// clearQuota removes provider's exhausted-quota mark after a sync
+// succeeded. A failure leaves it, so the next run holds again: the safe side.
+func (rt *catalogRuntime) clearQuota(provider string) {
+	if err := rt.store.ClearQuotaExceeded(rt.ctx, provider); err != nil {
+		applog.Warn("catalog: %v", err)
+	}
+}
+
+// quotaExceeded reports whether err holds a *catalog.RateLimitError for an
+// exhausted quota, anywhere among joined errors.
+func quotaExceeded(err error) bool {
+	switch e := err.(type) {
+	case nil:
+		return false
+	case *catalog.RateLimitError:
+		if e.Quota {
+			return true
+		}
+	case interface{ Unwrap() []error }:
+		return slices.ContainsFunc(e.Unwrap(), quotaExceeded)
+	}
+	return quotaExceeded(errors.Unwrap(err))
 }
 
 // runWorker runs a source's background worker. A run already going makes
