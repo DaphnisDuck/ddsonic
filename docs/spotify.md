@@ -51,7 +51,7 @@ bitrate = 320
 
 cliamp uses a built-in `client_id`. [librespot](https://github.com/librespot-org/librespot) and [spotify-player](https://github.com/aome510/spotify-player) use the same client ID.
 
-> **Shared rate limit:** The built-in `client_id` is shared by librespot, spotify-player, and cliamp users worldwide. Spotify applies its per-app quota globally. A busy pool can cause `429 Too Many Requests` during search or playlist loading. Cliamp retries with backoff. Persistent 429 errors indicate a busy pool. Your own `client_id` has a separate quota.
+> **Shared rate limit:** The built-in `client_id` is shared by librespot, spotify-player, and cliamp users worldwide. Spotify applies its per-app quota globally. A busy pool can cause `429 Too Many Requests` during search or playlist loading. <!-- ddsonic --> ddsonic does not retry a 429: it pauses Spotify requests for as long as Spotify asks and shows "rate limited until" ([rate limits](ddsonic/catalog.md)). Persistent 429 errors indicate a busy pool. Your own `client_id` has a separate quota.
 
 ## Usage
 
@@ -92,7 +92,7 @@ Podcast episodes work as tracks. Press `Ctrl+F` to search Spotify. Matching epis
 - **Playback issues**: Spotify integration needs a Premium account. Free accounts cannot stream.
 - **Re-authenticate**: Run `cliamp spotify reset` to clear stored credentials. Then restart cliamp, select Spotify, and sign in again. This is the same as deleting `~/.config/cliamp/spotify_credentials.json`.
 - **Expired or revoked authorization**: Web API calls fail with `401 Unauthorized`, and playback asks for a new sign-in. Cliamp usually detects this at startup and prompts. If it does not, run `cliamp spotify reset` and authenticate again.
-- **`429 Too Many Requests`, including `rate-limited on /v1/me`**: Spotify accepted the credentials and throttled the *app*, so re-authenticating does not help. With the built-in `client_id`, the quota is shared with librespot- and spotify-player-based clients worldwide, and a busy pool limits every client that uses it. Cliamp retries with exponential backoff, honoring `Retry-After`. A `Retry-After` of hours (for example `86400`) means the app has no quota left for that window: register a developer app and set `client_id` in `[spotify]`. Your app has a separate quota.
+- **`429 Too Many Requests`, including `rate-limited on /v1/me`**: Spotify accepted the credentials and throttled the *app*, so re-authenticating does not help. With the built-in `client_id`, the quota is shared with librespot- and spotify-player-based clients worldwide, and a busy pool limits every client that uses it. <!-- ddsonic --> ddsonic does not retry it: every 429 pauses Spotify requests for the `Retry-After` Spotify gives (60 seconds when it gives none), and a used-up development-mode quota pauses automatic syncs until you press `r` ([rate limits and quota](ddsonic/catalog.md)). A `Retry-After` of hours (for example `86400`) means the app has no quota left for that window: register a developer app and set `client_id` in `[spotify]`. Your app has a separate quota.
 - **`400 "Invalid limit"` on <kbd>Ctrl+F</kbd>**: Development Mode apps limit `/v1/search` to 10 results per request. Cliamp pages results automatically. This error means the limit is now less than 10. Open an issue.
 
 ## Requirements

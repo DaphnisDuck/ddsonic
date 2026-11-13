@@ -72,7 +72,7 @@ func TestRateLimitsPersistAcrossARestart(t *testing.T) {
 
 	rt := runtimeAt(t, path)
 	k := &fakeKeeper{}
-	if held := rt.keepRateLimit(k); held || len(k.restored()) != 0 {
+	if held := rt.keepRateLimit(k, rt.store); held || len(k.restored()) != 0 {
 		t.Fatalf("a fresh catalog: held %t, restored %v; want neither", held, k.restored())
 	}
 	k.fn(now.Add(30*time.Second), false) // a short block
@@ -83,7 +83,7 @@ func TestRateLimitsPersistAcrossARestart(t *testing.T) {
 
 	rt = runtimeAt(t, path) // restart
 	k = &fakeKeeper{}
-	if held := rt.keepRateLimit(k); held {
+	if held := rt.keepRateLimit(k, rt.store); held {
 		t.Error("an ordinary block restored as a quota hold")
 	}
 	if r := k.restored(); len(r) != 1 || !sameMilli(r[0].until, now.Add(30*time.Second)) || r[0].quota {
@@ -95,7 +95,7 @@ func TestRateLimitsPersistAcrossARestart(t *testing.T) {
 
 	rt = runtimeAt(t, path)
 	k = &fakeKeeper{}
-	if held := rt.keepRateLimit(k); !held {
+	if held := rt.keepRateLimit(k, rt.store); !held {
 		t.Error("the quota mark was not restored")
 	}
 	if r := k.restored(); len(r) != 1 || !sameMilli(r[0].until, now.Add(90*time.Second)) || !r[0].quota {
@@ -103,24 +103,105 @@ func TestRateLimitsPersistAcrossARestart(t *testing.T) {
 	}
 }
 
-// A catalog that cannot be read closes the gate for the floor and holds the
-// quota; one that cannot be written leaves the provider's gate as it is.
-func TestRateLimitStoreFailuresStayClosed(t *testing.T) {
+// flakyLimits is the catalog's rate-limit store with each read and the
+// writes able to fail on their own.
+type flakyLimits struct {
+	rateLimitStore
+	failUntil, failQuota, failWrites bool
+}
+
+var errStore = errors.New("database is locked")
+
+func (f *flakyLimits) RateLimitedUntil(ctx context.Context, p string) (time.Time, error) {
+	if f.failUntil {
+		return time.Time{}, errStore
+	}
+	return f.rateLimitStore.RateLimitedUntil(ctx, p)
+}
+
+func (f *flakyLimits) QuotaExceeded(ctx context.Context, p string) (bool, error) {
+	if f.failQuota {
+		return false, errStore
+	}
+	return f.rateLimitStore.QuotaExceeded(ctx, p)
+}
+
+func (f *flakyLimits) SetRateLimitedUntil(ctx context.Context, p string, until time.Time) error {
+	if f.failWrites {
+		return errStore
+	}
+	return f.rateLimitStore.SetRateLimitedUntil(ctx, p, until)
+}
+
+func (f *flakyLimits) SetQuotaExceeded(ctx context.Context, p string, at time.Time) error {
+	if f.failWrites {
+		return errStore
+	}
+	return f.rateLimitStore.SetQuotaExceeded(ctx, p, at)
+}
+
+// Each unreadable value is taken as the observation it might hide, at the
+// floor, on its own: an unreadable block as a floor block (no hold); an
+// unreadable quota mark as a quota observed now (held, and a floor quota
+// block); both together as both.
+func TestUnreadableRateLimitsAreTakenConservatively(t *testing.T) {
+	tests := []struct {
+		name                 string
+		failUntil, failQuota bool
+		storedQuota          bool
+		wantHeld, wantQuota  bool
+	}{
+		{"the block is unreadable", true, false, false, false, false},
+		{"the block is unreadable, a quota mark is stored", true, false, true, true, true},
+		{"the quota mark is unreadable", false, true, false, true, true},
+		{"both are unreadable", true, true, false, true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rt := runtimeAt(t, filepath.Join(t.TempDir(), "library.db"))
+			if tt.storedQuota {
+				if err := rt.store.SetQuotaExceeded(rt.ctx, catalog.Spotify, time.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			k := &fakeKeeper{}
+			before := time.Now()
+			held := rt.keepRateLimit(k, &flakyLimits{rateLimitStore: rt.store, failUntil: tt.failUntil, failQuota: tt.failQuota})
+			r := k.restored()
+			if held != tt.wantHeld || len(r) != 1 || r[0].quota != tt.wantQuota ||
+				r[0].until.Before(before.Add(spotify.MinCooldown)) || r[0].until.After(time.Now().Add(spotify.MinCooldown)) {
+				t.Errorf("held %t, restored %v; want held %t and a %v block, quota %t", held, r, tt.wantHeld, spotify.MinCooldown, tt.wantQuota)
+			}
+		})
+	}
+	// A longer stored block is kept when only the quota mark is unreadable.
 	rt := runtimeAt(t, filepath.Join(t.TempDir(), "library.db"))
-	if err := rt.store.Close(); err != nil {
+	long := time.Now().Add(time.Hour)
+	if err := rt.store.SetRateLimitedUntil(rt.ctx, catalog.Spotify, long); err != nil {
 		t.Fatal(err)
 	}
 	k := &fakeKeeper{}
-	before := time.Now()
-	held := rt.keepRateLimit(k)
-	r := k.restored()
-	if !held || len(r) != 1 || !r[0].quota ||
-		r[0].until.Before(before.Add(spotify.MinCooldown)) || r[0].until.After(time.Now().Add(spotify.MinCooldown)) {
-		t.Fatalf("an unreadable catalog: held %t, restored %v; want held and a %v block", held, r, spotify.MinCooldown)
+	rt.keepRateLimit(k, &flakyLimits{rateLimitStore: rt.store, failQuota: true})
+	if r := k.restored(); len(r) != 1 || !sameMilli(r[0].until, long) || !r[0].quota {
+		t.Errorf("restored %v, want the stored hour, as a quota block", r)
 	}
-	k.fn(time.Now().Add(time.Hour), true) // the write fails: logged only
-	if got := k.restored(); len(got) != 1 {
-		t.Errorf("a failed write touched the gate: %v", got)
+}
+
+// A failed write is logged only: the hold is taken in memory all the same,
+// and the provider's gate is not touched.
+func TestRateLimitWriteFailuresStillHold(t *testing.T) {
+	src, w := &quotaSource{}, &countingWorker{}
+	rt := runtimeAt(t, filepath.Join(t.TempDir(), "library.db"))
+	k := &fakeKeeper{}
+	rt.keepRateLimit(k, &flakyLimits{rateLimitStore: rt.store, failWrites: true})
+	rt.setSources(source{Source: src, refresh: time.Hour, worker: w})
+	k.fn(time.Now().Add(time.Hour), true)
+	ps := rt.providers[catalog.Spotify]
+	rt.mu.Lock()
+	held := ps.held
+	rt.mu.Unlock()
+	if !held || len(k.restored()) != 0 {
+		t.Errorf("held %t, gate calls %v; want held and the gate untouched", held, k.restored())
 	}
 }
 
@@ -156,10 +237,14 @@ func (q *quotaSource) count() int {
 	return q.syncs
 }
 
-// countingWorker counts its runs.
-type countingWorker struct{ runs atomic.Int32 }
+// countingWorker counts its runs and its active holds.
+type countingWorker struct{ runs, holds atomic.Int32 }
 
-func (*countingWorker) Hold() func() { return func() {} }
+func (w *countingWorker) Hold() func() {
+	w.holds.Add(1)
+	var once sync.Once
+	return func() { once.Do(func() { w.holds.Add(-1) }) }
+}
 func (w *countingWorker) Run(context.Context) error {
 	w.runs.Add(1)
 	return nil
@@ -284,4 +369,121 @@ func waitUntil(t *testing.T, what string, ok func() bool) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+// A quota observed outside a sync, by something the user did or by the
+// background fill, holds the runtime at once: the armed retry is cancelled,
+// the worker is paused, and neither a firing retry nor the worker runs.
+func TestAQuotaSeenOutsideASyncHoldsTheRuntime(t *testing.T) {
+	for _, where := range []string{"foreground", "background fill"} {
+		t.Run(where, func(t *testing.T) {
+			src, w := &quotaSource{}, &countingWorker{}
+			rt := runtimeAt(t, filepath.Join(t.TempDir(), "library.db"))
+			rt.retryMin, rt.retryMax = time.Hour, time.Hour
+			k := &fakeKeeper{}
+			rt.keepRateLimit(k, rt.store)
+			rt.setSources(source{Source: src, refresh: time.Hour, worker: w})
+			rt.send = func(tea.Msg) {}
+
+			// An ordinary rate limit arms a retry.
+			src.set(fmt.Errorf("sync spotify/albums: %w", &catalog.RateLimitError{RetryAfter: time.Minute}))
+			rt.refresh(catalog.Spotify)
+			ps := settledProvider(t, rt)
+			runsBefore := w.runs.Load()
+			rt.mu.Lock()
+			armed := ps.retry != nil
+			rt.mu.Unlock()
+			if !armed {
+				t.Fatal("no retry armed after an ordinary rate limit")
+			}
+
+			// The quota answer reaches the provider's gate, whose record
+			// call is the runtime's only news of it.
+			observe := func() { k.fn(time.Now().Add(time.Minute), true) }
+			if where == "foreground" {
+				observe()
+			} else {
+				done := make(chan struct{})
+				rt.wg.Add(1)
+				go func() { defer rt.wg.Done(); observe(); close(done) }() // as the fill's request would
+				<-done
+			}
+			rt.mu.Lock()
+			held, retry := ps.held, ps.retry
+			rt.mu.Unlock()
+			if !held || retry != nil || w.holds.Load() != 1 {
+				t.Fatalf("held %t, retry armed %t, worker holds %d; want held, none, the worker paused", held, retry != nil, w.holds.Load())
+			}
+			if mark, _ := rt.store.QuotaExceeded(rt.ctx, catalog.Spotify); !mark {
+				t.Error("the quota mark was not stored")
+			}
+
+			// Every background entry is shut: a retry firing anyway, the
+			// worker started, a startup.
+			syncs := src.count()
+			rt.sync(catalog.Spotify)
+			rt.runWorker(catalog.Spotify, w)
+			rt.startSyncs()
+			time.Sleep(20 * time.Millisecond)
+			rt.wg.Wait()
+			if src.count() != syncs || w.runs.Load() != runsBefore {
+				t.Errorf("held: syncs %d -> %d, worker runs %d -> %d; want none", syncs, src.count(), runsBefore, w.runs.Load())
+			}
+		})
+	}
+}
+
+// An older successful sync does not clear a newer quota observation: not one
+// that arrives during the sync, nor one that arrives between the success and
+// the store's clear.
+func TestAnOlderSuccessKeepsANewerQuota(t *testing.T) {
+	for _, when := range []string{"during the sync", "between the success and the clear"} {
+		t.Run(when, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "library.db")
+			rt := runtimeAt(t, path)
+			if err := rt.store.SetQuotaExceeded(rt.ctx, catalog.Spotify, time.Now().Add(-time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+			k := &fakeKeeper{}
+			held := rt.keepRateLimit(k, rt.store)
+			src, w := &duringSource{}, &countingWorker{}
+			rt.setSources(source{Source: src, refresh: time.Hour, worker: w, held: held})
+			rt.send = func(tea.Msg) {}
+			observe := func() {
+				time.Sleep(2 * time.Millisecond) // the mark is newer than the sync's start
+				k.fn(time.Now().Add(time.Minute), true)
+			}
+			if when == "during the sync" {
+				src.during = observe
+			} else {
+				beforeQuotaClear = observe
+				t.Cleanup(func() { beforeQuotaClear = nil })
+			}
+
+			rt.refresh(catalog.Spotify) // the user asks; the sync succeeds
+			ps := settledProvider(t, rt)
+			rt.mu.Lock()
+			held = ps.held
+			rt.mu.Unlock()
+			mark, err := rt.store.QuotaExceeded(rt.ctx, catalog.Spotify)
+			if !held || !mark || err != nil {
+				t.Errorf("after the older success: held %t, mark %t (%v); want both kept", held, mark, err)
+			}
+			if w.runs.Load() != 0 {
+				t.Errorf("the worker ran %d times while held", w.runs.Load())
+			}
+		})
+	}
+}
+
+// duringSource succeeds, running during inside its fetch.
+type duringSource struct{ during func() }
+
+func (*duringSource) Provider() string      { return catalog.Spotify }
+func (*duringSource) Collections() []string { return []string{"albums"} }
+func (d *duringSource) Fetch(_ context.Context, collection string, _ catalogsync.Known) (catalog.Snapshot, error) {
+	if d.during != nil {
+		d.during()
+	}
+	return catalog.Snapshot{Provider: catalog.Spotify, Collection: collection}, nil
 }

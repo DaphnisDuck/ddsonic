@@ -52,13 +52,24 @@ func TestQuotaMark(t *testing.T) {
 	if held, _ := s.QuotaExceeded(ctx, "youtube"); held {
 		t.Error("another provider is held")
 	}
-	if err := s.ClearQuotaExceeded(ctx, "spotify"); err != nil {
+	// A clear by a success that began before the mark was set does not
+	// remove it; one that began after it does.
+	set := time.UnixMilli(1_790_000_000_000)
+	for _, began := range []time.Time{set.Add(-time.Second), set} {
+		if err := s.ClearQuotaExceeded(ctx, "spotify", began); err != nil {
+			t.Fatal(err)
+		}
+		if held, _ := s.QuotaExceeded(ctx, "spotify"); !held {
+			t.Errorf("a success that began at %v cleared a mark set at %v", began, set)
+		}
+	}
+	if err := s.ClearQuotaExceeded(ctx, "spotify", set.Add(time.Millisecond)); err != nil {
 		t.Fatal(err)
 	}
 	if held, err := s.QuotaExceeded(ctx, "spotify"); err != nil || held {
 		t.Errorf("after clearing: %t, %v", held, err)
 	}
-	if err := s.ClearQuotaExceeded(ctx, "spotify"); err != nil {
+	if err := s.ClearQuotaExceeded(ctx, "spotify", time.Now()); err != nil {
 		t.Errorf("clearing twice: %v", err)
 	}
 }

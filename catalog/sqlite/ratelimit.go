@@ -53,9 +53,11 @@ func (s *Store) SetQuotaExceeded(ctx context.Context, provider string, at time.T
 	return s.SetRateLimitedUntil(ctx, quotaKey(provider), at)
 }
 
-// ClearQuotaExceeded removes provider's exhausted-quota mark.
-func (s *Store) ClearQuotaExceeded(ctx context.Context, provider string) error {
-	if _, err := s.wdb.ExecContext(ctx, `DELETE FROM rate_limits WHERE provider = ?`, quotaKey(provider)); err != nil {
+// ClearQuotaExceeded removes provider's exhausted-quota mark if it was set
+// before before. A mark set at before or later (a newer observation than
+// the success that clears it) is kept.
+func (s *Store) ClearQuotaExceeded(ctx context.Context, provider string, before time.Time) error {
+	if _, err := s.wdb.ExecContext(ctx, `DELETE FROM rate_limits WHERE provider = ? AND until < ?`, quotaKey(provider), before.UnixMilli()); err != nil {
 		return fmt.Errorf("clear quota %s: %w", provider, err)
 	}
 	return nil

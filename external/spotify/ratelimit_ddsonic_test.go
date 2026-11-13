@@ -395,8 +395,14 @@ func TestQuotaExceeded(t *testing.T) {
 			if tt.quota && (!strings.Contains(err.Error(), "quota exceeded (no reset time given)") || !strings.Contains(err.Error(), "not retried automatically")) {
 				t.Errorf("message %q", err)
 			}
-			if r := g.records(); len(r) != 1 || r[0].quota != tt.quota {
-				t.Errorf("recorded %v, want one with quota %t", r, tt.quota)
+			// The block is recorded from the header first; a quota body then
+			// records it again as a quota block, with the same end.
+			wantRecords := 1
+			if tt.quota {
+				wantRecords = 2
+			}
+			if r := g.records(); len(r) != wantRecords || r[len(r)-1].quota != tt.quota || !r[len(r)-1].until.Equal(r[0].until) {
+				t.Errorf("recorded %v, want %d, the last with quota %t and the same end", r, wantRecords, tt.quota)
 			}
 			if g.calls.Load() != 1 {
 				t.Errorf("%d requests, want 1", g.calls.Load())
@@ -560,3 +566,74 @@ func TestTheGateClosesBeforeTheBlockIsRecorded(t *testing.T) {
 		t.Error("the block was recorded while the gate was still open")
 	}
 }
+
+// A 429 always fails its request with a RateLimitError, even when recording
+// the block outlasts it: the error is the block as the 429 left it.
+func TestA429FailsItsRequestHoweverLongRecordingTakes(t *testing.T) {
+	now := time.Unix(1_790_000_000, 0)
+	p, g := newGateAPI(t, &now)
+	g.set(func(*http.Request) bool { return true }, "5", `{}`)
+	p.OnRateLimited(func(time.Time, bool) { now = now.Add(time.Minute) }) // a slow catalog write
+	for _, call := range []func() error{
+		func() error { return get(p, context.Background()) },
+		func() error { _, err := p.AlbumTrackRecordsOnce(context.Background(), "al1"); return err },
+		func() error { _, err := p.SavedAlbumRecords(context.Background()); return err },
+	} {
+		err := call() // must not panic on a nil response
+		if rl, ok := errors.AsType[*catalog.RateLimitError](err); !ok || rl.Until.IsZero() {
+			t.Errorf("= %v, want the 429's RateLimitError", err)
+		}
+		now = now.Add(time.Hour)
+	}
+}
+
+// The gate closes from the header before the body is read: while a slow body
+// is read, a second caller sends nothing; the quota body then upgrades the
+// block without moving its end.
+func TestTheGateClosesBeforeTheBodyIsRead(t *testing.T) {
+	now := time.Unix(1_790_000_000, 0)
+	p, g := newGateAPI(t, &now)
+	reading, release := make(chan struct{}), make(chan struct{})
+	orig := http.DefaultTransport
+	var n atomic.Int32
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if n.Add(1) > 1 {
+			return &http.Response{StatusCode: 200, Status: "200 OK", Header: http.Header{},
+				Body: io.NopCloser(strings.NewReader(`{"id":"me"}`)), Request: req}, nil
+		}
+		return &http.Response{StatusCode: 429, Status: "429", Header: http.Header{"Retry-After": {"120"}},
+			Body: &slowBody{started: reading, release: release, body: strings.NewReader(quotaBody)}, Request: req}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = orig })
+
+	first := make(chan error, 1)
+	go func() { first <- get(p, context.Background()) }()
+	<-reading
+	if err := get(p, context.Background()); !errors.As(err, new(*catalog.RateLimitError)) || n.Load() != 1 {
+		t.Errorf("a second caller while the body is read = %v after %d requests; want a RateLimitError, none sent", err, n.Load())
+	}
+	now = now.Add(30 * time.Second) // the body is slow
+	close(release)
+	err := <-first
+	rl, ok := errors.AsType[*catalog.RateLimitError](err)
+	start := now.Add(-30 * time.Second)
+	if !ok || !rl.Quota || !rl.Until.Equal(start.Add(2*time.Minute)) {
+		t.Errorf("the first = %v (%+v), want a quota block ending at +120s from the answer, not restarted", err, rl)
+	}
+	if r := g.records(); len(r) != 2 || r[0].quota || !r[1].quota || !r[0].until.Equal(r[1].until) {
+		t.Errorf("recorded %v, want the header's block, then the same block as a quota one", r)
+	}
+}
+
+// slowBody blocks its first read until released.
+type slowBody struct {
+	started, release chan struct{}
+	once             sync.Once
+	body             io.Reader
+}
+
+func (b *slowBody) Read(p []byte) (int, error) {
+	b.once.Do(func() { close(b.started); <-b.release })
+	return b.body.Read(p)
+}
+func (*slowBody) Close() error { return nil }

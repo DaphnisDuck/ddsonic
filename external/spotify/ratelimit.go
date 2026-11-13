@@ -81,7 +81,8 @@ func (p *SpotifyProvider) rateLimited() error {
 
 // block closes the gate for the wait retryAfter header asks for, unless it is
 // already closed for longer, and returns the error the request fails with.
-// It never shortens a block.
+// It never shortens a block. The error is the block as this 429 left it,
+// taken under the lock: it is never nil, however long recording it takes.
 func (p *SpotifyProvider) block(header string, quota bool) error {
 	p.rate.mu.Lock()
 	now := p.rate.clock()
@@ -96,20 +97,43 @@ func (p *SpotifyProvider) block(header string, quota bool) error {
 	if quota && !p.rate.quota {
 		p.rate.quota, changed = true, true
 	}
-	end, q, fn := p.rate.until, p.rate.quota, p.rate.onBlock
+	return p.closedLocked(now, changed)
+}
+
+// markQuota makes the block a 429 has just closed a quota block, without
+// moving its end, and returns the request's error.
+func (p *SpotifyProvider) markQuota() error {
+	p.rate.mu.Lock()
+	changed := !p.rate.quota
+	p.rate.quota = true
+	return p.closedLocked(p.rate.clock(), changed)
+}
+
+// closedLocked captures the block as it stands, releases the lock, and,
+// when it changed, hands it on to be recorded (outside the lock: that may
+// write to the catalog). The caller holds the lock.
+func (p *SpotifyProvider) closedLocked(now time.Time, changed bool) error {
+	err := &catalog.RateLimitError{RetryAfter: max(p.rate.until.Sub(now), 0), Until: p.rate.until, Quota: p.rate.quota}
+	fn := p.rate.onBlock
 	p.rate.mu.Unlock()
 	if changed && fn != nil {
-		fn(end, q) // outside the lock: it may write to the catalog
+		fn(err.Until, err.Quota)
 	}
-	return p.rateLimited()
+	return err
 }
 
 // tooManyRequests closes the gate for a 429 and returns the request's error.
-// It reads the body (bounded) for Spotify's quota reason, and closes it.
+// The gate closes from the header at once, before the body is read: a slow
+// body cannot hold it open. Then the body (at most maxQuotaBody bytes, within
+// the Web API client's timeout) is read for Spotify's quota reason, which
+// upgrades the block in place.
 func (p *SpotifyProvider) tooManyRequests(resp *http.Response) error {
-	quota := isQuotaExceeded(resp.Body)
-	resp.Body.Close()
-	return p.block(resp.Header.Get("Retry-After"), quota)
+	defer resp.Body.Close()
+	err := p.block(resp.Header.Get("Retry-After"), false)
+	if isQuotaExceeded(resp.Body) {
+		err = p.markQuota()
+	}
+	return err
 }
 
 // retryAfter is the wait a 429's Retry-After asks for: whole seconds (the
