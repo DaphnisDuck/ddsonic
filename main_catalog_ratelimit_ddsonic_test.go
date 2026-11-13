@@ -553,3 +553,85 @@ func TestAQuotaFencesARunningBackgroundSync(t *testing.T) {
 		})
 	}
 }
+
+// gatedWorker's first Hold (the one a sync takes as it starts) waits until
+// released, so a test can act between a sync's admission and its fence.
+// Later Holds (the quota hold's own) return at once: sync.Once would make
+// them wait for the first.
+type gatedWorker struct {
+	countingWorker
+	first           atomic.Bool
+	entered, resume chan struct{}
+}
+
+func (w *gatedWorker) Hold() func() {
+	if w.first.CompareAndSwap(false, true) {
+		close(w.entered)
+		<-w.resume
+	}
+	return w.countingWorker.Hold()
+}
+
+// A quota observed after a background sync was admitted but before it
+// installed its fence (nothing to cancel yet) still stops it: it reads and
+// sends nothing, and the hold stays.
+func TestAQuotaBeforeTheFenceStopsTheBackgroundRun(t *testing.T) {
+	src := &pagedSource{}
+	w := &gatedWorker{entered: make(chan struct{}), resume: make(chan struct{})}
+	rt := runtimeAt(t, filepath.Join(t.TempDir(), "library.db"))
+	k := &fakeKeeper{}
+	rt.keepRateLimit(k, rt.store)
+	rt.setSources(source{Source: src, refresh: time.Hour, worker: w})
+	rt.send = func(tea.Msg) {}
+
+	rt.sync(catalog.Spotify) // admitted: not held yet
+	<-w.entered              // its goroutine has not installed its fence
+	k.fn(time.Now().Add(5*time.Second), true)
+	close(w.resume)
+	ps := settledProvider(t, rt)
+
+	rt.mu.Lock()
+	held, retry := ps.held, ps.retry
+	rt.mu.Unlock()
+	if src.fetches.Load() != 0 || src.sends.Load() != 0 {
+		t.Errorf("the run read %d collections, sent %d pages; want none", src.fetches.Load(), src.sends.Load())
+	}
+	if !held || retry != nil {
+		t.Errorf("held %t, retry armed %t; want held and none", held, retry != nil)
+	}
+	if mark, _ := rt.store.QuotaExceeded(rt.ctx, catalog.Spotify); !mark {
+		t.Error("the quota mark is gone")
+	}
+}
+
+// holdingSource succeeds, holding the provider (as a quota restored or
+// observed without a new count would) while it fetches.
+type holdingSource struct {
+	rt *catalogRuntime
+}
+
+func (*holdingSource) Provider() string      { return catalog.Spotify }
+func (*holdingSource) Collections() []string { return []string{"albums"} }
+func (h *holdingSource) Fetch(_ context.Context, collection string, _ catalogsync.Known) (catalog.Snapshot, error) {
+	h.rt.mu.Lock()
+	h.rt.providers[catalog.Spotify].held = true
+	h.rt.mu.Unlock()
+	return catalog.Snapshot{Provider: catalog.Spotify, Collection: collection}, nil
+}
+
+// Only a run the user asked for releases a hold: a background run that
+// succeeds while the provider is held leaves it held.
+func TestABackgroundSuccessNeverClearsAHold(t *testing.T) {
+	rt := runtimeAt(t, filepath.Join(t.TempDir(), "library.db"))
+	src := &holdingSource{rt: rt}
+	rt.setSources(source{Source: src, refresh: time.Hour})
+	rt.send = func(tea.Msg) {}
+	rt.sync(catalog.Spotify)
+	ps := settledProvider(t, rt)
+	rt.mu.Lock()
+	held := ps.held
+	rt.mu.Unlock()
+	if !held {
+		t.Error("a background success released the hold")
+	}
+}

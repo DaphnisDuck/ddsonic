@@ -445,11 +445,19 @@ func (rt *catalogRuntime) request(provider string, kind syncKind) (ticket uint64
 			// A background run is fenced by a quota observed while it runs
 			// (holdLocked cancels its context): it sends nothing more.
 			runCtx, cancelRun := context.WithCancelCause(rt.ctx)
-			if !asked {
+			// A quota observed between this run's admission and here found
+			// no fence to cancel: checked again under the lock that installs
+			// it, a held background run does not start.
+			fenced := !asked && ps.held
+			if !asked && !fenced {
 				ps.fence = cancelRun
 			}
 			rt.mu.Unlock()
-			err = rt.engine.Sync(runCtx, provider)
+			if fenced {
+				err = fmt.Errorf("sync %s: %w", provider, errQuotaFence) // nothing sent
+			} else {
+				err = rt.engine.Sync(runCtx, provider)
+			}
 			// Deciding to stop and giving the provider up are one step, so
 			// a request is either seen here or starts its own sync.
 			rt.mu.Lock()
@@ -472,7 +480,9 @@ func (rt *catalogRuntime) request(provider string, kind syncKind) (ticket uint64
 				// of a newer sync that failed meanwhile.
 				if !owned {
 					rt.scheduleRetryLocked(ps, provider, err)
-					if err == nil && ps.held && ps.quotaSeq == seq {
+					// Only a run the user asked for releases a hold: a
+					// background run never does, whatever its result.
+					if err == nil && asked && ps.held && ps.quotaSeq == seq {
 						rt.releaseHoldLocked(ps)
 						cleared, clearBefore = true, began
 					}
