@@ -101,12 +101,14 @@ func (p *SpotifyProvider) block(header string, quota bool) error {
 }
 
 // markQuota makes the block a 429 has just closed a quota block, without
-// moving its end, and returns the request's error.
+// moving its end, and returns the request's error. Every quota answer is an
+// observation of its own and is always handed on to be recorded (the
+// runtime holds and persists it): the gate's flag may still be set from an
+// earlier quota block that has since ended and been recovered from.
 func (p *SpotifyProvider) markQuota() error {
 	p.rate.mu.Lock()
-	changed := !p.rate.quota
 	p.rate.quota = true
-	return p.closedLocked(p.rate.clock(), changed)
+	return p.closedLocked(p.rate.clock(), true)
 }
 
 // closedLocked captures the block as it stands, releases the lock, and,

@@ -71,8 +71,8 @@ func (c *apiCall) backAuth() error {
 // rate-limit gate, which another request's 429 may have closed while this one
 // waited for its token. It holds no lock across the send.
 func (p *SpotifyProvider) admit(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return err
+	if ctx.Err() != nil {
+		return context.Cause(ctx) // ctx.Err() unless a cause was given (a fenced sync)
 	}
 	return p.rateLimited()
 }

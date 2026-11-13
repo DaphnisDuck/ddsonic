@@ -487,3 +487,69 @@ func (d *duringSource) Fetch(_ context.Context, collection string, _ catalogsync
 	}
 	return catalog.Snapshot{Provider: catalog.Spotify, Collection: collection}, nil
 }
+
+// pagedSource reads two collections of two pages each. A page is "sent"
+// only while the run's context allows it, as the provider's admit does, and
+// the first page of the first collection stays outstanding until released.
+type pagedSource struct {
+	sends, fetches       atomic.Int32
+	outstanding, release chan struct{}
+}
+
+func (*pagedSource) Provider() string      { return catalog.Spotify }
+func (*pagedSource) Collections() []string { return []string{"albums", "artists"} }
+
+func (s *pagedSource) Fetch(ctx context.Context, collection string, _ catalogsync.Known) (catalog.Snapshot, error) {
+	s.fetches.Add(1)
+	for page := 1; page <= 2; page++ {
+		if ctx.Err() != nil {
+			return catalog.Snapshot{}, context.Cause(ctx) // refused before sending
+		}
+		s.sends.Add(1)
+		if collection == "albums" && page == 1 && s.outstanding != nil {
+			close(s.outstanding)
+			<-s.release // the answer is still on its way
+		}
+	}
+	return catalog.Snapshot{Provider: catalog.Spotify, Collection: collection}, nil
+}
+
+// A quota observed while a background sync is running fences it: once its
+// outstanding request is answered (after a short pause has ended), it sends
+// no further page and reads no further collection. A sync the user asked
+// for is the way out of a hold and is not fenced.
+func TestAQuotaFencesARunningBackgroundSync(t *testing.T) {
+	for _, kind := range []string{"background", "asked for"} {
+		t.Run(kind, func(t *testing.T) {
+			src := &pagedSource{outstanding: make(chan struct{}), release: make(chan struct{})}
+			rt := runtimeAt(t, filepath.Join(t.TempDir(), "library.db"))
+			k := &fakeKeeper{}
+			rt.keepRateLimit(k, rt.store)
+			rt.setSources(source{Source: src, refresh: time.Hour})
+			rt.send = func(tea.Msg) {}
+			if kind == "background" {
+				rt.sync(catalog.Spotify)
+			} else {
+				rt.refresh(catalog.Spotify)
+			}
+			<-src.outstanding
+			k.fn(time.Now().Add(5*time.Second), true) // a quota answer elsewhere, a short pause
+			close(src.release)                        // the outstanding answer lands
+			ps := settledProvider(t, rt)
+
+			wantSends, wantFetches := int32(1), int32(1)
+			if kind == "asked for" {
+				wantSends, wantFetches = 4, 2
+			}
+			if src.sends.Load() != wantSends || src.fetches.Load() != wantFetches {
+				t.Errorf("sends %d, collections read %d; want %d and %d", src.sends.Load(), src.fetches.Load(), wantSends, wantFetches)
+			}
+			rt.mu.Lock()
+			retry := ps.retry
+			rt.mu.Unlock()
+			if retry != nil {
+				t.Error("a retry was armed after the fenced run")
+			}
+		})
+	}
+}

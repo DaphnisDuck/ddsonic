@@ -637,3 +637,69 @@ func (b *slowBody) Read(p []byte) (int, error) {
 	return b.body.Read(p)
 }
 func (*slowBody) Close() error { return nil }
+
+// Every quota answer is an observation of its own, even when the gate's
+// flag is still set from an earlier quota block: here a second response,
+// admitted before the first quota block closed the gate, has a shorter
+// Retry-After (so it does not extend the block) and a slow quota body that
+// arrives only after that block has ended (and, in the runtime, after a
+// sync the user started has cleared the hold). It is still recorded as a
+// quota observation, so the runtime holds and persists it again.
+func TestAQuotaAnswerAfterRecoveryIsObservedAgain(t *testing.T) {
+	now := time.Unix(1_790_000_000, 0)
+	p, g := newGateAPI(t, &now)
+	entered, answer := make(chan struct{}), make(chan struct{})
+	reading, release := make(chan struct{}), make(chan struct{})
+	orig := http.DefaultTransport
+	var n atomic.Int32
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if n.Add(1) == 1 { // the slow one: admitted first, answered later
+			close(entered)
+			<-answer
+			return &http.Response{StatusCode: 429, Status: "429", Header: http.Header{"Retry-After": {"1"}},
+				Body: &slowBody{started: reading, release: release, body: strings.NewReader(quotaBody)}, Request: req}, nil
+		}
+		return &http.Response{StatusCode: 429, Status: "429", Header: http.Header{"Retry-After": {"5"}},
+			Body: io.NopCloser(strings.NewReader(quotaBody)), Request: req}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = orig })
+
+	slow := make(chan error, 1)
+	go func() { slow <- get(p, context.Background()) }()
+	<-entered
+	if err := get(p, context.Background()); !errors.As(err, new(*catalog.RateLimitError)) {
+		t.Fatalf("the first quota answer = %v", err)
+	}
+	before := len(g.records()) // its header's block, then its quota
+	close(answer)
+	<-reading                       // the slow answer's header did not extend the 5 s block
+	now = now.Add(10 * time.Second) // the block has ended; recovery happens meanwhile
+	close(release)
+	err := <-slow
+	if rl, ok := errors.AsType[*catalog.RateLimitError](err); !ok || !rl.Quota {
+		t.Errorf("the slow answer = %v, want a quota RateLimitError", err)
+	}
+	r := g.records()
+	if len(r) != before+1 || !r[len(r)-1].quota {
+		t.Errorf("records %v (had %d), want one more, a quota observation", r, before)
+	}
+}
+
+// A request whose context was cancelled with a cause (the runtime's fence of
+// a background sync) is not sent, and fails with that cause.
+func TestAFencedRequestIsNotSentAndSaysWhy(t *testing.T) {
+	storeCreds(t)
+	h := fakeSpotifyHTTP(t, tokenOK, apiOK)
+	p := New(goodSession(), "client", 320)
+	fence := &catalog.RateLimitError{Quota: true}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(fence)
+	for _, call := range []func() error{
+		func() error { return get(p, ctx) },
+		func() error { _, err := p.SavedAlbumRecords(ctx); return err },
+	} {
+		if err := call(); !errors.Is(err, fence) || h.apiCalls.Load() != 0 {
+			t.Errorf("= %v after %d requests, want the fence and none sent", err, h.apiCalls.Load())
+		}
+	}
+}

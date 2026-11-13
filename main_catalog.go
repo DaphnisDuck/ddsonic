@@ -135,6 +135,9 @@ type providerSync struct {
 	held        bool
 	holdRelease func()
 	quotaSeq    uint64
+	// fence cancels the running background sync's context (nil when none
+	// runs, or the running one was asked for). Guarded by mu.
+	fence context.CancelCauseFunc
 }
 
 // syncKind is who asks for a sync.
@@ -430,17 +433,28 @@ func (rt *catalogRuntime) request(provider string, kind syncKind) (ticket uint64
 		var err error
 		var cleared bool
 		var clearBefore time.Time
+		// asked: this run is one the user asked for ("r", a sign-in), which
+		// a quota observation does not stop: it is the way out of a hold.
+		asked := kind != syncBackground
 		for {
 			rt.mu.Lock()
 			seen := ps.requests
 			// A quota observed after this point is newer than this run: its
 			// success does not clear it (in memory, or in the store).
 			seq, began := ps.quotaSeq, time.Now()
+			// A background run is fenced by a quota observed while it runs
+			// (holdLocked cancels its context): it sends nothing more.
+			runCtx, cancelRun := context.WithCancelCause(rt.ctx)
+			if !asked {
+				ps.fence = cancelRun
+			}
 			rt.mu.Unlock()
-			err = rt.engine.Sync(rt.ctx, provider)
+			err = rt.engine.Sync(runCtx, provider)
 			// Deciding to stop and giving the provider up are one step, so
 			// a request is either seen here or starts its own sync.
 			rt.mu.Lock()
+			ps.fence = nil
+			cancelRun(nil)
 			again := ps.quiet && err == nil && ps.requests != seen && !rt.closed
 			// The running sync, or quitting, owns what happens next.
 			owned := errors.Is(err, catalogsync.ErrRunning) || rt.ctx.Err() != nil
@@ -448,7 +462,7 @@ func (rt *catalogRuntime) request(provider string, kind syncKind) (ticket uint64
 			// so one request owes one run. Its own result settles the retry;
 			// this run's does not.
 			if !again && ps.owed && !owned && !rt.closed {
-				again = true
+				again, asked = true, true // owed runs are explicit or required
 				ps.announced, ps.serving = false, ps.requiredSeq
 			}
 			ps.owed = false
@@ -624,7 +638,15 @@ func (rt *catalogRuntime) holdLocked(ps *providerSync) {
 	if ps.worker != nil && ps.holdRelease == nil {
 		ps.holdRelease = ps.worker.Hold()
 	}
+	if ps.fence != nil {
+		ps.fence(errQuotaFence)
+		ps.fence = nil
+	}
 }
+
+// errQuotaFence is why a background sync was stopped: its requests fail
+// with it (admit gives the context's cause), not with a bare cancellation.
+var errQuotaFence = &catalog.RateLimitError{Quota: true}
 
 // releaseHoldLocked ends ps's hold. The caller holds rt.mu.
 func (rt *catalogRuntime) releaseHoldLocked(ps *providerSync) {
