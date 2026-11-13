@@ -138,6 +138,13 @@ type providerSync struct {
 	// fence cancels the running background sync's context (nil when none
 	// runs, or the running one was asked for). Guarded by mu.
 	fence context.CancelCauseFunc
+	// work is the background worker's context, and stopWork cancels it:
+	// a quota observation (holdLocked) stops the worker's run where it is,
+	// so the album being filled sends no further page. Each hold ends the
+	// context; runWorker makes a new one, under mu, only when not held.
+	// Foreground album opens use the caller's context, not this one.
+	work     context.Context
+	stopWork context.CancelCauseFunc
 }
 
 // syncKind is who asks for a sync.
@@ -618,6 +625,16 @@ func (rt *catalogRuntime) keepRateLimit(sp rateLimitKeeper, st rateLimitStore) (
 			applog.Warn("catalog: %v", err)
 		}
 		if quota {
+			// Limitation (conservative, accepted): the mark is stamped when
+			// it is written, not when the quota was observed, and the write
+			// is not ordered against clearQuota. A write delayed past the
+			// start of a user-asked sync that then succeeds (and released
+			// this observation in memory) can land after that sync's clear,
+			// or carry a stamp newer than its start, and survive it. The
+			// next run then restores a hold already resolved: it holds
+			// automatic work (sends nothing extra) until a sync the user
+			// asks for succeeds. Ordering the writes against the clear
+			// would need a stored generation; see catalog.md.
 			if err := st.SetQuotaExceeded(rt.ctx, catalog.Spotify, time.Now()); err != nil {
 				applog.Warn("catalog: %v", err)
 			}
@@ -651,6 +668,10 @@ func (rt *catalogRuntime) holdLocked(ps *providerSync) {
 	if ps.fence != nil {
 		ps.fence(errQuotaFence)
 		ps.fence = nil
+	}
+	if ps.stopWork != nil {
+		ps.stopWork(errQuotaFence)
+		ps.work, ps.stopWork = nil, nil
 	}
 }
 
@@ -712,13 +733,22 @@ func (rt *catalogRuntime) runWorker(provider string, w worker) {
 	if rt.closed {
 		return
 	}
-	if ps := rt.providers[provider]; ps != nil && ps.held {
-		return // ddsonic: held by an exhausted quota
+	ctx := rt.ctx
+	if ps := rt.providers[provider]; ps != nil {
+		if ps.held {
+			return // ddsonic: held by an exhausted quota
+		}
+		// ddsonic: checked and installed under one lock, so a quota
+		// observation either is seen above or cancels this run's context.
+		if ps.stopWork == nil {
+			ps.work, ps.stopWork = context.WithCancelCause(rt.ctx)
+		}
+		ctx = ps.work
 	}
 	rt.wg.Add(1)
 	go func() {
 		defer rt.wg.Done()
-		err := w.Run(rt.ctx)
+		err := w.Run(ctx)
 		if err != nil && !errors.Is(err, catalogsync.ErrRunning) && !errors.Is(err, context.Canceled) {
 			applog.Info("catalog %s background work: %v", provider, err)
 		}

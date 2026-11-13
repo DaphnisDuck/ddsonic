@@ -635,3 +635,181 @@ func TestABackgroundSuccessNeverClearsAHold(t *testing.T) {
 		t.Error("a background success released the hold")
 	}
 }
+
+// pagedAlbums is an album source whose albums take two pages. Each page is
+// sent only if ctx is live, as admit does; the timed gate is left out, as
+// if a short pause had already ended. outstanding closes when the first
+// background page is sent, which then waits for release.
+type pagedAlbums struct {
+	sends, foreground    atomic.Int32
+	outstanding, release chan struct{}
+}
+
+func (*pagedAlbums) Provider() string { return catalog.Spotify }
+
+func (s *pagedAlbums) AlbumTracks(ctx context.Context, _ catalog.Ref) ([]catalog.TrackRecord, error) {
+	for range 2 {
+		if ctx.Err() != nil {
+			return nil, context.Cause(ctx)
+		}
+		s.foreground.Add(1)
+	}
+	return nil, nil
+}
+
+func (s *pagedAlbums) AlbumTracksOnce(ctx context.Context, _ catalog.Ref) ([]catalog.TrackRecord, error) {
+	for page := 1; page <= 2; page++ {
+		if ctx.Err() != nil {
+			return nil, context.Cause(ctx) // refused before sending
+		}
+		s.sends.Add(1)
+		if page == 1 && s.outstanding != nil {
+			close(s.outstanding)
+			<-s.release // the answer is still on its way
+		}
+	}
+	return nil, nil
+}
+
+// oneAlbum is an album store with one uncached album.
+type oneAlbum struct {
+	mu     sync.Mutex
+	cached bool
+}
+
+var theAlbum = catalog.Album{ID: 1, Title: "a", Ref: catalog.Ref{Provider: catalog.Spotify, ProviderID: "a"}}
+
+func (s *oneAlbum) UncachedAlbums(context.Context, string) ([]catalog.Album, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cached {
+		return nil, nil
+	}
+	return []catalog.Album{theAlbum}, nil
+}
+
+func (s *oneAlbum) CacheAlbumTracks(context.Context, catalog.Ref, []catalog.TrackRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cached = true
+	return nil
+}
+
+func (s *oneAlbum) AlbumTracksByRef(context.Context, catalog.Ref) ([]catalog.Track, bool, error) {
+	return nil, false, nil
+}
+
+// startedWorker lets a test act after runWorker has handed the worker its
+// context and before the worker sends anything.
+type startedWorker struct {
+	*catalogsync.Filler
+	entered, resume chan struct{}
+}
+
+func (w *startedWorker) Run(ctx context.Context) error {
+	close(w.entered)
+	<-w.resume
+	return w.Filler.Run(ctx)
+}
+
+// workersStopped waits for the runtime's goroutines, failing if a worker
+// is still running (as a held fill paused mid-run would be).
+func workersStopped(t *testing.T, rt *catalogRuntime) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { rt.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Error("the background fill did not stop")
+	}
+}
+
+// fillRuntime is a runtime whose Spotify worker is a filler over src and
+// store.
+func fillRuntime(t *testing.T, src *pagedAlbums, store *oneAlbum, wrap func(*catalogsync.Filler) worker) (*catalogRuntime, *fakeKeeper, *catalogsync.Filler) {
+	t.Helper()
+	f := catalogsync.NewFiller(store, src, catalogsync.Pacing{Delay: time.Millisecond, MinBackoff: time.Millisecond, MaxBackoff: time.Millisecond, MaxFailures: 3})
+	var w worker = f
+	if wrap != nil {
+		w = wrap(f)
+	}
+	rt := runtimeAt(t, filepath.Join(t.TempDir(), "library.db"))
+	k := &fakeKeeper{}
+	rt.keepRateLimit(k, rt.store)
+	rt.setSources(source{Source: &quotaSource{}, refresh: time.Hour, worker: w})
+	rt.send = func(tea.Msg) {}
+	return rt, k, f
+}
+
+// A quota observed while the background fill has an album page outstanding
+// stops the fill there: once that page is answered (after a short pause has
+// ended), the album's next page is not sent. A quota observed after the
+// worker was handed its context but before it sent anything stops it too.
+// After the hold is released, the next run gets a live context again.
+func TestAQuotaStopsTheBackgroundFillMidAlbum(t *testing.T) {
+	t.Run("page outstanding", func(t *testing.T) {
+		src := &pagedAlbums{outstanding: make(chan struct{}), release: make(chan struct{})}
+		rt, k, _ := fillRuntime(t, src, &oneAlbum{}, nil)
+		rt.runWorker(catalog.Spotify, rt.providers[catalog.Spotify].worker)
+		<-src.outstanding
+		k.fn(time.Now().Add(5*time.Second), true) // a quota answer elsewhere, a short pause
+		close(src.release)                        // page 1's answer lands
+		workersStopped(t, rt)
+		if n := src.sends.Load(); n != 1 {
+			t.Errorf("the fill sent %d pages; want 1 (none after the quota)", n)
+		}
+	})
+	t.Run("before the first send", func(t *testing.T) {
+		src := &pagedAlbums{}
+		entered, resume := make(chan struct{}), make(chan struct{})
+		rt, k, _ := fillRuntime(t, src, &oneAlbum{}, func(f *catalogsync.Filler) worker {
+			return &startedWorker{Filler: f, entered: entered, resume: resume}
+		})
+		rt.runWorker(catalog.Spotify, rt.providers[catalog.Spotify].worker)
+		<-entered // the worker has its context and has sent nothing
+		k.fn(time.Now().Add(5*time.Second), true)
+		close(resume)
+		workersStopped(t, rt)
+		if n := src.sends.Load(); n != 0 {
+			t.Errorf("the fill sent %d pages; want none", n)
+		}
+	})
+	t.Run("after the hold is released", func(t *testing.T) {
+		src, store := &pagedAlbums{}, &oneAlbum{}
+		rt, k, _ := fillRuntime(t, src, store, nil)
+		ps := rt.providers[catalog.Spotify]
+		rt.runWorker(catalog.Spotify, ps.worker) // a run before the hold
+		workersStopped(t, rt)
+		k.fn(time.Now().Add(5*time.Second), true)
+		rt.mu.Lock()
+		rt.releaseHoldLocked(ps) // as a successful sync the user asked for does
+		rt.mu.Unlock()
+		store.mu.Lock()
+		store.cached = false // another album to fill
+		store.mu.Unlock()
+		rt.runWorker(catalog.Spotify, ps.worker)
+		workersStopped(t, rt)
+		if n := src.sends.Load(); n != 4 {
+			t.Errorf("the fill sent %d pages in two runs around a released hold; want 4", n)
+		}
+	})
+}
+
+// An album the user opens while the provider is quota-held is still
+// fetched: the hold stops background work only. (The timed gate still
+// applies to it, in the provider.)
+func TestAForegroundAlbumOpenRunsWhileHeld(t *testing.T) {
+	src := &pagedAlbums{}
+	rt, k, f := fillRuntime(t, src, &oneAlbum{}, nil)
+	k.fn(time.Now().Add(5*time.Second), true)
+	if !rt.providers[catalog.Spotify].held {
+		t.Fatal("not held")
+	}
+	if _, err := f.FetchAlbumTracks(context.Background(), theAlbum); err != nil {
+		t.Fatalf("FetchAlbumTracks: %v", err)
+	}
+	if n := src.foreground.Load(); n != 2 || src.sends.Load() != 0 {
+		t.Errorf("foreground pages %d, background pages %d; want 2 and 0", n, src.sends.Load())
+	}
+}

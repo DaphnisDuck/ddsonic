@@ -63,6 +63,10 @@ func (s *Store) SetQuotaExceeded(ctx context.Context, provider string, at time.T
 // process stays held (its in-memory observation count is not clock based);
 // only a restart after that would miss the hold. A persisted revision would
 // remove this, at the cost of a store read at every sync start.
+//
+// A mark written late (after the clear, or stamped after the clearing
+// sync began) survives it and holds again after a restart: an over-block,
+// never an extra request. See keepRateLimit.
 func (s *Store) ClearQuotaExceeded(ctx context.Context, provider string, before time.Time) error {
 	if _, err := s.wdb.ExecContext(ctx, `DELETE FROM rate_limits WHERE provider = ? AND until < ?`, quotaKey(provider), before.UnixMilli()); err != nil {
 		return fmt.Errorf("clear quota %s: %w", provider, err)

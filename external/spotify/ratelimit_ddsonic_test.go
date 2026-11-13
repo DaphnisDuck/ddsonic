@@ -697,6 +697,7 @@ func TestAFencedRequestIsNotSentAndSaysWhy(t *testing.T) {
 	for _, call := range []func() error{
 		func() error { return get(p, ctx) },
 		func() error { _, err := p.SavedAlbumRecords(ctx); return err },
+		func() error { _, err := p.AlbumTrackRecordsOnce(ctx, "album"); return err }, // the filler's pages
 	} {
 		if err := call(); !errors.Is(err, fence) || h.apiCalls.Load() != 0 {
 			t.Errorf("= %v after %d requests, want the fence and none sent", err, h.apiCalls.Load())

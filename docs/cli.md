@@ -207,7 +207,7 @@ entry. See [history.md](history.md).
 cliamp spotify reset                          # clear stored Spotify credentials
 ```
 
-Use `spotify reset` for stale authentication errors, such as `401 Unauthorized` or a repeated sign-in prompt. Then restart cliamp and select Spotify to sign in again. It does not fix `rate-limited on /v1/me` warnings (<!-- ddsonic --> in ddsonic: "rate limited until …" and "quota exceeded", see [rate limits](ddsonic/catalog.md)): those are `429` responses to an accepted token, so the app is out of quota rather than unauthorized. See [spotify.md](spotify.md) for the setup guide.
+Use `spotify reset` for stale authentication errors, such as `401 Unauthorized` or a repeated sign-in prompt. Then restart cliamp and select Spotify to sign in again. It does not fix `rate-limited on /v1/me` warnings: those are `429` responses to an accepted token, so the app is out of quota rather than unauthorized. See [spotify.md](spotify.md) for the setup guide.
 
 ## cliamp:// Links
 
