@@ -185,7 +185,7 @@ func settledProvider(t *testing.T, rt *catalogRuntime) *providerSync {
 	return ps
 }
 
-var quotaErr = fmt.Errorf("sync spotify/albums: %w", &catalog.RateLimitError{RetryAfter: time.Millisecond, Quota: true})
+var errQuota = fmt.Errorf("sync spotify/albums: %w", &catalog.RateLimitError{RetryAfter: time.Millisecond, Quota: true})
 
 // An exhausted quota holds every automatic Spotify sync and the worker: no
 // retry is armed, the startup of a later run syncs nothing, and only a sync
@@ -197,7 +197,7 @@ func TestAnExhaustedQuotaHoldsAutomaticWork(t *testing.T) {
 	rt.setSources(source{Source: src, refresh: time.Hour, worker: w})
 	rt.send = func(tea.Msg) {}
 
-	src.set(quotaErr)
+	src.set(errQuota)
 	rt.refresh(catalog.Spotify)
 	ps := settledProvider(t, rt)
 	time.Sleep(50 * time.Millisecond) // ten retry delays
@@ -265,9 +265,9 @@ func TestQuotaExceededFindsJoinedErrors(t *testing.T) {
 		{nil, false},
 		{errDown, false},
 		{ordinary, false},
-		{quotaErr, true},
-		{errors.Join(errDown, ordinary, quotaErr), true},
-		{fmt.Errorf("outer: %w", errors.Join(ordinary, quotaErr)), true},
+		{errQuota, true},
+		{errors.Join(errDown, ordinary, errQuota), true},
+		{fmt.Errorf("outer: %w", errors.Join(ordinary, errQuota)), true},
 	} {
 		if got := quotaExceeded(tt.err); got != tt.want {
 			t.Errorf("quotaExceeded(%v) = %t, want %t", tt.err, got, tt.want)
