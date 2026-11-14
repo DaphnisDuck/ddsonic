@@ -38,17 +38,21 @@ import (
 const (
 	// catalogOpenTimeout bounds opening and migrating the catalog at startup.
 	catalogOpenTimeout = 10 * time.Second
-	// catalogStopTimeout bounds how long quitting waits for a sync to stop.
-	catalogStopTimeout = 5 * time.Second
-	// holdWriteTimeout bounds storing a hold already observed (ddsonic,
-	// #170). The write does not end with quitting's cancellation, and it
-	// fits within catalogStopTimeout, so the store is still open for it.
+	// holdWriteTimeout bounds each store write of a hold, rate limit or
+	// quota mark already observed (ddsonic, #170 and Spotify's quit fix):
+	// it runs on a context quitting does not cancel (persist), and fits
+	// within catalogStopTimeout, so the store is still open for it.
 	holdWriteTimeout = 2 * time.Second
 	// A failed sync retries after syncRetryMin, doubling up to syncRetryMax,
 	// so an outage clears without a restart or r.
 	syncRetryMin = time.Minute
 	syncRetryMax = 30 * time.Minute
 )
+
+// catalogStopTimeout bounds how long quitting waits for the syncs, the
+// background work and Spotify's requests in progress to end (close); a
+// variable for tests.
+var catalogStopTimeout = 5 * time.Second
 
 // catalogRuntime owns the catalog for one run: the Spotify sync and album
 // fill, and the local folder index. Without a store, browsing stays live, as
@@ -73,6 +77,11 @@ type catalogRuntime struct {
 	// limits is where Spotify's blocks and quota mark are kept (ddsonic):
 	// the store, set by keepRateLimit.
 	limits rateLimitStore
+	// stopRequests (ddsonic) stops Spotify's Web API requests at quit and
+	// tells when the ones in progress, and the rate limits they record,
+	// have ended (spotify.SpotifyProvider.StopRequests); set by
+	// keepRateLimit.
+	stopRequests func() <-chan struct{}
 }
 
 // source is a sync source and how the runtime schedules it.
@@ -600,6 +609,7 @@ func (rt *catalogRuntime) scheduleRetryLocked(ps *providerSync, provider string,
 type rateLimitKeeper interface {
 	SetRateLimitedUntil(until time.Time, quota bool)
 	OnRateLimited(fn func(until time.Time, quota bool))
+	StopRequests() <-chan struct{}
 }
 
 // rateLimitStore is the part of the catalog that keeps Spotify's blocks and
@@ -622,8 +632,14 @@ type rateLimitStore interface {
 // a quota block of spotify.MinCooldown. A failed write is logged; the
 // provider's own gate is closed before anything is recorded, and the hold is
 // taken in memory before the store is written, whatever the store does.
+//
+// Each write is on its own bounded context, not the runtime's (persist): a
+// 429 answered while quitting, to the sync, the fill or something the user
+// did, is still recorded. close waits for the requests in progress, and so
+// for these writes, before it closes the store.
 func (rt *catalogRuntime) keepRateLimit(sp rateLimitKeeper, st rateLimitStore) (held bool) {
 	rt.limits = st
+	rt.stopRequests = sp.StopRequests
 	now := time.Now()
 	floor := now.Add(spotify.MinCooldown)
 	held, err := st.QuotaExceeded(rt.ctx, catalog.Spotify)
@@ -653,9 +669,7 @@ func (rt *catalogRuntime) keepRateLimit(sp rateLimitKeeper, st rateLimitStore) (
 		if quota {
 			rt.observeQuota(catalog.Spotify) // in memory first: a sync ending now sees it
 		}
-		if err := st.SetRateLimitedUntil(rt.ctx, catalog.Spotify, until); err != nil {
-			applog.Warn("catalog: %v", err)
-		}
+		rt.persist(func(ctx context.Context) error { return st.SetRateLimitedUntil(ctx, catalog.Spotify, until) })
 		if quota {
 			// Limitation (conservative, accepted): the mark is stamped when
 			// it is written, not when the quota was observed, and the write
@@ -667,9 +681,7 @@ func (rt *catalogRuntime) keepRateLimit(sp rateLimitKeeper, st rateLimitStore) (
 			// automatic work (sends nothing extra) until a sync the user
 			// asks for succeeds. Ordering the writes against the clear
 			// would need a stored generation; see catalog.md.
-			if err := st.SetQuotaExceeded(rt.ctx, catalog.Spotify, time.Now()); err != nil {
-				applog.Warn("catalog: %v", err)
-			}
+			rt.persist(func(ctx context.Context) error { return st.SetQuotaExceeded(ctx, catalog.Spotify, time.Now()) })
 		}
 	})
 	return held
@@ -824,8 +836,8 @@ func (rt *catalogRuntime) storeHold(provider string) {
 
 // persist runs one store write of something already observed (ddsonic,
 // #170) on a context that quitting does not cancel, bounded by
-// holdWriteTimeout; close waits for the goroutine making it. A failure is
-// logged. Spotify's keepRateLimit writes could use it the same way.
+// holdWriteTimeout; close waits for the goroutine or Spotify request making
+// it. A failure is logged.
 func (rt *catalogRuntime) persist(write func(ctx context.Context) error) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(rt.ctx), holdWriteTimeout)
 	defer cancel()
@@ -878,6 +890,11 @@ func (rt *catalogRuntime) notify(ev catalogsync.Event) {
 }
 
 // close stops any sync, waits briefly for it, and closes the catalog.
+//
+// ddsonic: it also stops Spotify's Web API requests (none is sent from
+// here on) and waits, within the same bound, for those in progress, the
+// user's included: a 429 one of them gets is recorded before it returns, so
+// the store is closed only after that write.
 func (rt *catalogRuntime) close() {
 	rt.mu.Lock()
 	rt.closed = true
@@ -888,15 +905,27 @@ func (rt *catalogRuntime) close() {
 	}
 	rt.mu.Unlock()
 	rt.cancel()
+	var requests <-chan struct{}
+	if rt.stopRequests != nil {
+		requests = rt.stopRequests()
+	}
 	done := make(chan struct{})
 	go func() { rt.wg.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(catalogStopTimeout):
-		// Leave the store open: the sync still holds it. The process is
-		// exiting, and SQLite's WAL keeps the file consistent regardless.
-		applog.Warn("catalog sync did not stop within %v", catalogStopTimeout)
-		return
+	limit := time.NewTimer(catalogStopTimeout)
+	defer limit.Stop()
+	for _, ch := range []<-chan struct{}{done, requests} {
+		if ch == nil {
+			continue
+		}
+		select {
+		case <-ch:
+		case <-limit.C:
+			// Leave the store open: a sync, or a rate limit being recorded,
+			// may still use it. The process is exiting, and SQLite's WAL
+			// keeps the file consistent regardless.
+			applog.Warn("catalog sync did not stop within %v", catalogStopTimeout)
+			return
+		}
 	}
 	if rt.store != nil {
 		if err := rt.store.Close(); err != nil {
