@@ -168,7 +168,9 @@ func (m Mixed) PlaylistTrackRecords(ctx context.Context, playlistID string) ([]c
 }
 
 // LikedTrackRecords implements Client through OAuth, or cookies when OAuth
-// needs signing in or refuses (its daily quota spent, say).
+// needs signing in or refuses. A rate limit or spent quota is not a refusal
+// (ddsonic, #170): it fails the read, and the sync stops, rather than
+// reading through the other sign-in.
 func (m Mixed) LikedTrackRecords(ctx context.Context) ([]catalog.TrackRecord, error) {
 	tracks, err := m.OAuth.LikedTrackRecords(ctx)
 	if errors.Is(err, playlist.ErrNeedsAuth) || errors.Is(err, catalog.ErrForbidden) {

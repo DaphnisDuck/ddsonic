@@ -63,7 +63,7 @@ func enricherSetup(t *testing.T, videos ...string) (*sqlite.Store, *fakeMeta, *E
 
 func TestEnricherFillsTheLibrary(t *testing.T) {
 	store, src, e, waits, changes := enricherSetup(t, "v1", "v2", "v3")
-	src.errs["v2"] = []error{&catalog.RateLimitError{}, catalog.ErrForbidden}
+	src.errs["v2"] = []error{catalog.ErrForbidden}
 	if err := e.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -83,8 +83,8 @@ func TestEnricherFillsTheLibrary(t *testing.T) {
 	if len(albums) != 1 || albums[0].Title != "Album A" || *changes < 2 {
 		t.Errorf("albums %+v after %d refreshes", albums, *changes)
 	}
-	// The rate limit waited the first backoff, then v2 was read again.
-	if (*waits)[0] != testPacing.Delay || (*waits)[1] != testPacing.MinBackoff {
+	// Each read, the unreadable v2 included, waits only the pace.
+	if len(*waits) != 3 || slices.ContainsFunc(*waits, func(d time.Duration) bool { return d != testPacing.Delay }) {
 		t.Errorf("waits = %v", *waits)
 	}
 	// Nothing left: a second run reads nothing.
@@ -278,5 +278,47 @@ func TestEnricherDropsOrphanedDerivedAlbums(t *testing.T) {
 	}
 	if n := len(found[catalog.SearchAlbum]); n != 0 {
 		t.Errorf("search finds %d albums, want none", n)
+	}
+}
+
+// countingEnrichStore counts the failures a run records.
+type countingEnrichStore struct {
+	EnrichStore
+	failures int
+}
+
+func (s *countingEnrichStore) RecordEnrichFailure(ctx context.Context, t catalog.Ref, n int) (bool, error) {
+	s.failures++
+	return s.EnrichStore.RecordEnrichFailure(ctx, t, n)
+}
+
+// ddsonic (#170): the first rate limit or challenge ends the run. The
+// track is not read again, nor any other, nothing waits it out, and no
+// track is counted as failed: the runtime holds the work until the user
+// syncs.
+func TestEnricherStopsAtAThrottle(t *testing.T) {
+	for name, limit := range map[string]error{
+		"challenge": &catalog.RateLimitError{Quota: true, Reason: "YouTube asks to confirm this is not a bot"},
+		"throttle":  &catalog.RateLimitError{Quota: true, Reason: "YouTube rate limit (HTTP 429)"},
+		"plain":     &catalog.RateLimitError{RetryAfter: time.Second},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, src, e, waits, _ := enricherSetup(t, "v1", "v2", "v3")
+			counted := &countingEnrichStore{EnrichStore: store}
+			e.store = counted
+			for _, v := range []string{"v1", "v2", "v3"} {
+				src.errs[v] = []error{limit, limit}
+			}
+			err := e.Run(context.Background())
+			if !errors.Is(err, limit) {
+				t.Fatalf("Run = %v, want the limit", err)
+			}
+			if len(src.reads) != 1 || len(*waits) != 0 || counted.failures != 0 {
+				t.Errorf("reads %v, waits %v, failures recorded %d; want one read, no wait, none", src.reads, *waits, counted.failures)
+			}
+			if left := unenriched(t, store); len(left) != 3 {
+				t.Errorf("unenriched %v, want all three still unread", left)
+			}
+		})
 	}
 }

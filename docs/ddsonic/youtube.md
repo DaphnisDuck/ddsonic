@@ -116,7 +116,7 @@ A playlist knows each track only as a video title and the channel that uploaded 
 - A track with no music details (a fan upload, say) keeps its video title and uploader.
 - A track yt-dlp keeps failing to read is skipped, so the rest are still read. After three passes that read other tracks but failed on it, it is left as it is (video title and uploader). A pass that reads nothing, or fails on several tracks in a row, looks like an outage: ddsonic stops and tries again after the next sync, without holding it against those tracks.
 
-The first pass over a large library takes a while (about half an hour for 360 tracks); it pauses while YouTube syncs, resumes after a restart, and slows right down if YouTube asks it to (a "not a bot" check).
+The first pass over a large library takes a while (about half an hour for 360 tracks); it pauses while YouTube syncs, resumes after a restart, and stops if YouTube rate-limits it or asks it to confirm you are not a bot; it then waits until you sync with `r` ([catalog.md](catalog.md)).
 
 ### A whole album: add it as a playlist
 
