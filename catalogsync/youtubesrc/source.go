@@ -76,6 +76,10 @@ func PlaylistID(s string) string {
 // Provider implements catalogsync.Source.
 func (*Source) Provider() string { return catalog.YouTube }
 
+// StopsAtHold implements catalogsync.HoldStopper (ddsonic, #170): a rate
+// limit, challenge or spent quota in one collection ends the sync.
+func (*Source) StopsAtHold() bool { return true }
+
 // Collections implements catalogsync.Source. Liked Music first: it is one
 // read, while playlists take one each.
 func (*Source) Collections() []string { return []string{Liked, Playlists} }
@@ -168,7 +172,9 @@ func (m Mixed) PlaylistTrackRecords(ctx context.Context, playlistID string) ([]c
 }
 
 // LikedTrackRecords implements Client through OAuth, or cookies when OAuth
-// needs signing in or refuses (its daily quota spent, say).
+// needs signing in or refuses. A rate limit or spent quota is not a refusal
+// (ddsonic, #170): it fails the read, and the sync stops, rather than
+// reading through the other sign-in.
 func (m Mixed) LikedTrackRecords(ctx context.Context) ([]catalog.TrackRecord, error) {
 	tracks, err := m.OAuth.LikedTrackRecords(ctx)
 	if errors.Is(err, playlist.ErrNeedsAuth) || errors.Is(err, catalog.ErrForbidden) {

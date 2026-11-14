@@ -18,8 +18,9 @@ type MetadataSource interface {
 	Provider() string
 	// TrackMetadata reads one track. It returns a zero TrackMetadata when
 	// there is nothing to find, a *catalog.RateLimitError when the service
-	// asks to slow down, and an error wrapping catalog.ErrForbidden when the
-	// track cannot be read at all.
+	// asks to slow down or challenges the reader (which ends the run), and
+	// an error wrapping catalog.ErrForbidden when the track cannot be read
+	// at all.
 	TrackMetadata(ctx context.Context, track catalog.Ref) (catalog.TrackMetadata, error)
 }
 
@@ -51,8 +52,9 @@ const (
 
 // Enricher fills in the library tracks of a provider with their real
 // metadata, one at a time in the background, newest first. Like the
-// Filler, it pauses while held, waits out rate limits with a doubling
-// backoff, and skips a track that keeps failing. A track is read once: one
+// Filler, it pauses while held, and skips a track that keeps failing. A
+// rate limit or challenge ends the run (ddsonic, #170): it is not waited
+// out, and the track is not counted against. A track is read once: one
 // with nothing to find, or that cannot be read, is marked read, and so is
 // one that failed in enrichGiveUpRuns runs.
 type Enricher struct {
@@ -129,6 +131,11 @@ func (e *Enricher) enrichAll(ctx context.Context) error {
 			if errors.Is(err, errStore) {
 				return fmt.Errorf("enrich %s: %w", provider, err)
 			}
+			if _, limited := errors.AsType[*catalog.RateLimitError](err); limited {
+				// ddsonic: nothing is counted, nor sent again; the runtime
+				// holds automatic work until the user syncs.
+				return fmt.Errorf("enrich %s: %q: %w", provider, t.Title, err)
+			}
 			if err != nil {
 				skip[t.Ref] = true
 				streak = append(streak, t.Ref)
@@ -181,9 +188,8 @@ func (e *Enricher) refresh(ctx context.Context) error {
 	return nil
 }
 
-// enrich reads one track, retrying it through rate limits and up to
-// enrichAttempts other failures, and reports whether it found music
-// details. After its last failure it waits the backoff, so a run meeting
+// enrich reads one track, retrying it up to enrichAttempts times, and
+// reports whether it found music details. A rate limit returns at once. After its last failure it waits the backoff, so a run meeting
 // an outage slows down before the next track.
 func (e *Enricher) enrich(ctx context.Context, t catalog.Track, st *fillState) (bool, error) {
 	for attempt := 1; ; {
@@ -200,17 +206,14 @@ func (e *Enricher) enrich(ctx context.Context, t catalog.Track, st *fillState) (
 				return false, fmt.Errorf("%w: %w", errStore, err)
 			}
 		}
-		var rl *catalog.RateLimitError
 		switch {
 		case err == nil, errors.Is(err, catalog.ErrNotFound): // gone since listing
 			st.backoff = 0
 			return err == nil && meta.Found(), e.sleep(ctx, e.pace.Delay)
 		case ctx.Err() != nil:
 			return false, ctx.Err()
-		case errors.As(err, &rl):
-			if err := e.sleep(ctx, max(st.next(e.pace), rl.RetryAfter)); err != nil {
-				return false, err
-			}
+		case errors.As(err, new(*catalog.RateLimitError)):
+			return false, err // ddsonic: never tried again in this run
 		default:
 			if serr := e.sleep(ctx, st.next(e.pace)); serr != nil || attempt >= enrichAttempts {
 				return false, cmp.Or(serr, err)

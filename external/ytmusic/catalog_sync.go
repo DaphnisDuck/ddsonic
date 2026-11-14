@@ -398,8 +398,13 @@ func ytdlpError(stderr string, cause error) error {
 		return fmt.Errorf("yt-dlp: %w", cause)
 	}
 	lower := strings.ToLower(msg)
-	if strings.Contains(lower, "not a bot") || strings.Contains(lower, "http error 429") {
-		return fmt.Errorf("yt-dlp: %s: %w", msg, &catalog.RateLimitError{})
+	// ddsonic: a throttle or a bot/account challenge stops automatic work
+	// until the user syncs (#170); the two are told apart.
+	switch {
+	case strings.Contains(lower, "not a bot"):
+		return fmt.Errorf("yt-dlp: %s: %w", msg, &catalog.RateLimitError{Quota: true, Reason: "YouTube asks to confirm this is not a bot"})
+	case strings.Contains(lower, "http error 429"):
+		return fmt.Errorf("yt-dlp: %s: %w", msg, &catalog.RateLimitError{Quota: true, Reason: "YouTube rate limit (HTTP 429)"})
 	}
 	for _, refused := range refusals {
 		if strings.Contains(lower, refused) {

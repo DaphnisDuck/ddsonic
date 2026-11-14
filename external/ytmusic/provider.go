@@ -366,7 +366,7 @@ func (b *baseProvider) tracks(playlistID string) ([]playlist.Track, error) {
 		pageToken = resp.NextPageToken
 	}
 
-	durations := b.fetchDurations(ctx, svc, items)
+	durations, _ := b.fetchDurations(ctx, svc, items) // optional; a limit only stops the rest
 
 	var tracks []playlist.Track
 	for _, it := range items {
@@ -393,11 +393,19 @@ func (b *baseProvider) tracks(playlistID string) ([]playlist.Track, error) {
 	return tracks, nil
 }
 
-func (b *baseProvider) fetchDurations(ctx context.Context, svc *youtube.Service, items []itemInfo) map[string]int {
+// fetchDurations reads items' durations, 50 videos a call, up to five at
+// once. A failed call leaves its durations unknown. A rate limit or spent
+// quota (limitError) stops it (ddsonic, #170): batches not yet sent are not
+// sent, those in flight are cancelled (a sent request cannot be recalled),
+// and that error is returned.
+func (b *baseProvider) fetchDurations(ctx context.Context, svc *youtube.Service, items []itemInfo) (map[string]int, error) {
 	var mu sync.Mutex
 	durations := make(map[string]int)
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 5) // limit concurrent API calls
+	ctx, stop := context.WithCancelCause(ctx)
+	defer stop(nil)
+	var limited error
 
 	for i := 0; i < len(items); i += youtubeAPIBatchSize {
 		end := min(i+youtubeAPIBatchSize, len(items))
@@ -406,6 +414,9 @@ func (b *baseProvider) fetchDurations(ctx context.Context, svc *youtube.Service,
 		wg.Go(func() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			if ctx.Err() != nil {
+				return // stopped: not sent
+			}
 
 			var ids []string
 			for _, it := range batch {
@@ -416,6 +427,14 @@ func (b *baseProvider) fetchDurations(ctx context.Context, svc *youtube.Service,
 				Context(ctx).
 				Do()
 			if err != nil {
+				if rl := limitError(err); rl != nil {
+					mu.Lock()
+					if limited == nil {
+						limited = fmt.Errorf("youtube: durations: %w: %w", rl, err)
+					}
+					mu.Unlock()
+					stop(rl)
+				}
 				return
 			}
 			mu.Lock()
@@ -427,7 +446,7 @@ func (b *baseProvider) fetchDurations(ctx context.Context, svc *youtube.Service,
 	}
 
 	wg.Wait()
-	return durations
+	return durations, limited
 }
 
 // Special auto-generated playlist IDs exposed by the YouTube Data API.

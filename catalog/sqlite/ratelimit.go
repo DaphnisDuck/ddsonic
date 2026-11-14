@@ -66,7 +66,9 @@ func (s *Store) SetQuotaExceeded(ctx context.Context, provider string, at time.T
 //
 // A mark written late (after the clear, or stamped after the clearing
 // sync began) survives it and holds again after a restart: an over-block,
-// never an extra request. See keepRateLimit.
+// never an extra request. See keepRateLimit. So does a mark set in
+// before's own millisecond (marks keep milliseconds): it cannot be told
+// from one set just after before, which must be kept.
 func (s *Store) ClearQuotaExceeded(ctx context.Context, provider string, before time.Time) error {
 	if _, err := s.wdb.ExecContext(ctx, `DELETE FROM rate_limits WHERE provider = ? AND until < ?`, quotaKey(provider), before.UnixMilli()); err != nil {
 		return fmt.Errorf("clear quota %s: %w", provider, err)

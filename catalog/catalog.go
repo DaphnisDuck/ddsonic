@@ -28,15 +28,20 @@ var ErrForbidden = errors.New("provider refused access")
 // is the provider's requested wait, or zero when it gave none. Until, when
 // set, is when a long block ends, for display. Quota marks a provider's
 // exhausted quota rather than a temporary rate limit: the provider gave no
-// reset time, and it is not retried automatically.
+// reset time, and it is not retried automatically. Reason (ddsonic), when
+// set, is what the provider said instead, such as a throttle or a
+// challenge held like a quota: not retried automatically either.
 type RateLimitError struct {
 	RetryAfter time.Duration
 	Until      time.Time
 	Quota      bool
+	Reason     string
 }
 
 func (e *RateLimitError) Error() string {
 	switch {
+	case e.Reason != "":
+		return e.Reason + "; not retried automatically"
 	case e.Quota && !e.Until.IsZero():
 		return "quota exceeded (no reset time given); rate limited until " + e.Until.Local().Format("Jan 2 15:04") + "; not retried automatically"
 	case e.Quota:

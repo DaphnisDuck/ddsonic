@@ -90,6 +90,10 @@ type source struct {
 	// syncs or works in the background until a sync the user starts
 	// succeeds.
 	held bool
+	// recordHold (ddsonic, #170): the runtime itself records the
+	// provider's holds, observed in its sync's and worker's results, and
+	// stores them (YouTube). Spotify's gate records its own (keepRateLimit).
+	recordHold bool
 }
 
 // worker is a source's background job.
@@ -138,6 +142,8 @@ type providerSync struct {
 	// fence cancels the running background sync's context (nil when none
 	// runs, or the running one was asked for). Guarded by mu.
 	fence context.CancelCauseFunc
+	// recordHold: from source.recordHold.
+	recordHold bool
 	// work is the background worker's context, and stopWork cancels it:
 	// a quota observation (holdLocked) stops the worker's run where it is,
 	// so the album being filled sends no further page. Each hold ends the
@@ -194,7 +200,8 @@ func openCatalog(sp *spotify.SpotifyProvider, rp *radio.Provider, cfg config.Con
 		})
 		sources = append(sources, source{Source: youtubesrc.New(client, cfg.Ddsonic.YouTubePlaylists...),
 			refresh: cfg.Ddsonic.YouTubeRefresh, worker: enricher,
-			lists: []string{catalog.CollectionAlbums, catalog.CollectionArtists}})
+			lists: []string{catalog.CollectionAlbums, catalog.CollectionArtists},
+			held:  rt.restoreHold(catalog.YouTube), recordHold: true})
 	}
 	if dir, implicit := local.ResolveMusicDir(cfg.InitialDirectory); dir != "" {
 		// Indexed at every startup: it rereads only changed files and
@@ -252,7 +259,7 @@ func (rt *catalogRuntime) setSources(sources ...source) {
 	}
 	rt.engine = catalogsync.New(rt.store, rt.notify, engineSources...)
 	for _, src := range sources {
-		ps := &providerSync{worker: src.worker, lists: src.lists, quiet: src.quiet, collections: src.Collections()}
+		ps := &providerSync{worker: src.worker, lists: src.lists, quiet: src.quiet, collections: src.Collections(), recordHold: src.recordHold}
 		if src.held {
 			rt.holdLocked(ps)
 		}
@@ -359,7 +366,7 @@ func (rt *catalogRuntime) startSyncs() {
 		held := ps.held
 		rt.mu.Unlock()
 		if held {
-			applog.Info("catalog sync %s: quota exceeded earlier; not syncing automatically (press r to sync)", provider)
+			applog.Info("catalog sync %s: held (spent quota, rate limit or challenge) earlier; not syncing automatically (press r to sync)", provider)
 			continue
 		}
 		if ps.stale {
@@ -448,7 +455,7 @@ func (rt *catalogRuntime) request(provider string, kind syncKind) (ticket uint64
 			seen := ps.requests
 			// A quota observed after this point is newer than this run: its
 			// success does not clear it (in memory, or in the store).
-			seq, began := ps.quotaSeq, time.Now()
+			seq, began := ps.quotaSeq, holdClock()
 			// A background run is fenced by a quota observed while it runs
 			// (holdLocked cancels its context): it sends nothing more.
 			runCtx, cancelRun := context.WithCancelCause(rt.ctx)
@@ -473,10 +480,16 @@ func (rt *catalogRuntime) request(provider string, kind syncKind) (ticket uint64
 			again := ps.quiet && err == nil && ps.requests != seen && !rt.closed
 			// The running sync, or quitting, owns what happens next.
 			owned := errors.Is(err, catalogsync.ErrRunning) || rt.ctx.Err() != nil
+			// ddsonic (#170): a recognized suspension in this run's result
+			// is held and stored whatever follows, an owed run included.
+			record := !owned && ps.recordHold && quotaExceeded(err)
 			// An owed run follows this one, in the step that takes the debt,
 			// so one request owes one run. Its own result settles the retry;
 			// this run's does not.
 			if !again && ps.owed && !owned && !rt.closed {
+				if record {
+					rt.holdLocked(ps) // before the owed run, which may yet recover it
+				}
 				again, asked = true, true // owed runs are explicit or required
 				ps.announced, ps.serving = false, ps.requiredSeq
 			}
@@ -486,17 +499,30 @@ func (rt *catalogRuntime) request(provider string, kind syncKind) (ticket uint64
 				// settled later, this sync's result could undo the retry
 				// of a newer sync that failed meanwhile.
 				if !owned {
-					rt.scheduleRetryLocked(ps, provider, err)
+					rt.scheduleRetryLocked(ps, provider, err) // holds a recognized suspension
 					// Only a run the user asked for releases a hold: a
 					// background run never does, whatever its result.
 					if err == nil && asked && ps.held && ps.quotaSeq == seq {
 						rt.releaseHoldLocked(ps)
+						// The clear deletes marks stored in a millisecond
+						// before began's. A mark stored in began's own
+						// millisecond is kept: it may be an observation
+						// made after the check above (stored marks keep
+						// only milliseconds), so a mark this goroutine
+						// stored just before an owed run that recovers can
+						// outlive it. That over-holds after a restart, and
+						// never sends more (keepRateLimit's limitation).
 						cleared, clearBefore = true, began
 					}
 				}
 				ps.running = false
 			}
 			rt.mu.Unlock()
+			if record {
+				// Stored now, before an owed run begins: stored after it, an
+				// old mark could recreate a hold that run cleared.
+				rt.storeHold(provider)
+			}
 			if !again {
 				break
 			}
@@ -551,7 +577,7 @@ func (rt *catalogRuntime) scheduleRetryLocked(ps *providerSync, provider string,
 		rt.holdLocked(ps)
 	}
 	if ps.held {
-		applog.Info("catalog sync %s: quota exceeded; not retrying automatically (press r to sync)", provider)
+		applog.Info("catalog sync %s: held (spent quota, rate limit or challenge); not retrying automatically (press r to sync)", provider)
 		return 0
 	}
 	ps.retryDelay = catalogsync.NextBackoff(ps.retryDelay, rt.retryMin, rt.retryMax)
@@ -733,8 +759,9 @@ func (rt *catalogRuntime) runWorker(provider string, w worker) {
 	if rt.closed {
 		return
 	}
-	ctx := rt.ctx
+	ctx, record := rt.ctx, false
 	if ps := rt.providers[provider]; ps != nil {
+		record = ps.recordHold
 		if ps.held {
 			return // ddsonic: held by an exhausted quota
 		}
@@ -752,12 +779,47 @@ func (rt *catalogRuntime) runWorker(provider string, w worker) {
 		if err != nil && !errors.Is(err, catalogsync.ErrRunning) && !errors.Is(err, context.Canceled) {
 			applog.Info("catalog %s background work: %v", provider, err)
 		}
+		// ddsonic (#170): a rate limit or challenge the worker met holds
+		// the provider: in memory first (a running background sync is
+		// fenced, no retry is armed), then stored for the next start.
+		if record && quotaExceeded(err) {
+			rt.observeQuota(provider)
+			rt.storeHold(provider)
+		}
 	}()
 }
 
+// restoreHold (ddsonic, #170) reads whether provider was held when ddsonic
+// last ran. A mark that cannot be read is taken as held, as Spotify's is.
+func (rt *catalogRuntime) restoreHold(provider string) bool {
+	held, err := rt.store.QuotaExceeded(rt.ctx, provider)
+	if err != nil {
+		applog.Warn("catalog: %v; holding %s's automatic work", err, provider)
+		return true
+	}
+	return held
+}
+
+// holdClock stamps a sync's start and a stored hold (ddsonic, #170); a
+// test replaces it to place both in chosen milliseconds.
+var holdClock = time.Now
+
+// storeHold records provider's hold so the next start keeps it. A failed
+// write is logged; the hold is already taken in memory. Like Spotify's
+// mark, it is stamped when written (see keepRateLimit's limitation).
+func (rt *catalogRuntime) storeHold(provider string) {
+	st := rt.limits
+	if st == nil {
+		st = rt.store
+	}
+	if err := st.SetQuotaExceeded(rt.ctx, provider, holdClock()); err != nil {
+		applog.Warn("catalog: %v", err)
+	}
+}
+
 // enrichPacing paces YouTube enrichment: each read is a full yt-dlp run of
-// about 4 s, and YouTube answers too many with a bot check, so a refusal
-// waits long.
+// about 4 s. A failure waits long; a rate limit or bot check ends the run
+// and holds YouTube (ddsonic, #170).
 var enrichPacing = catalogsync.Pacing{Delay: time.Second, MinBackoff: time.Minute, MaxBackoff: 30 * time.Minute, MaxFailures: 3}
 
 // notify forwards engine events, in order, from the syncing goroutine.

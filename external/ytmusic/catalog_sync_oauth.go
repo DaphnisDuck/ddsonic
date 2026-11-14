@@ -160,7 +160,7 @@ func (c *OAuthCatalog) PlaylistRecords(ctx context.Context, synced map[string]st
 		}
 		resp, err := call.Do()
 		if err != nil {
-			return nil, fmt.Errorf("youtube: list playlists: %w", err)
+			return nil, fmt.Errorf("youtube: list playlists: %w", apiError(err))
 		}
 		for _, p := range resp.Items {
 			if p.Id == "" || notOwnLists[p.Id] {
@@ -233,7 +233,7 @@ func classifyForSync(ctx context.Context, svc *youtube.Service, ids []string, sc
 	for batch := range slices.Chunk(videos, youtubeAPIBatchSize) {
 		resp, err := svc.Videos.List([]string{"snippet"}).Id(batch...).Context(ctx).Do()
 		if err != nil {
-			return nil, fmt.Errorf("youtube: classify playlists: %w", err)
+			return nil, fmt.Errorf("youtube: classify playlists: %w", apiError(err))
 		}
 		// A sampled video the API no longer returns leaves its playlist
 		// unknown.
@@ -326,9 +326,13 @@ func (c *OAuthCatalog) playlistTracks(ctx context.Context, playlistID string) ([
 		return nil, fmt.Errorf("youtube: playlist %s: read %d of %d: %w", playlistID, read, total, ErrIncomplete)
 	}
 	// Durations are a separate call per 50 videos; one that fails leaves
-	// its tracks' durations unknown rather than failing the playlist.
+	// its tracks' durations unknown rather than failing the playlist, but a
+	// rate limit or spent quota fails it (ddsonic, #170): the sync stops.
 	// fetchDurations never reads its receiver, so a nil one serves.
-	durations := (*baseProvider)(nil).fetchDurations(ctx, svc, items)
+	durations, err := (*baseProvider)(nil).fetchDurations(ctx, svc, items)
+	if err != nil {
+		return nil, fmt.Errorf("youtube: playlist %s: %w", playlistID, err)
+	}
 	for i := range tracks {
 		tracks[i].Duration = time.Duration(durations[tracks[i].Ref.ProviderID]) * time.Second
 	}
@@ -360,27 +364,38 @@ func itemRecord(it *youtube.PlaylistItem) (catalog.TrackRecord, bool) {
 }
 
 // apiError marks a playlist the API will not show (gone, or private to
-// someone else) as catalog.ErrForbidden, so a sync keeps what it had. A 403
-// for running out of quota says nothing about the playlist: it stays a
-// plain error, which fails the collection rather than dropping a playlist.
+// someone else) as catalog.ErrForbidden, so a sync keeps what it had. A
+// rate limit or spent quota says nothing about the playlist: it wraps a
+// held *catalog.RateLimitError (limitError), which stops the sync and its
+// automatic retries until the user syncs. Other errors (5xx) stay plain.
 func apiError(err error) error {
-	var gerr *googleapi.Error
-	if !errors.As(err, &gerr) {
-		return err
+	if rl := limitError(err); rl != nil {
+		return fmt.Errorf("%w: %w", rl, err)
 	}
-	if gerr.Code == http.StatusNotFound || gerr.Code == http.StatusForbidden && !quotaError(gerr) {
+	var gerr *googleapi.Error
+	if errors.As(err, &gerr) && (gerr.Code == http.StatusNotFound || gerr.Code == http.StatusForbidden) {
 		return fmt.Errorf("%w: %w", catalog.ErrForbidden, err)
 	}
 	return err
 }
 
-// quotaError reports whether a Data API error is a quota or rate limit.
-func quotaError(gerr *googleapi.Error) bool {
+// limitError (ddsonic, #170) recognizes a Data API rate limit or spent
+// quota: one of the documented reasons below, at any status, or an HTTP
+// 429. It returns nil for anything else. No reset time is taken or made
+// up: the hold lasts until the user syncs.
+func limitError(err error) *catalog.RateLimitError {
+	var gerr *googleapi.Error
+	if !errors.As(err, &gerr) {
+		return nil
+	}
 	for _, e := range gerr.Errors {
 		switch e.Reason {
 		case "quotaExceeded", "dailyLimitExceeded", "rateLimitExceeded", "userRateLimitExceeded":
-			return true
+			return &catalog.RateLimitError{Quota: true, Reason: "YouTube Data API: " + e.Reason}
 		}
 	}
-	return false
+	if gerr.Code == http.StatusTooManyRequests {
+		return &catalog.RateLimitError{Quota: true, Reason: "YouTube Data API: HTTP 429"}
+	}
+	return nil
 }
