@@ -1,8 +1,9 @@
 //go:build !windows
 
-// ddsonic: quitting stops the Web API requests (StopRequests): nothing is
-// sent from then on, and the requests in progress are waited for, until
-// the rate limit each got has been handed on to be recorded.
+// ddsonic: quitting stops the Web API requests (StopRequests): none is
+// admitted from then on (a send already admitted may proceed), and the
+// requests in progress are waited for, until the rate limit each got has
+// been handed on to be recorded.
 
 package spotify
 
@@ -44,7 +45,7 @@ func TestStopRequestsWithNoneInProgress(t *testing.T) {
 
 // A request whose 429 is being read when quitting begins is waited for
 // until its block, the quota read from the body included, has been handed
-// on; a request made meanwhile is not sent.
+// on; a request made meanwhile is refused at its start, and not sent.
 func TestQuittingWaitsForARequestsRateLimit(t *testing.T) {
 	now := time.Unix(1_790_000_000, 0)
 	p, _ := newGateAPI(t, &now)
@@ -97,7 +98,7 @@ func TestQuittingWaitsForARequestsRateLimit(t *testing.T) {
 }
 
 // A request that began before quitting but was waiting for its token is
-// not sent once quitting has begun.
+// refused at admission, so not sent, once quitting has begun.
 func TestARequestNotYetSentAtQuitIsNotSent(t *testing.T) {
 	storeCreds(t)
 	entered, release := make(chan struct{}), make(chan struct{})

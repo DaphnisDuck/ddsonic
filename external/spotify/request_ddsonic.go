@@ -81,14 +81,15 @@ func (p *SpotifyProvider) admit(ctx context.Context) error {
 	return p.rateLimited()
 }
 
-// errQuitting fails a Web API request that quitting stopped before it was
-// sent (StopRequests).
+// errQuitting fails a Web API request that quitting refused before it was
+// admitted to be sent (StopRequests).
 var errQuitting = errors.New("spotify: quitting; the request was not sent")
 
 // webCalls counts the Web API requests in progress, from request's start to
 // its return, so quitting can wait for their answers: a 429 is recorded
 // (OnRateLimited) before its request returns. Once stopped, no request
-// starts or is sent.
+// starts, and none is admitted to be sent; one admitted just before may
+// still be sent, and is still counted.
 type webCalls struct {
 	mu      sync.Mutex
 	n       int
@@ -123,9 +124,11 @@ func (w *webCalls) stopping() bool {
 	return w.stopped
 }
 
-// StopRequests is for quitting: from now on no Web API request is sent, and
-// the channel it returns is closed once every request already in progress
-// has returned. A request that got a 429 returns only after the function
+// StopRequests is for quitting: from now on Web API requests are refused at
+// admission (request's start, and admit before each send), and the channel
+// it returns is closed once every request already in progress has returned.
+// A send already admitted when it is called may still proceed; that request
+// is in progress, so it is still waited for. A request that got a 429 returns only after the function
 // OnRateLimited set has returned, so a caller that waits for the channel
 // waits for every rate limit being recorded. It may be called more than once.
 func (p *SpotifyProvider) StopRequests() <-chan struct{} {
@@ -229,6 +232,7 @@ func (p *SpotifyProvider) request(ctx context.Context, c *apiCall) (*http.Respon
 		if c.pin != nil && !c.pin.holds(sess) { // again, as the last thing before sending
 			return nil, errSignInChanged
 		}
+		// Quitting may also have begun while the token was awaited.
 		if err := p.admit(ctx); err != nil { // the gate may have closed while the token was awaited
 			return nil, err
 		}
