@@ -125,16 +125,25 @@ func (e *Enricher) enrichAll(ctx context.Context) error {
 		found := false
 		for _, t := range tracks {
 			ok, err := e.enrich(ctx, t, &st)
+			if _, limited := errors.AsType[*catalog.RateLimitError](err); limited {
+				// ddsonic (#170): nothing is counted, nor sent again; the
+				// runtime holds automatic work until the user syncs. The
+				// limit is reported even when the run was also cancelled,
+				// and the tracks this batch read reach the lists first (a
+				// local refresh; the limit is kept if it fails).
+				err = fmt.Errorf("enrich %s: %q: %w", provider, t.Title, err)
+				if found {
+					if rerr := e.refresh(ctx); rerr != nil {
+						return errors.Join(err, rerr)
+					}
+				}
+				return err
+			}
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			if errors.Is(err, errStore) {
 				return fmt.Errorf("enrich %s: %w", provider, err)
-			}
-			if _, limited := errors.AsType[*catalog.RateLimitError](err); limited {
-				// ddsonic: nothing is counted, nor sent again; the runtime
-				// holds automatic work until the user syncs.
-				return fmt.Errorf("enrich %s: %q: %w", provider, t.Title, err)
 			}
 			if err != nil {
 				skip[t.Ref] = true
@@ -210,10 +219,10 @@ func (e *Enricher) enrich(ctx context.Context, t catalog.Track, st *fillState) (
 		case err == nil, errors.Is(err, catalog.ErrNotFound): // gone since listing
 			st.backoff = 0
 			return err == nil && meta.Found(), e.sleep(ctx, e.pace.Delay)
+		case errors.As(err, new(*catalog.RateLimitError)):
+			return false, err // ddsonic: never tried again, and reported even if cancelled
 		case ctx.Err() != nil:
 			return false, ctx.Err()
-		case errors.As(err, new(*catalog.RateLimitError)):
-			return false, err // ddsonic: never tried again in this run
 		default:
 			if serr := e.sleep(ctx, st.next(e.pace)); serr != nil || attempt >= enrichAttempts {
 				return false, cmp.Or(serr, err)

@@ -18,6 +18,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/bjarneo/cliamp/catalog"
+	"github.com/bjarneo/cliamp/catalog/sqlite"
 	"github.com/bjarneo/cliamp/catalogsync"
 )
 
@@ -443,5 +444,74 @@ func TestANewHoldInTheClearsMillisecondIsKept(t *testing.T) {
 	rt = ytRuntime(t, path, src, &ytWorker{})
 	if held, _, _ := ytState(t, rt); !held {
 		t.Error("the new observation was lost at the restart")
+	}
+}
+
+// pausedHoldStore pauses each hold write until release, then writes it
+// with the context it was given, as the catalog does.
+type pausedHoldStore struct {
+	*sqlite.Store
+	entered, release chan struct{}
+}
+
+func (p *pausedHoldStore) SetQuotaExceeded(ctx context.Context, provider string, at time.Time) error {
+	close(p.entered)
+	<-p.release
+	return p.Store.SetQuotaExceeded(ctx, provider, at)
+}
+
+// closing starts quitting (close) without waiting for it, and waits until
+// it has cancelled the runtime's context; done closes when close returns.
+func closing(t *testing.T, rt *catalogRuntime) (done chan struct{}) {
+	t.Helper()
+	done = make(chan struct{})
+	go func() { rt.close(); close(done) }()
+	waitUntil(t, "quitting to cancel", func() bool { return rt.ctx.Err() != nil })
+	return done
+}
+
+// A hold the enricher observed is stored even when quitting cancels the
+// runtime while the write waits: the write has its own bounded context,
+// and quitting keeps the catalog open for it. A restart restores it.
+func TestAHoldObservedAtQuitIsStored(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "library.db")
+	w := &ytWorker{err: fmt.Errorf("enrich youtube: %w", ytChallenge)}
+	rt := ytRuntime(t, path, &ytSource{}, w)
+	paused := &pausedHoldStore{Store: rt.store, entered: make(chan struct{}), release: make(chan struct{})}
+	rt.limits = paused
+	rt.runWorker(catalog.YouTube, w)
+	<-paused.entered // observed and held; the write waits
+	done := closing(t, rt)
+	close(paused.release)
+	<-done
+	rt = ytRuntime(t, path, &ytSource{}, &ytWorker{})
+	if held, _, _ := ytState(t, rt); !held {
+		t.Error("the hold observed at quit was not restored")
+	}
+}
+
+// A sync whose read answers with a quota after quitting has begun (the
+// runtime's context is cancelled) still stores the hold; a restart
+// restores it. A sync that only ended cancelled stores nothing.
+func TestAQuotaCompletingAtQuitIsStored(t *testing.T) {
+	for name, answer := range map[string]error{"quota": ytQuota, "cancelled only": nil} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "library.db")
+			outstanding := make(chan struct{})
+			src := &ytSource{outstanding: outstanding, release: make(chan struct{})}
+			if answer != nil {
+				src.set("liked", answer)
+			}
+			rt := ytRuntime(t, path, src, &ytWorker{})
+			rt.sync(catalog.YouTube)
+			<-outstanding
+			done := closing(t, rt)
+			close(src.release) // answered after quitting began
+			<-done
+			rt = ytRuntime(t, path, &ytSource{}, &ytWorker{})
+			if held, _, _ := ytState(t, rt); held != (answer != nil) {
+				t.Errorf("restored held %t, want %t", held, answer != nil)
+			}
+		})
 	}
 }
