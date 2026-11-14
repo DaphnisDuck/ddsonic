@@ -76,6 +76,10 @@ func PlaylistID(s string) string {
 // Provider implements catalogsync.Source.
 func (*Source) Provider() string { return catalog.YouTube }
 
+// StopsAtHold implements catalogsync.HoldStopper (ddsonic, #170): a rate
+// limit, challenge or spent quota in one collection ends the sync.
+func (*Source) StopsAtHold() bool { return true }
+
 // Collections implements catalogsync.Source. Liked Music first: it is one
 // read, while playlists take one each.
 func (*Source) Collections() []string { return []string{Liked, Playlists} }

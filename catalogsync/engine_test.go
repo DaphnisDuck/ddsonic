@@ -325,20 +325,35 @@ func TestSyncCancelledBetweenCollectionsReportsIt(t *testing.T) {
 	}
 }
 
-// ddsonic (#170): a collection that fails with a spent quota, or anything
-// held like one, ends the sync: the next collection is not fetched. An
-// ordinary rate limit does not (TestSyncContinuesPastAFailedCollection
-// covers other failures).
+// stoppingSource is fakeSource asking the engine to stop at a held limit,
+// as YouTube's source does.
+type stoppingSource struct{ *fakeSource }
+
+func (stoppingSource) StopsAtHold() bool { return true }
+
+// ddsonic (#170): for a source that asks for it (YouTube), a collection
+// that fails with a spent quota, or anything held like one, ends the sync:
+// the next collection is not fetched. An ordinary rate limit does not. A
+// source that does not ask (Spotify) goes on to the next collection, as
+// before.
 func TestSyncStopsAfterAQuota(t *testing.T) {
+	quota := &catalog.RateLimitError{Quota: true, Reason: "YouTube Data API: quotaExceeded"}
 	for name, tc := range map[string]struct {
-		err  error
-		next bool
+		err   error
+		stops bool // the source asks to stop
+		next  bool
 	}{
-		"quota":      {fmt.Errorf("page: %w", &catalog.RateLimitError{Quota: true, Reason: "YouTube Data API: quotaExceeded"}), false},
-		"rate limit": {fmt.Errorf("page: %w", &catalog.RateLimitError{RetryAfter: time.Second}), true},
+		"quota":              {fmt.Errorf("page: %w", quota), true, false},
+		"rate limit":         {fmt.Errorf("page: %w", &catalog.RateLimitError{RetryAfter: time.Second}), true, true},
+		"quota, not stopped": {fmt.Errorf("page: %w", quota), false, true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, src, eng, _ := setup(t)
+			store, src, _, _ := setup(t)
+			var engSrc Source = src
+			if tc.stops {
+				engSrc = stoppingSource{src}
+			}
+			eng := New(store, func(Event) {}, engSrc)
 			src.set("albums", []string{"A"})
 			src.set("other", []string{"X"})
 			src.fail("albums", 1)
@@ -349,8 +364,8 @@ func TestSyncStopsAfterAQuota(t *testing.T) {
 			src.mu.Lock()
 			fetched := slices.Clone(src.fetched)
 			src.mu.Unlock()
-			if want := slices.Contains(fetched, "other"); want != tc.next {
-				t.Errorf("fetched %v; next collection fetched %t, want %t", fetched, want, tc.next)
+			if got := slices.Contains(fetched, "other"); got != tc.next {
+				t.Errorf("fetched %v; next collection fetched %t, want %t", fetched, got, tc.next)
 			}
 		})
 	}

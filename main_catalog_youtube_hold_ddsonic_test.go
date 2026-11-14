@@ -26,18 +26,21 @@ var (
 	ytQuota     = &catalog.RateLimitError{Quota: true, Reason: "YouTube Data API: quotaExceeded"}
 )
 
-// ytSource is a YouTube source with two collections. A collection with an
-// error in errs fails with it; one fetched while ctx is done is refused
-// before sending. When outstanding is set, the first collection's fetch
-// waits for release after closing it.
+// ytSource is a YouTube source with two collections. A collection fails
+// with the next error queued for it, else with its error in errs; one
+// fetched while ctx is done is refused before sending. When outstanding is
+// set, the first fetch of the first collection waits for release after
+// closing it.
 type ytSource struct {
 	mu                   sync.Mutex
 	errs                 map[string]error
+	queue                map[string][]error
 	fetched              []string
 	outstanding, release chan struct{}
 }
 
 func (*ytSource) Provider() string      { return catalog.YouTube }
+func (*ytSource) StopsAtHold() bool     { return true } // as youtubesrc.Source
 func (*ytSource) Collections() []string { return []string{"liked", "playlists"} }
 
 func (s *ytSource) Fetch(ctx context.Context, collection string, _ catalogsync.Known) (catalog.Snapshot, error) {
@@ -46,13 +49,23 @@ func (s *ytSource) Fetch(ctx context.Context, collection string, _ catalogsync.K
 	}
 	s.mu.Lock()
 	s.fetched = append(s.fetched, collection)
-	err := s.errs[collection]
-	wait := collection == "liked" && s.outstanding != nil
+	outstanding := s.outstanding
+	if collection != "liked" {
+		outstanding = nil
+	} else {
+		s.outstanding = nil // the first fetch only
+	}
 	s.mu.Unlock()
-	if wait {
-		close(s.outstanding)
+	if outstanding != nil {
+		close(outstanding)
 		<-s.release
 	}
+	s.mu.Lock()
+	err := s.errs[collection]
+	if q := s.queue[collection]; len(q) > 0 {
+		err, s.queue[collection] = q[0], q[1:]
+	}
+	s.mu.Unlock()
 	if err != nil {
 		return catalog.Snapshot{}, fmt.Errorf("sync youtube/%s: %w", collection, err)
 	}
@@ -255,14 +268,15 @@ func TestABackgroundSuccessNeverClearsAYouTubeHold(t *testing.T) {
 // that sync: once its outstanding read is answered, the next collection is
 // not fetched.
 func TestAnEnricherThrottleFencesARunningBackgroundSync(t *testing.T) {
-	src := &ytSource{outstanding: make(chan struct{}), release: make(chan struct{})}
+	outstanding := make(chan struct{})
+	src := &ytSource{outstanding: outstanding, release: make(chan struct{})}
 	w := &ytWorker{err: fmt.Errorf("enrich youtube: %w", ytChallenge), entered: make(chan struct{}), resume: make(chan struct{})}
 	rt := ytRuntime(t, filepath.Join(t.TempDir(), "library.db"), src, w)
 	rt.runWorker(catalog.YouTube, w)
 	<-w.entered // its read is under way
 	rt.sync(catalog.YouTube)
-	<-src.outstanding // the sync's first read too
-	close(w.resume)   // the enricher's read answers with a challenge
+	<-outstanding   // the sync's first read too
+	close(w.resume) // the enricher's read answers with a challenge
 	waitUntil(t, "the hold", func() bool { held, _, _ := ytState(t, rt); return held })
 	close(src.release)
 	ytSettled(t, rt)
@@ -336,5 +350,49 @@ func TestAnUnreadableYouTubeHoldIsTakenAsHeld(t *testing.T) {
 	rt.store.Close()
 	if !rt.restoreHold(catalog.YouTube) {
 		t.Error("an unreadable mark was not taken as held")
+	}
+}
+
+// A suspension a background sync meets while a sign-in's sync is owed is
+// held and stored before that owed run starts. If the owed run then fails
+// in an ordinary way, YouTube stays held: no retry, no enrichment, and the
+// hold is restored after a restart. If it succeeds, with nothing observed
+// since it began, it releases the hold and clears the mark.
+func TestAnOwedRunKeepsAnEarlierYouTubeHold(t *testing.T) {
+	for name, owed := range map[string]error{
+		"owed run fails":    errors.New("yt-dlp: HTTP Error 500"),
+		"owed run recovers": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "library.db")
+			outstanding := make(chan struct{})
+			src := &ytSource{outstanding: outstanding, release: make(chan struct{}),
+				queue: map[string][]error{"liked": {ytQuota, owed}}}
+			w := &ytWorker{}
+			rt := ytRuntime(t, path, src, w)
+			rt.sync(catalog.YouTube)
+			<-outstanding // the background sync's first read
+			rt.refreshRequired(catalog.YouTube)
+			close(src.release) // answered with the quota
+			ytSettled(t, rt)
+			if n := slices.Index(src.fetches()[1:], "liked"); n < 0 {
+				t.Fatalf("fetched %v; the owed run did not run", src.fetches())
+			}
+			held, retry, stored := ytState(t, rt)
+			if owed == nil {
+				if held || retry || stored || w.runs.Load() != 1 {
+					t.Errorf("recovered: held %t, retry %t, stored %t, worker runs %d; want none and the worker", held, retry, stored, w.runs.Load())
+				}
+				return
+			}
+			if !held || retry || !stored || w.runs.Load() != 0 {
+				t.Errorf("held %t, retry %t, stored %t, worker runs %d; want held, none, stored, no worker", held, retry, stored, w.runs.Load())
+			}
+			rt.close()
+			rt = ytRuntime(t, path, src, &ytWorker{})
+			if held, _, _ := ytState(t, rt); !held {
+				t.Error("the hold was not restored after a restart")
+			}
+		})
 	}
 }
