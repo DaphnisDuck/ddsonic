@@ -20,6 +20,10 @@ type fakeMeta struct {
 	mu    sync.Mutex
 	errs  map[string][]error
 	reads []string
+	// limitAt, when set, answers that read (1-based, whatever the video)
+	// with limit.
+	limitAt int
+	limit   error
 }
 
 func (*fakeMeta) Provider() string { return catalog.YouTube }
@@ -28,6 +32,9 @@ func (f *fakeMeta) TrackMetadata(_ context.Context, t catalog.Ref) (catalog.Trac
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reads = append(f.reads, t.ProviderID)
+	if f.limitAt == len(f.reads) {
+		return catalog.TrackMetadata{}, f.limit
+	}
 	if errs := f.errs[t.ProviderID]; len(errs) > 0 {
 		err := errs[0]
 		f.errs[t.ProviderID] = errs[1:]
@@ -320,5 +327,80 @@ func TestEnricherStopsAtAThrottle(t *testing.T) {
 				t.Errorf("unenriched %v, want all three still unread", left)
 			}
 		})
+	}
+}
+
+// ddsonic (#170): tracks read before a limit in the same batch reach the
+// derived lists before the run ends: their album and artist are listed,
+// and the limit is still what the run returns. Nothing more is read.
+func TestEnricherListsWhatItReadBeforeAThrottle(t *testing.T) {
+	store, src, e, _, _ := enricherSetup(t, "v1", "v2", "v3")
+	counted := &countingEnrichStore{EnrichStore: store}
+	e.store = counted
+	limit := &catalog.RateLimitError{Quota: true, Reason: "YouTube rate limit (HTTP 429)"}
+	src.limitAt, src.limit = 2, limit
+	if err := e.Run(context.Background()); !errors.Is(err, limit) {
+		t.Fatalf("Run = %v, want the limit", err)
+	}
+	albums, _ := store.Albums(context.Background(), catalog.YouTube, catalog.ByTitle)
+	artists, _ := store.Artists(context.Background(), catalog.YouTube)
+	if len(albums) != 1 || albums[0].Title != "Album A" || len(artists) != 1 {
+		t.Errorf("albums %+v, artists %+v; want the first track's album and artist listed", albums, artists)
+	}
+	if len(src.reads) != 2 || counted.failures != 0 {
+		t.Errorf("reads %v, failures recorded %d; want two reads and none", src.reads, counted.failures)
+	}
+}
+
+// ctxMeta answers with a limit after cancelling the run, as a read that
+// met a throttle while ddsonic was quitting.
+type ctxMeta struct {
+	fakeMeta
+	cancel func()
+	limit  error
+}
+
+func (m *ctxMeta) TrackMetadata(context.Context, catalog.Ref) (catalog.TrackMetadata, error) {
+	m.cancel()
+	return catalog.TrackMetadata{}, m.limit
+}
+
+// ddsonic (#170): a limit met as the run is cancelled is reported as the
+// limit, not as a bare cancellation, so the runtime can still store it.
+func TestEnricherReportsALimitMetWhileCancelled(t *testing.T) {
+	_, _, e, _, _ := enricherSetup(t, "v1")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	limit := &catalog.RateLimitError{Quota: true, Reason: "YouTube asks to confirm this is not a bot"}
+	e.src = &ctxMeta{cancel: cancel, limit: limit}
+	if err := e.Run(ctx); !errors.Is(err, limit) {
+		t.Errorf("Run = %v, want the limit", err)
+	}
+}
+
+// failingRefresh fails every derived refresh after the run's first.
+type failingRefresh struct {
+	EnrichStore
+	refreshes int
+}
+
+func (s *failingRefresh) RefreshDerived(ctx context.Context, provider string) error {
+	s.refreshes++
+	if s.refreshes > 1 {
+		return errors.New("refresh failed")
+	}
+	return s.EnrichStore.RefreshDerived(ctx, provider)
+}
+
+// ddsonic (#170): when the refresh before returning a limit fails, the
+// limit is still what the run returns (with the refresh's failure).
+func TestEnricherKeepsTheLimitWhenTheRefreshFails(t *testing.T) {
+	store, src, e, _, _ := enricherSetup(t, "v1", "v2")
+	failing := &failingRefresh{EnrichStore: store}
+	e.store = failing
+	limit := &catalog.RateLimitError{Quota: true, Reason: "YouTube rate limit (HTTP 429)"}
+	src.limitAt, src.limit = 2, limit
+	if err := e.Run(context.Background()); !errors.Is(err, limit) || failing.refreshes != 2 {
+		t.Errorf("Run = %v after %d refreshes; want the limit after two", err, failing.refreshes)
 	}
 }

@@ -40,6 +40,10 @@ const (
 	catalogOpenTimeout = 10 * time.Second
 	// catalogStopTimeout bounds how long quitting waits for a sync to stop.
 	catalogStopTimeout = 5 * time.Second
+	// holdWriteTimeout bounds storing a hold already observed (ddsonic,
+	// #170). The write does not end with quitting's cancellation, and it
+	// fits within catalogStopTimeout, so the store is still open for it.
+	holdWriteTimeout = 2 * time.Second
 	// A failed sync retries after syncRetryMin, doubling up to syncRetryMax,
 	// so an outage clears without a restart or r.
 	syncRetryMin = time.Minute
@@ -481,8 +485,10 @@ func (rt *catalogRuntime) request(provider string, kind syncKind) (ticket uint64
 			// The running sync, or quitting, owns what happens next.
 			owned := errors.Is(err, catalogsync.ErrRunning) || rt.ctx.Err() != nil
 			// ddsonic (#170): a recognized suspension in this run's result
-			// is held and stored whatever follows, an owed run included.
-			record := !owned && ps.recordHold && quotaExceeded(err)
+			// is held and stored whatever follows, an owed run included,
+			// and stored even when quitting has begun (owned): the limit
+			// was met. A run that only ended cancelled carries none.
+			record := ps.recordHold && quotaExceeded(err)
 			// An owed run follows this one, in the step that takes the debt,
 			// so one request owes one run. Its own result settles the retry;
 			// this run's does not.
@@ -812,7 +818,18 @@ func (rt *catalogRuntime) storeHold(provider string) {
 	if st == nil {
 		st = rt.store
 	}
-	if err := st.SetQuotaExceeded(rt.ctx, provider, holdClock()); err != nil {
+	at := holdClock()
+	rt.persist(func(ctx context.Context) error { return st.SetQuotaExceeded(ctx, provider, at) })
+}
+
+// persist runs one store write of something already observed (ddsonic,
+// #170) on a context that quitting does not cancel, bounded by
+// holdWriteTimeout; close waits for the goroutine making it. A failure is
+// logged. Spotify's keepRateLimit writes could use it the same way.
+func (rt *catalogRuntime) persist(write func(ctx context.Context) error) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(rt.ctx), holdWriteTimeout)
+	defer cancel()
+	if err := write(ctx); err != nil {
 		applog.Warn("catalog: %v", err)
 	}
 }
