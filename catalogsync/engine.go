@@ -126,6 +126,11 @@ func (e *Engine) syncAll(ctx context.Context, src Source) error {
 		if err != nil {
 			errs = append(errs, err)
 		}
+		// ddsonic (#170): a spent quota, or anything held like one, ends the
+		// sync before the next collection sends anything.
+		if rl, ok := errors.AsType[*catalog.RateLimitError](err); ok && rl.Quota {
+			return errors.Join(errs...)
+		}
 	}
 	// Collect what the applied snapshots left unreferenced. Sweeping is safe
 	// after a failed collection too: it only deletes what nothing references.
