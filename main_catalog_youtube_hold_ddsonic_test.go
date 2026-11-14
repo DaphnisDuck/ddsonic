@@ -364,6 +364,7 @@ func TestAnOwedRunKeepsAnEarlierYouTubeHold(t *testing.T) {
 		"owed run recovers": nil,
 	} {
 		t.Run(name, func(t *testing.T) {
+			tickHoldClock(t, time.UnixMilli(1_700_000_000_000), time.Second) // each stamp a later millisecond
 			path := filepath.Join(t.TempDir(), "library.db")
 			outstanding := make(chan struct{})
 			src := &ytSource{outstanding: outstanding, release: make(chan struct{}),
@@ -394,5 +395,53 @@ func TestAnOwedRunKeepsAnEarlierYouTubeHold(t *testing.T) {
 				t.Error("the hold was not restored after a restart")
 			}
 		})
+	}
+}
+
+// tickHoldClock makes holdClock start at start and step on each call.
+func tickHoldClock(t *testing.T, start time.Time, step time.Duration) {
+	t.Helper()
+	var mu sync.Mutex
+	next := start
+	holdClock = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		at := next
+		next = next.Add(step)
+		return at
+	}
+	t.Cleanup(func() { holdClock = time.Now })
+}
+
+// A new observation stored after a recovering owed run passed its check,
+// in the very millisecond that run began, is kept: the clear cannot tell
+// it from the earlier mark (marks keep milliseconds), so it keeps the mark
+// rather than delete a possibly newer one. The hold is restored after a
+// restart. Every stamp here falls in one millisecond.
+func TestANewHoldInTheClearsMillisecondIsKept(t *testing.T) {
+	tickHoldClock(t, time.UnixMilli(1_700_000_000_000).Add(100*time.Microsecond), 100*time.Microsecond)
+	path := filepath.Join(t.TempDir(), "library.db")
+	outstanding := make(chan struct{})
+	src := &ytSource{outstanding: outstanding, release: make(chan struct{}),
+		queue: map[string][]error{"liked": {ytQuota, nil}}}
+	rt := ytRuntime(t, path, src, &ytWorker{})
+	beforeQuotaClear = func() {
+		// After the owed run's check: as the enricher's result would.
+		rt.observeQuota(catalog.YouTube)
+		rt.storeHold(catalog.YouTube)
+	}
+	t.Cleanup(func() { beforeQuotaClear = nil })
+	rt.sync(catalog.YouTube)
+	<-outstanding
+	rt.refreshRequired(catalog.YouTube)
+	close(src.release) // quota; the owed run then succeeds
+	ytSettled(t, rt)
+	if held, _, stored := ytState(t, rt); !held || !stored {
+		t.Fatalf("held %t, stored %t; want the new observation held and stored", held, stored)
+	}
+	rt.close()
+	rt = ytRuntime(t, path, src, &ytWorker{})
+	if held, _, _ := ytState(t, rt); !held {
+		t.Error("the new observation was lost at the restart")
 	}
 }
