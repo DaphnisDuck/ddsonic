@@ -636,7 +636,12 @@ type rateLimitStore interface {
 // Each write is on its own bounded context, not the runtime's (persist): a
 // 429 answered while quitting, to the sync, the fill or something the user
 // did, is still recorded. close waits for the requests in progress, and so
-// for these writes, before it closes the store.
+// for these writes, before it closes the store, within catalogStopTimeout.
+// That overall wait may expire before all the writes finish: each is
+// bounded on its own (holdWriteTimeout), so writes that each finish in time
+// can together outlast it, and one quota answer makes up to three (up to
+// 6 s). close then leaves the store open; the writes still running may
+// finish before the process exits, or may not.
 func (rt *catalogRuntime) keepRateLimit(sp rateLimitKeeper, st rateLimitStore) (held bool) {
 	rt.limits = st
 	rt.stopRequests = sp.StopRequests
@@ -891,10 +896,12 @@ func (rt *catalogRuntime) notify(ev catalogsync.Event) {
 
 // close stops any sync, waits briefly for it, and closes the catalog.
 //
-// ddsonic: it also stops Spotify's Web API requests (none is sent from
-// here on) and waits, within the same bound, for those in progress, the
-// user's included: a 429 one of them gets is recorded before it returns, so
-// the store is closed only after that write.
+// ddsonic: it also stops Spotify's Web API requests (none is admitted from
+// here on; a send already admitted may proceed) and waits, within the same
+// bound, for those in progress, the user's included: a 429 one of them gets
+// is recorded before it returns, so the store is closed only after that
+// write. The overall wait may expire before all the writes finish; the
+// store is then left open (keepRateLimit).
 func (rt *catalogRuntime) close() {
 	rt.mu.Lock()
 	rt.closed = true

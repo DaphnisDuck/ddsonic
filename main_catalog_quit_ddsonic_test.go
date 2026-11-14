@@ -300,7 +300,7 @@ func TestARateLimitWriteFailingAtQuit(t *testing.T) {
 }
 
 // Quitting stops Spotify's requests at once, not after the syncs have
-// stopped: nothing new is sent while a sync is still ending.
+// stopped: no new request is admitted while a sync is still ending.
 func TestQuittingStopsRequestsWhileASyncEnds(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "library.db")
 	rt := runtimeAt(t, path)
