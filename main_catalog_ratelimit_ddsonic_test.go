@@ -22,11 +22,66 @@ import (
 	"github.com/bjarneo/cliamp/external/spotify"
 )
 
-// fakeKeeper stands in for the Spotify provider's gate.
+// fakeKeeper stands in for the Spotify provider's gate, and for its count
+// of Web API requests in progress (begin, end, StopRequests).
 type fakeKeeper struct {
 	mu   sync.Mutex
 	sets []keeperSet
 	fn   func(until time.Time, quota bool)
+
+	inProgress int
+	stopped    chan struct{} // closed by StopRequests
+	idle       chan struct{} // closed once nothing is in progress after it
+	stopOnce   sync.Once
+}
+
+func (k *fakeKeeper) StopRequests() <-chan struct{} {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.stopOnce.Do(func() {
+		k.idle = make(chan struct{})
+		if k.inProgress == 0 {
+			close(k.idle)
+		}
+		close(k.stopChan())
+	})
+	return k.idle
+}
+
+// stopChan is closed when StopRequests has been called; k.mu is held.
+func (k *fakeKeeper) stopChan() chan struct{} {
+	if k.stopped == nil {
+		k.stopped = make(chan struct{})
+	}
+	return k.stopped
+}
+
+// whenStopped is closed once StopRequests has been called.
+func (k *fakeKeeper) whenStopped() <-chan struct{} {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.stopChan()
+}
+
+// begin starts a request, as the provider counts it; false once stopped.
+func (k *fakeKeeper) begin() bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.idle != nil {
+		return false
+	}
+	k.inProgress++
+	return true
+}
+
+// end ends a request begun.
+func (k *fakeKeeper) end() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.inProgress--
+	if k.inProgress == 0 && k.idle != nil {
+		close(k.idle)
+	}
 }
 
 type keeperSet struct {

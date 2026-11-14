@@ -29,6 +29,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sync"
 
 	"github.com/bjarneo/cliamp/internal/appmeta"
 	"github.com/bjarneo/cliamp/playlist"
@@ -67,14 +68,78 @@ func (c *apiCall) backAuth() error {
 	return nil
 }
 
-// admit is the last check before a send: the request's context, and the
-// rate-limit gate, which another request's 429 may have closed while this one
-// waited for its token. It holds no lock across the send.
+// admit is the last check before a send: the request's context, quitting,
+// and the rate-limit gate, which another request's 429 may have closed while
+// this one waited for its token. It holds no lock across the send.
 func (p *SpotifyProvider) admit(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return context.Cause(ctx) // ctx.Err() unless a cause was given (a fenced sync)
 	}
+	if p.calls.stopping() {
+		return errQuitting
+	}
 	return p.rateLimited()
+}
+
+// errQuitting fails a Web API request that quitting stopped before it was
+// sent (StopRequests).
+var errQuitting = errors.New("spotify: quitting; the request was not sent")
+
+// webCalls counts the Web API requests in progress, from request's start to
+// its return, so quitting can wait for their answers: a 429 is recorded
+// (OnRateLimited) before its request returns. Once stopped, no request
+// starts or is sent.
+type webCalls struct {
+	mu      sync.Mutex
+	n       int
+	stopped bool
+	idle    chan struct{} // made by stop; closed once n is 0 after it
+}
+
+// begin counts a request in, or refuses it once stopped.
+func (w *webCalls) begin() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.stopped {
+		return false
+	}
+	w.n++
+	return true
+}
+
+// end counts a request out.
+func (w *webCalls) end() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.n--
+	if w.n == 0 && w.stopped { // once: nothing begins after stop
+		close(w.idle)
+	}
+}
+
+func (w *webCalls) stopping() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.stopped
+}
+
+// StopRequests is for quitting: from now on no Web API request is sent, and
+// the channel it returns is closed once every request already in progress
+// has returned. A request that got a 429 returns only after the function
+// OnRateLimited set has returned, so a caller that waits for the channel
+// waits for every rate limit being recorded. It may be called more than once.
+func (p *SpotifyProvider) StopRequests() <-chan struct{} {
+	w := &p.calls
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.stopped {
+		w.stopped = true
+		w.idle = make(chan struct{})
+		if w.n == 0 {
+			close(w.idle)
+		}
+	}
+	return w.idle
 }
 
 // send makes one HTTP request to the Web API with access as its token.
@@ -117,6 +182,10 @@ func errNoToken() error {
 // still learns what its 401 meant, the renewed token is tried on one
 // read-only request.
 func (p *SpotifyProvider) request(ctx context.Context, c *apiCall) (*http.Response, error) {
+	if !p.calls.begin() {
+		return nil, errQuitting
+	}
+	defer p.calls.end()
 	write := isWrite(c.method)
 	for {
 		if err := p.rateLimited(); err != nil { // blocked, do not ask

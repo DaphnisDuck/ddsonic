@@ -68,6 +68,7 @@ type SpotifyProvider struct {
 	meFetched  bool   // /v1/me has been attempted this session; suppresses retry on failure
 	mu         sync.Mutex
 	rate       rateGate                  // ddsonic: Spotify's current rate-limit block
+	calls      webCalls                  // ddsonic: Web API requests in progress (StopRequests)
 	trackCache map[string]*playlistCache // playlist ID → cache entry
 	pending    map[string]*pendingTracks
 	authCancel context.CancelFunc // cancels any in-progress OAuth flow
