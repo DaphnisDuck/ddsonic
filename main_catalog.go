@@ -445,8 +445,8 @@ func (rt *catalogRuntime) request(provider string, kind syncKind) (ticket uint64
 			release = ps.worker.Hold()
 		}
 		var err error
-		var cleared, record bool
-		var clearBefore time.Time
+		var cleared bool
+		var clearBefore, storedAt time.Time
 		// asked: this run is one the user asked for ("r", a sign-in), which
 		// a quota observation does not stop: it is the way out of a hold.
 		asked := kind != syncBackground
@@ -480,10 +480,16 @@ func (rt *catalogRuntime) request(provider string, kind syncKind) (ticket uint64
 			again := ps.quiet && err == nil && ps.requests != seen && !rt.closed
 			// The running sync, or quitting, owns what happens next.
 			owned := errors.Is(err, catalogsync.ErrRunning) || rt.ctx.Err() != nil
+			// ddsonic (#170): a recognized suspension in this run's result
+			// is held and stored whatever follows, an owed run included.
+			record := !owned && ps.recordHold && quotaExceeded(err)
 			// An owed run follows this one, in the step that takes the debt,
 			// so one request owes one run. Its own result settles the retry;
 			// this run's does not.
 			if !again && ps.owed && !owned && !rt.closed {
+				if record {
+					rt.holdLocked(ps) // before the owed run, which may yet recover it
+				}
 				again, asked = true, true // owed runs are explicit or required
 				ps.announced, ps.serving = false, ps.requiredSeq
 			}
@@ -493,18 +499,28 @@ func (rt *catalogRuntime) request(provider string, kind syncKind) (ticket uint64
 				// settled later, this sync's result could undo the retry
 				// of a newer sync that failed meanwhile.
 				if !owned {
-					rt.scheduleRetryLocked(ps, provider, err)
-					record = ps.recordHold && quotaExceeded(err) // held above; stored below
+					rt.scheduleRetryLocked(ps, provider, err) // holds a recognized suspension
 					// Only a run the user asked for releases a hold: a
 					// background run never does, whatever its result.
 					if err == nil && asked && ps.held && ps.quotaSeq == seq {
 						rt.releaseHoldLocked(ps)
+						// A mark this goroutine stored before this run is
+						// covered by it (its observation counted in seq):
+						// cleared even when stored in began's millisecond.
 						cleared, clearBefore = true, began
+						if after := storedAt.Add(time.Millisecond); after.After(began) {
+							clearBefore = after
+						}
 					}
 				}
 				ps.running = false
 			}
 			rt.mu.Unlock()
+			if record {
+				// Stored now, before an owed run begins: stored after it, an
+				// old mark could recreate a hold that run cleared.
+				storedAt = rt.storeHold(provider)
+			}
 			if !again {
 				break
 			}
@@ -512,9 +528,6 @@ func (rt *catalogRuntime) request(provider string, kind syncKind) (ticket uint64
 		release()
 		if cleared {
 			rt.clearQuota(provider, clearBefore)
-		}
-		if record {
-			rt.storeHold(provider)
 		}
 		if errors.Is(err, catalogsync.ErrRunning) || rt.ctx.Err() != nil {
 			return
@@ -785,17 +798,20 @@ func (rt *catalogRuntime) restoreHold(provider string) bool {
 	return held
 }
 
-// storeHold records provider's hold so the next start keeps it. A failed
-// write is logged; the hold is already taken in memory. Like Spotify's
-// mark, it is stamped when written (see keepRateLimit's limitation).
-func (rt *catalogRuntime) storeHold(provider string) {
+// storeHold records provider's hold so the next start keeps it, and
+// returns the mark's stamp. A failed write is logged; the hold is already
+// taken in memory. Like Spotify's mark, it is stamped when written (see
+// keepRateLimit's limitation).
+func (rt *catalogRuntime) storeHold(provider string) time.Time {
 	st := rt.limits
 	if st == nil {
 		st = rt.store
 	}
-	if err := st.SetQuotaExceeded(rt.ctx, provider, time.Now()); err != nil {
+	at := time.Now()
+	if err := st.SetQuotaExceeded(rt.ctx, provider, at); err != nil {
 		applog.Warn("catalog: %v", err)
 	}
+	return at
 }
 
 // enrichPacing paces YouTube enrichment: each read is a full yt-dlp run of
