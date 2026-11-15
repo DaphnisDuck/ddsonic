@@ -213,9 +213,26 @@ type openResult struct {
 type openHandle struct {
 	once   sync.Once
 	cancel context.CancelFunc
+	// seq numbers the stream the open got, for its Debug lines; 0 when it
+	// got none. The worker sets it before it publishes or disposes.
+	seq uint64
 }
 
 func (h *openHandle) end() { h.once.Do(h.cancel) }
+
+// streamSeq numbers the streams opened.
+var streamSeq atomic.Uint64
+
+// streamCodec names a stream's codec and format, the only things of it the
+// Debug lines log. It reads the format pointer itself: the SDK's GetFormat
+// would report a missing format as OGG_VORBIS_96.
+func streamCodec(st *librespotPlayer.Stream) (codec, format string) {
+	if st == nil || st.File == nil || st.File.Format == nil {
+		return "unknown", "none"
+	}
+	f := *st.File.Format
+	return librespotPlayer.GetFormatCodec(f), f.String()
+}
 
 // disposeStream releases a stream that was never accepted. Its disposer is
 // its one owner, librespot's call has returned, and no reader was given it:
@@ -223,6 +240,10 @@ func (h *openHandle) end() { h.once.Do(h.cancel) }
 // stream's teardown is the streamer's, and is not this.)
 func disposeStream(stream *librespotPlayer.Stream, h *openHandle) {
 	h.end()
+	if h.seq != 0 {
+		codec, format := streamCodec(stream)
+		applog.Debug("spotify: stream discarded seq=%d codec=%s format=%s", h.seq, codec, format)
+	}
 	if stream == nil {
 		return
 	}
@@ -342,6 +363,11 @@ func (s *Session) NewStream(ctx context.Context, spotID librespot.SpotifyId, bit
 			results <- res // never blocks; the caller owns it from the swap
 		}()
 		res.stream, res.err = playerNewStream(b, setupCtx, client, spotID, bitrate)
+		if res.err == nil {
+			h.seq = streamSeq.Add(1)
+			codec, format := streamCodec(res.stream)
+			applog.Debug("spotify: stream opened seq=%d codec=%s format=%s", h.seq, codec, format)
+		}
 	}()
 	defer func() {
 		stopOnRetire()
