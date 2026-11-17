@@ -125,6 +125,8 @@ The ID is given to the owner only after this succeeds.
 - runs `sha256sum -c SHA256SUMS`;
 - sets the modes, and prints the path.
 
+This fetch applies only to candidates that live on the development machine. A candidate already on the owner's acceptance machine is verified and used in place, with its SHA-256 and `--version` checked against the recorded values; there is no round trip through the development machine. An example is an accepted release-path build the owner made there with the build scripts and kept under its build directory.
+
 The owner then checks it again:
 
 ```sh
