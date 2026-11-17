@@ -83,6 +83,59 @@ Two rules follow from the rename:
 
 The AUR package is `ddsonic-bin`. `ddmus-bin` was never pushed to the AUR, so there is nothing to replace there; a `ddmus-bin` built locally from the candidate is removed by hand (`pacman -R ddmus-bin`).
 
+## Staging a candidate for the owner to test
+
+A candidate is a build the owner tests on the workstation before a change is merged or released. Staging it is not publication: it makes no tag, no GitHub release and no public artifact.
+
+**Where it goes.** Each candidate gets its own folder on the development machine, `~/ddsonic-candidates/<ID>/` (the folder is mode 700).
+- **The ID** is a short label and the commit's seven-character prefix, for example `r12-e182dae` or `main-3cbe22f`.
+- **A new ID each time.** Every staging uses a new ID, and an existing folder is never replaced or overwritten. Earlier candidates stay where they are.
+- **No release identity.** The ID never reuses a release version such as `v1.1.0-test.5`, so a candidate cannot be mistaken for a release artifact.
+
+**What the folder holds:**
+- `ddsonic-<ID>`: the executable.
+- `ddsonic-<ID>-source.tar.gz` (optional): a `git archive` of exactly that commit.
+- `README.txt`: it states on its first line that this is a candidate build for testing and not a release. It also gives:
+  - the commit and the expected `--version` line;
+  - what changed and what to test;
+  - how it was built and the libraries it needs;
+  - how to verify and run it, and what state it shares with the installed ddsonic.
+- `SHA256SUMS`: it covers the other files.
+
+**A development build** is built from a clean `git archive` of the commit, with `release.sh`'s version flags (`-X main.version=<ID> -X main.sourceSHA=<commit>`). `--version` then prints `ddsonic version <ID> (commit <full commit>)`. It is built on the development machine rather than in the release image, so its codec libraries are linked dynamically and its bytes do not match a release build.
+
+**Verify before handing it over:**
+- the archive's commit;
+- `--version`;
+- `sha256sum -c SHA256SUMS`;
+- the permissions;
+- `ldd`.
+
+The ID is given to the owner only after this succeeds.
+
+**An acceptance build made with the release path** (the Docker build from `packaging/release.sh`, as in the dry run above, followed by a read-only check of its `dist/` output that records the binary's SHA-256) is staged unchanged, as follows:
+- Copy its exact bytes. Never rebuild it or substitute another binary.
+- Before staging, check that its SHA-256 equals the recorded value and that `--version` prints the expected line.
+- Its own version string is the release-path one; the staging folder still gets a new candidate ID, and the README records the binary's own `--version` line.
+
+**Fetching it on the workstation.** The owner runs `ddsonic-fetch <ID>`, a personal helper on the workstation that is not part of this repository. As described by the owner, it:
+- copies the folder from the development machine to the same path on the workstation;
+- refuses to overwrite an existing folder;
+- runs `sha256sum -c SHA256SUMS`;
+- sets the modes, and prints the path.
+
+The owner then checks it again:
+
+```sh
+ddsonic-fetch <ID>
+cd ~/ddsonic-candidates/<ID>
+sha256sum -c SHA256SUMS          # every line OK
+./ddsonic-<ID> --version         # the line README.txt gives
+ldd ./ddsonic-<ID> | grep 'not found'   # no output: every library is present
+```
+
+The candidate runs by its path and does not replace the installed ddsonic. It reads and writes the same configuration and data as the installed ddsonic, so its README says what that means for the build being tested.
+
 ## Versioning
 
 ddsonic follows [Semantic Versioning](https://semver.org/) (owner, 2026-11-03):
