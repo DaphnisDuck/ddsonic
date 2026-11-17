@@ -109,7 +109,7 @@ This consolidates requirements that already exist, with their sources. It adds n
 
 **Before the tag**
 
-- [ ] **Scope frozen.** The milestone items are done or deferred. Deferred, by owner decision: #83 (R-12), #90 (release provenance), #135 (channel favorites), #131 (marquee). The umbrellas #27 and #82 and the agent-docs cleanup (#30) are not blockers.
+- [ ] **Scope frozen.** Before tagging, every milestone item must be completed, explicitly deferred, or assigned an approved post-tag acceptance obligation that blocks publication. Approved post-tag acceptance obligations, by owner decision ([#156, comment 6962339044](https://github.com/DaphnisDuck/ddsonic/issues/156#issuecomment-6962339044)): #121 (Linux notices) and #88 (Apple Silicon macOS qualification), both below; they stay open and block publication, not the tag. Deferred, by owner decision: #83 (R-12), #90 (release provenance), #135 (channel favorites), #131 (marquee). The umbrellas #27 and #82 and the agent-docs cleanup (#30) are not blockers.
 - [ ] **Bounded UltraReview**, run by the owner after the freeze and before the tag, on the exact diff from the published `v1.0.0` (`9ae61bcf6604e032b6e690394d10cb0bade80543`) to the frozen v1.1.0 commit. The Dispatcher reports the delta's size before the owner invokes it. If a blocker needs a code change, the affected review and acceptance evidence are revalidated before continuing. The candidate is built from the frozen, reviewed commit. How it is run, budgeted and recorded: [UltraReview policy](#ultrareview-policy).
 - [ ] **`CHANGELOG.md`** has a `## [1.1.0]` section.
 - [ ] **Required CI is green** on the frozen commit (`go`, `sdk-contract`, CodeQL). The macOS workflow is evidence, not a substitute for the macOS acceptance below.
