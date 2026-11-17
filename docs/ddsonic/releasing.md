@@ -90,7 +90,8 @@ A candidate is a build the owner tests on the workstation before a change is mer
 **Where it goes.** Each candidate gets its own folder on the development machine, `~/ddsonic-candidates/<ID>/` (the folder is mode 700).
 - **The ID** is a short label and the commit's seven-character prefix, for example `r12-e182dae` or `main-3cbe22f`.
 - **A new ID each time.** Every staging uses a new ID, and an existing folder is never replaced or overwritten. Earlier candidates stay where they are.
-- **No release identity.** The ID never reuses a release version such as `v1.1.0-test.5`, so a candidate cannot be mistaken for a release artifact.
+- **No collisions.** A staging never overwrites or collides with an existing candidate folder, on the development machine or on the workstation. When the natural ID already exists, use a new, unambiguous alias.
+- **The candidate keeps its own identity.** The README records the binary's actual `--version` line and its SHA-256.
 
 **What the folder holds:**
 - `ddsonic-<ID>`: the executable.
@@ -116,7 +117,7 @@ The ID is given to the owner only after this succeeds.
 **An acceptance build made with the release path** (the Docker build from `packaging/release.sh`, as in the dry run above, followed by a read-only check of its `dist/` output that records the binary's SHA-256) is staged unchanged, as follows:
 - Copy its exact bytes. Never rebuild it or substitute another binary.
 - Before staging, check that its SHA-256 equals the recorded value and that `--version` prints the expected line.
-- Its own version string is the release-path one; the staging folder still gets a new candidate ID, and the README records the binary's own `--version` line.
+- If the natural ID would collide with an existing folder, use a new, unambiguous ID. The README records the binary's own `--version` line.
 
 **Fetching it on the workstation.** The owner runs `ddsonic-fetch <ID>`, a personal helper on the workstation that is not part of this repository. As described by the owner, it:
 - copies the folder from the development machine to the same path on the workstation;
@@ -131,8 +132,10 @@ ddsonic-fetch <ID>
 cd ~/ddsonic-candidates/<ID>
 sha256sum -c SHA256SUMS          # every line OK
 ./ddsonic-<ID> --version         # the line README.txt gives
-ldd ./ddsonic-<ID> | grep 'not found'   # no output: every library is present
+ldd ./ddsonic-<ID>; echo "ldd status: $?"
 ```
+
+A dynamic build lists its libraries and exits 0. Any `not found` line needs a look, and so does a nonzero status, except for the statement `not a dynamic executable` that a static build gives.
 
 The candidate runs by its path and does not replace the installed ddsonic. It reads and writes the same configuration and data as the installed ddsonic, so its README says what that means for the build being tested.
 
