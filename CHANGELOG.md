@@ -205,7 +205,7 @@ Released as omatunes. The first release of the fork, based on cliamp just after 
 ### Removed
 - cliamp's self-updater: `upgrade` refuses to run, because it would install cliamp over the fork.
 
-[1.1.0]: https://github.com/DaphnisDuck/ddsonic/compare/v1.0.0...main
+[1.1.0]: https://github.com/DaphnisDuck/ddsonic/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/DaphnisDuck/ddsonic/releases/tag/v1.0.0
 [0.10.0]: https://github.com/DaphnisDuck/ddsonic/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/DaphnisDuck/ddsonic/compare/v0.8.0...v0.9.0
