@@ -44,7 +44,22 @@ func (p *Player) togglePause() {
 	speaker.Unlock()
 
 	if !pause {
+		p.drainGen.Add(1) // SCRATCH: a pending drain-on-pause is moot
 		p.resumeSpeaker()
+		return
+	}
+	if r12DrainOnPause { // SCRATCH prototype, measurement only
+		speaker.Lock()
+		p.ctrl.Paused = true
+		speaker.Unlock()
+		gen := p.drainGen.Add(1)
+		drainAfter(p.drainDelay(), func() {
+			p.lifecycleMu.Lock()
+			defer p.lifecycleMu.Unlock()
+			if p.drainGen.Load() == gen && p.paused.Load() {
+				p.suspendSpeaker()
+			}
+		})
 		return
 	}
 	p.drainGen.Add(1) // a pause suspends now; a pending drain is moot
@@ -86,4 +101,17 @@ func (p *Player) deviceSuspended() bool {
 	p.suspendMu.Lock()
 	defer p.suspendMu.Unlock()
 	return p.suspended
+}
+
+// r12DrainOnPause: SCRATCH prototype switch (not committed).
+var r12DrainOnPause bool
+
+// SCRATCH prototype: empty oto's player buffer when new audio starts while
+// the device is suspended. Off unless r12ResetOnPausedStart.
+var r12ResetOnPausedStart bool
+
+func (p *Player) resetIfPausedSuspended() {
+	if r12ResetOnPausedStart && p.paused.Load() && p.deviceSuspended() {
+		speakerReset()
+	}
 }

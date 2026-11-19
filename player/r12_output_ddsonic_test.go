@@ -153,6 +153,15 @@ func (m *otoModel) drain(d time.Duration) {
 	}
 }
 
+// reset is oto's Player.Reset then Play (SCRATCH): the player buffer is
+// emptied ($OTO/internal/mux/mux.go:379-392) and Play refills it to at least
+// one chunk from the source (:298-335).
+func (m *otoModel) reset() {
+	m.queue = nil
+	m.pending = false
+	m.refill()
+}
+
 func (m *otoModel) mark(name string) { m.marks = append(m.marks, mark{len(m.out), name}) }
 
 // newModelPlayer is Player.New with the model for a device: the same fields,
@@ -190,7 +199,9 @@ func newModelPlayer(t *testing.T, bufferMs, periodsPerChunk, suspendLag int, lat
 		}
 		p.ctrl.Stream(buf)
 	}
-	oldSuspend, oldResume, oldDrain := speakerSuspend, speakerResume, drainAfter
+	oldSuspend, oldResume, oldDrain, oldReset := speakerSuspend, speakerResume, drainAfter, speakerReset
+	r12ResetOnPausedStart = os.Getenv("R12_RESET") == "1" // SCRATCH
+	speakerReset = m.reset
 	speakerSuspend, speakerResume = m.Suspend, m.Resume
 	drainAfter = func(_ time.Duration, f func()) *time.Timer {
 		m.drains = append(m.drains, f)
@@ -198,7 +209,8 @@ func newModelPlayer(t *testing.T, bufferMs, periodsPerChunk, suspendLag int, lat
 	}
 	t.Cleanup(func() {
 		p.Stop()
-		speakerSuspend, speakerResume, drainAfter = oldSuspend, oldResume, oldDrain
+		speakerSuspend, speakerResume, drainAfter, speakerReset = oldSuspend, oldResume, oldDrain, oldReset
+		r12ResetOnPausedStart = false
 	})
 	return p, m
 }

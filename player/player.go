@@ -300,7 +300,10 @@ func (p *Player) playPipelineForGeneration(tp *trackPipeline, generation uint64)
 		go tp.close()
 		return nil
 	}
-	p.resumeSpeaker()
+	wasSuspended := p.deviceSuspended() // SCRATCH
+	if !(r12ResetOnPausedStart && wasSuspended) {
+		p.resumeSpeaker()
+	}
 
 	// Collect old pipelines to close after releasing locks.
 	var oldCurrent, oldNext *trackPipeline
@@ -360,6 +363,10 @@ func (p *Player) playPipelineForGeneration(tp *trackPipeline, generation uint64)
 
 	if !started {
 		speaker.Play(p.ctrl)
+	}
+	if r12ResetOnPausedStart && wasSuspended { // SCRATCH
+		speakerReset()
+		p.resumeSpeaker()
 	}
 	p.lifecycleMu.Unlock()
 	// Start API-based now-playing polling for streams without ICY metadata
@@ -584,6 +591,7 @@ func (p *Player) Seek(d time.Duration) error {
 	p.nextPipeline = nil
 	p.mu.Unlock()
 	speaker.Unlock()
+	p.resetIfPausedSuspended() // SCRATCH
 	p.lifecycleMu.Unlock()
 	if old != nil {
 		old.close()
@@ -641,6 +649,7 @@ func (p *Player) commitPreparedSeek(cur *trackPipeline, seeker preparedFFmpegSee
 	p.gapless.Replace(cur.stream)
 	p.gaplessAdvance.Store(false)
 	speaker.Unlock()
+	p.resetIfPausedSuspended() // SCRATCH
 	p.lifecycleMu.Unlock()
 
 	_ = oldPipe.stop()

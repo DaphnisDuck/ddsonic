@@ -15,4 +15,5 @@ var (
 	speakerSuspend = speaker.Suspend
 	speakerResume  = speaker.Resume
 	drainAfter     = time.AfterFunc
+	speakerReset   = func() {} // SCRATCH: production would Reset and Play beep's oto player
 )
