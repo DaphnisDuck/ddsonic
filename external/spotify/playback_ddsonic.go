@@ -10,9 +10,10 @@ package spotify
 // replaced or closed is retired: detached under the lock, then told to stop,
 // then torn down on its own goroutine once its workers have returned.
 //
-// Two things about go-librespot v0.9.1 shape this:
-//   - A stream setup can outlive its context: the audio key request waits
-//     without it. What releases it is the access point's Done channel.
+// Two things about go-librespot shape this:
+//   - A stream setup can outlive its context in places (its HTTP work, a
+//     write that has begun). What releases it is the access point's Done
+//     channel, or the open's own HTTP lifetime.
 //   - Accesspoint.Close can block: it closes Done first, then waits for a
 //     lock its receive loop holds across a reconnect. So no caller ever
 //     calls it; the bundle's tail does, on a goroutine of its own.
@@ -21,6 +22,24 @@ package spotify
 // bounded by the caller's deadline and ended when the bundle is retired. The
 // stream is what that call returns; it reads its audio over an HTTP context
 // of its own, which nothing here ends once the stream has been accepted.
+//
+// The access point's connection (the contract tests in sdkcontract pin what
+// go-librespot does, with ddsonic's patch 0002, docs/ddsonic/upstream.md):
+//   - Nothing reads the connection until something calls Receive, and
+//     librespot's first caller is the first audio key request. Until then
+//     pings go unanswered and a close by the peer goes unnoticed. So a
+//     bundle's access point is serviced from the moment the bundle is made
+//     (serviceAccessPoint): librespot then answers pings, and reconnects when
+//     the connection ends, while nothing is being opened.
+//   - With patch 0002 the key provider ends a request whose connection was
+//     replaced (ConnectionReplacedError) or whose write failed (KeySendError)
+//     at once, from positive evidence, and never sends one again; and an
+//     access point whose reconnect fails for good closes itself (Done).
+//
+// An open that ends with an error the session accepted carries where it came
+// from (originError): the bundle and the session build it ran on. What the
+// provider does with it, with the one recovery a play has, is in
+// recovery_ddsonic.go.
 
 import (
 	"context"
@@ -33,6 +52,7 @@ import (
 	"sync/atomic"
 
 	librespot "github.com/devgianlu/go-librespot"
+	"github.com/devgianlu/go-librespot/ap"
 	librespotPlayer "github.com/devgianlu/go-librespot/player"
 	"github.com/devgianlu/go-librespot/session"
 	"github.com/devgianlu/go-librespot/vorbis"
@@ -44,6 +64,30 @@ import (
 // before the stream was accepted. It is not an auth error: nothing recovers
 // from it, and the user plays the track again.
 var errSessionChanged = errors.New("spotify: the session changed while the track was opening; try again")
+
+// errAccessPointClosed ends a track open on a bundle whose access point
+// librespot has closed for good, while the bundle is still the session's.
+// It is not an auth error: it says the connection is gone, and nothing about
+// the sign-in.
+var errAccessPointClosed = fmt.Errorf("spotify: the connection to Spotify is closed: %w", ap.ErrAccesspointClosed)
+
+// originError is an error a track open ended with, and that the session
+// accepted (the open's bundle was still the session's and its caller still
+// asking), with where it came from: the bundle and the session build it ran
+// on. cause is the error itself, so errors.Is and errors.As see through it.
+//
+// beforeWork is set on the one origin error made before any librespot work
+// was started: the bundle's access point had already closed when the open
+// went to take it.
+type originError struct {
+	gen        uint64
+	origin     *playback
+	cause      error
+	beforeWork bool
+}
+
+func (e *originError) Error() string { return e.cause.Error() }
+func (e *originError) Unwrap() error { return e.cause }
 
 // The librespot calls a bundle makes, as variables so a test can stand in
 // for them and hold them.
@@ -68,6 +112,23 @@ var (
 			return closedChan
 		}
 		return b.sess.Accesspoint().Done()
+	}
+	// accessPointGeneration is the access point's connection generation and
+	// the channel closed when it moves on (patch 0002). It takes no lock.
+	accessPointGeneration = func(b *playback) (uint64, <-chan struct{}) {
+		if b.sess == nil {
+			return 0, nil
+		}
+		return b.sess.Accesspoint().Generation()
+	}
+	// serviceAccessPoint starts librespot's receive loop on a bundle's
+	// access point: Receive with no packet types registers nothing, and
+	// starts the loop that answers pings and reconnects. It is called once,
+	// when the bundle is made, by a builder that holds no lock.
+	serviceAccessPoint = func(b *playback) {
+		if b.sess != nil {
+			b.sess.Accesspoint().Receive()
+		}
 	}
 	// openHook, when set by a test, runs at the named points of a track open.
 	openHook func(point string)
@@ -97,7 +158,9 @@ type playback struct {
 
 func newPlayback(sess *session.Session, username string, data []byte, devID string) *playback {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &playback{sess: sess, username: username, data: data, devID: devID, ctx: ctx, cancel: cancel, gone: make(chan struct{})}
+	b := &playback{sess: sess, username: username, data: data, devID: devID, ctx: ctx, cancel: cancel, gone: make(chan struct{})}
+	serviceAccessPoint(b) // from here on: see the note at the top
+	return b
 }
 
 // retireNow retires a bundle that has been detached from its session: no
@@ -117,10 +180,11 @@ func (b *playback) retireNow() {
 
 // tail tears a retired bundle down. The access point is closed first, on a
 // goroutine of its own because that call can block; its Done channel, which
-// closes as that call begins, releases the workers that a context does not.
-// The player is closed only after every worker has returned. No bound is
-// claimed for when the connection closes or the tail ends: while librespot
-// is reconnecting they wait for it, and nothing waits for them.
+// closes as that call begins, releases the workers that a context does not,
+// and ends every key request the bundle's key provider still has. The player
+// is closed only after every worker has returned. No bound is claimed for
+// when the connection closes or the tail ends: while librespot is
+// reconnecting they wait for it, and nothing waits for them.
 func (b *playback) tail() {
 	defer tails.Done()
 	defer close(b.gone)
@@ -195,6 +259,34 @@ func releaseDecoder(src librespot.AudioSource) {
 	}
 }
 
+// holdPlayback takes a reference to the session's playback bundle for the
+// worker of one stream setup, and the session build it belongs to, both
+// under the lock. The open's context comes first: one that has ended, before
+// the call or while it waited for the lock, ends the open with its own
+// error, and nothing is taken or started. A bundle that is still the
+// session's and whose access point librespot has closed is not taken: the
+// open fails at once with an origin error on it, made before any librespot
+// work, for a caller still asking. A closed session, or one with no bundle,
+// fails with no origin.
+func (s *Session) holdPlayback(ctx context.Context) (*playback, uint64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
+	b := s.play
+	if s.closed || b == nil {
+		return nil, 0, fmt.Errorf("spotify: session closed")
+	}
+	select {
+	case <-accessPointDone(b):
+		return nil, 0, &originError{gen: s.gen, origin: b, cause: errAccessPointClosed, beforeWork: true}
+	default:
+	}
+	b.users.Add(1) // under the lock a retirement detaches the bundle with
+	return b, s.gen, nil
+}
+
 // NewStream creates a decoded audio stream for the given Spotify track ID. The
 // caller must retain and invoke the returned cancel function for the lifetime
 // of a successful stream. ctx bounds setup independently of that lifetime.
@@ -205,16 +297,14 @@ func releaseDecoder(src librespot.AudioSource) {
 // track open becomes an established stream. Otherwise the open ends with the
 // caller's context error or errSessionChanged, whatever librespot answered:
 // an error from a bundle that has been retired says nothing about the
-// session that replaced it.
+// session that replaced it. An error that passes that check is returned as
+// an originError on the bundle and build it ran on. It makes one setup and
+// never a second.
 func (s *Session) NewStream(ctx context.Context, spotID librespot.SpotifyId, bitrate int) (*librespotPlayer.Stream, context.CancelFunc, error) {
-	s.mu.Lock()
-	b := s.play
-	if s.closed || b == nil {
-		s.mu.Unlock()
-		return nil, nil, fmt.Errorf("spotify: session closed")
+	b, gen, err := s.holdPlayback(ctx)
+	if err != nil {
+		return nil, nil, err
 	}
-	b.users.Add(1) // under the lock a retirement detaches the bundle with
-	s.mu.Unlock()
 
 	streamCtx, streamCancel := context.WithCancel(context.Background())
 	h := &openHandle{cancel: streamCancel}
@@ -297,7 +387,9 @@ func (s *Session) NewStream(ctx context.Context, spotID librespot.SpotifyId, bit
 		disposeStream(res.stream, h)
 		return nil, nil, outcome
 	case res.err != nil:
-		return nil, nil, res.err // the worker ended the HTTP lifetime
+		// the worker ended the HTTP lifetime; the error is accepted, and
+		// carries its origin
+		return nil, nil, &originError{gen: gen, origin: b, cause: res.err}
 	}
 	return res.stream, h.end, nil
 }
