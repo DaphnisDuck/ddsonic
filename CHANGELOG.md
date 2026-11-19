@@ -4,7 +4,7 @@ Notable changes to ddsonic (DaphnisDuck's Music Player). The format follows [Kee
 
 ddsonic is a fork of [cliamp](https://github.com/bjarneo/cliamp). Versions before 0.6 were released as omatunes, and 0.6 up to the candidate 1.0.0-rc.1 as ddmus; their entries below keep the name they were released under.
 
-## [1.1.0] - unreleased
+## [1.1.0] - 2026-11-19
 
 ### Added
 - A sleep timer. `Z` (Shift+Z), in the library and the queue, steps through 15, 30, 45, 60 and 90 minutes, then off; each choice counts from the moment it is made. The header shows the time left. When the time is up, playback pauses, keeping the track, its position and the queue, and `Space` resumes. Before that the music fades out, reaching silence when it pauses, without changing your volume setting. The fade lasts 30 seconds by default; `[ddsonic] sleep_fade_seconds` sets it (0 to 3600, and 0 pauses without a fade). During the fade, a volume or playback command, from a key, the media keys or `ddsonic` commands, brings the sound back and turns the timer off. The timer is not kept across a restart.
