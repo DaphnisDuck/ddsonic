@@ -18,6 +18,7 @@ import (
 	"github.com/bjarneo/cliamp/external/spotify"
 	"github.com/bjarneo/cliamp/library"
 	"github.com/bjarneo/cliamp/playlist"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // signInProv is a Spotify stand-in: a player that signs in, searches and
@@ -300,7 +301,7 @@ func TestSignInRowSignsIn(t *testing.T) {
 	}
 	wantView(t, "while signing in", m, []string{signingIn}, signInRow)
 	m = sendAll(t, m, ProvAuthURLMsg{ProviderName: "Spotify", URL: "https://accounts.example/authorize"})
-	wantView(t, "with the URL", m, []string{"If no browser opened, open this address", "https://accounts.example/authorize"})
+	wantView(t, "with the URL", m, []string{"No browser? Click or copy the link below.", "https://accounts.example/authorize"})
 
 	m = runAll(t, m, cmd)
 	if l.prov.auths != 1 || len(l.refreshes) != 1 {
@@ -564,7 +565,7 @@ func TestSearchOverlaySignInShowsURL(t *testing.T) {
 		t.Fatal("Enter on the prompt did not start the sign-in")
 	}
 	m = sendAll(t, m, ProvAuthURLMsg{ProviderName: "Spotify", URL: "https://accounts.example/authorize"})
-	wantView(t, "the search while signing in", m, []string{signingIn, "If no browser opened, open this address", "https://accounts.example/authorize"})
+	wantView(t, "the search while signing in", m, []string{signingIn, "No browser? Click or copy the link below.", "https://accounts.example/authorize"})
 
 	m = runAll(t, m, cmd)
 	wantView(t, "the search after signing in", m, []string{"Found"}, signingIn, "accounts.example")
@@ -614,11 +615,40 @@ func linked(m Model) map[string]string {
 	}
 }
 
+// mouseSelection is what a mouse drag from the address's first character to
+// its last copies in a typical terminal: each screen row from where the drag
+// crosses it, trailing blanks trimmed, the rows joined by line breaks. The
+// frame's padding at the start of each following row comes with it.
+func mouseSelection(m Model, url string) string {
+	lines := strings.Split(ansi.Strip(m.View().Content), "\n")
+	for i, line := range lines {
+		col := strings.Index(line, url[:20])
+		if col < 0 {
+			continue
+		}
+		rows := []string{strings.TrimRight(line[col:], " ")}
+		seen := len(rows[0])
+		for _, next := range lines[i+1:] {
+			if seen >= len(url) {
+				break
+			}
+			row := strings.TrimRight(next, " ")
+			rows = append(rows, row)
+			seen += len(strings.TrimSpace(row))
+		}
+		return strings.Join(rows, "\n")
+	}
+	return ""
+}
+
 // The address to open by hand is offered whole and usable as it stands: the
 // rows that show it are a link whose target is the complete address, and the
 // linked cells, read in order, are the address and nothing else. No row of it
 // is cut at the supported sizes, down to 80x20, in the library, in Spotify's
-// search and in its playlist picker.
+// search and in its playlist picker. Selecting the rows with the mouse does
+// not give the address (#181: the line breaks and padding between rows come
+// with it, and Spotify refuses the pasted address with an unrelated-looking
+// error), so wherever that is so the screen says to take the link instead.
 func TestSignInAddressIsUsableWhole(t *testing.T) {
 	url := longAuthURL()
 	if len(url) < 560 {
@@ -635,8 +665,11 @@ func TestSignInAddressIsUsableWhole(t *testing.T) {
 		if text != url {
 			t.Errorf("%s: the linked cells read\n %q\nwant the address, whole and with nothing added:\n %q", where, text, url)
 		}
+		if sel := mouseSelection(m, url); sel != url && !strings.Contains(ansi.Strip(m.View().Content), "Click or copy the link below. Selecting its rows breaks it.") {
+			t.Errorf("%s: selecting the rows copies\n %q\nnot the address, and the screen does not say to take the link instead:\n%s", where, sel, ansi.Strip(m.View().Content))
+		}
 	}
-	for _, size := range [][2]int{{100, 30}, {80, 24}, {80, 20}} {
+	for _, size := range [][2]int{{160, 30}, {100, 30}, {80, 24}, {80, 20}} {
 		name := fmt.Sprintf("%dx%d", size[0], size[1])
 		t.Run(name+" library", func(t *testing.T) {
 			l := newSignInLib(t)
