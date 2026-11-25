@@ -32,7 +32,8 @@ Offline, on the dev VM, with the real `Startup` class driven against a stub `her
 
 ```sh
 mkdir sim && cd sim   # extract the two files below as sim2.py and herdr_stub.py (chmod +x herdr_stub.py)
-REAL_LAYOUT=~/.local/share/ddsonic-dev/native-restore-*.json STARTUP=/path/to/startup.py python3 -I sim2.py
+layout=$(ls ~/.local/share/ddsonic-dev/native-restore-*.json | head -n 1)   # one actual file; the harness only reads it
+REAL_LAYOUT=$layout STARTUP=/path/to/startup.py python3 -I sim2.py
 ```
 
 | Scenario | Original | Patched |
