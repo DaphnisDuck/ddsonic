@@ -301,7 +301,7 @@ func TestSignInRowSignsIn(t *testing.T) {
 	}
 	wantView(t, "while signing in", m, []string{signingIn}, signInRow)
 	m = sendAll(t, m, ProvAuthURLMsg{ProviderName: "Spotify", URL: "https://accounts.example/authorize"})
-	wantView(t, "with the URL", m, []string{"No browser? Click or copy the link below.", "https://accounts.example/authorize"})
+	wantView(t, "with the URL", m, []string{"No browser? Click or Ctrl+click the link.", "https://accounts.example/authorize"})
 
 	m = runAll(t, m, cmd)
 	if l.prov.auths != 1 || len(l.refreshes) != 1 {
@@ -565,7 +565,7 @@ func TestSearchOverlaySignInShowsURL(t *testing.T) {
 		t.Fatal("Enter on the prompt did not start the sign-in")
 	}
 	m = sendAll(t, m, ProvAuthURLMsg{ProviderName: "Spotify", URL: "https://accounts.example/authorize"})
-	wantView(t, "the search while signing in", m, []string{signingIn, "No browser? Click or copy the link below.", "https://accounts.example/authorize"})
+	wantView(t, "the search while signing in", m, []string{signingIn, "No browser? Click or Ctrl+click the link.", "https://accounts.example/authorize"})
 
 	m = runAll(t, m, cmd)
 	wantView(t, "the search after signing in", m, []string{"Found"}, signingIn, "accounts.example")
@@ -665,8 +665,16 @@ func TestSignInAddressIsUsableWhole(t *testing.T) {
 		if text != url {
 			t.Errorf("%s: the linked cells read\n %q\nwant the address, whole and with nothing added:\n %q", where, text, url)
 		}
-		if sel := mouseSelection(m, url); sel != url && !strings.Contains(ansi.Strip(m.View().Content), "Click or copy the link below. Selecting its rows breaks it.") {
-			t.Errorf("%s: selecting the rows copies\n %q\nnot the address, and the screen does not say to take the link instead:\n%s", where, sel, ansi.Strip(m.View().Content))
+		screen := ansi.Strip(m.View().Content)
+		sel := mouseSelection(m, url)
+		if sel == "" {
+			t.Fatalf("%s: the address's first row is not on screen:\n%s", where, screen)
+		}
+		if sel == url {
+			t.Fatalf("%s: selecting the rows copies the address whole; the address no longer wraps, so this test no longer models #181", where)
+		}
+		if !strings.Contains(screen, "Click or Ctrl+click the link. Selecting its rows breaks it.") {
+			t.Errorf("%s: selecting the rows copies\n %q\nnot the address, and the screen does not say to take the link instead:\n%s", where, sel, screen)
 		}
 	}
 	for _, size := range [][2]int{{160, 30}, {100, 30}, {80, 24}, {80, 20}} {
