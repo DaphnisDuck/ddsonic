@@ -646,9 +646,10 @@ func mouseSelection(m Model, url string) string {
 // linked cells, read in order, are the address and nothing else. No row of it
 // is cut at the supported sizes, down to 80x20, in the library, in Spotify's
 // search and in its playlist picker. Selecting the rows with the mouse does
-// not give the address (#181: the line breaks and padding between rows come
-// with it, and Spotify refuses the pasted address with an unrelated-looking
-// error), so wherever that is so the screen says to take the link instead.
+// not give the address: the line breaks and padding between rows come with
+// it, so wherever that is so the screen says to take the link instead. (#181:
+// whether a browser keeps that whitespace, and whether it causes Spotify's
+// unrelated-looking error, is a hypothesis this test does not prove.)
 func TestSignInAddressIsUsableWhole(t *testing.T) {
 	url := longAuthURL()
 	if len(url) < 560 {
