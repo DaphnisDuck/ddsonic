@@ -53,13 +53,13 @@ Not tested: `--stop` (its preflight reads `/proc` and the live Herdr state); the
 +++ startup.py
 @@ -14,6 +14,10 @@
  import uuid
- 
+
  ROLES = {'dispatcher': 'claude', 'writer': 'claude', 'reviewer': 'codex'}
 +# The Reviewer is on demand: a fresh `codex exec` per round in a plain shell pane
 +# (ddnetmirror-herdr review). It is never resumed, and any saved Reviewer session
 +# (reviewer-session, startup-sessions.json, a saved managed-agent layout) is stale.
 +ON_DEMAND = {'reviewer'}
- 
+
  class RecoveryError(RuntimeError):
      pass
 @@ -134,14 +138,15 @@
@@ -102,7 +102,7 @@ Not tested: `--stop` (its preflight reads `/proc` and the live Herdr state); the
 +        # remember() then writes startup-sessions.json without them.
 +        for role in ON_DEMAND:
 +            self.sessions.pop(role, None)
- 
+
      def remember(self, agents):
          for a in agents:
 @@ -432,6 +440,16 @@
@@ -179,8 +179,8 @@ Not tested: `--stop` (its preflight reads `/proc` and the live Herdr state); the
 -        self.validate_live_reviewer(final)
 -        self.publish_reviewer_identity(final)
          self.remember(final[3])
- 
- 
+
+
 ```
 
 ## Harness
