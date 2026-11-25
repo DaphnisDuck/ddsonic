@@ -56,17 +56,13 @@ Local files and radio need no account at all. cliamp's other sources (Navidrome,
 
 **Release build**
 
-Download `ddsonic-1.1.0-linux-amd64.tar.gz` and `SHA256SUMS` from the [1.1.0 release](https://github.com/DaphnisDuck/ddsonic/releases/tag/v1.1.0); every release is on the [Releases](https://github.com/DaphnisDuck/ddsonic/releases) page, where release candidates are marked "Pre-release". The build is for Linux x86-64 (glibc 2.36 or newer; it needs only ALSA and glibc from your system):
+Download `ddsonic-1.1.0-linux-amd64.tar.gz` and `SHA256SUMS` from the [1.1.0 release](https://github.com/DaphnisDuck/ddsonic/releases/tag/v1.1.0); every release is on the [Releases](https://github.com/DaphnisDuck/ddsonic/releases) page, where release candidates are marked "Pre-release". The Linux build is for x86-64 (glibc 2.36 or newer; it needs only ALSA and glibc from your system); on an Apple Silicon Mac, follow the macOS steps on the [1.1.0 release](https://github.com/DaphnisDuck/ddsonic/releases/tag/v1.1.0) page instead, which install `ddsonic-1.1.0-darwin-arm64.tar.gz` into a folder of your own. On Linux, check the download and install it (with the [GitHub CLI](https://cli.github.com/), `gh attestation verify ddsonic-1.1.0-linux-amd64.tar.gz --repo DaphnisDuck/ddsonic` also checks the build's provenance):
 
 ```sh
 sha256sum -c --ignore-missing SHA256SUMS
 tar -xzf ddsonic-*-linux-amd64.tar.gz
 install -Dm755 ddsonic-*-linux-amd64/ddsonic ~/.local/bin/ddsonic
 ```
-
-With the [GitHub CLI](https://cli.github.com/), `gh attestation verify ddsonic-1.1.0-linux-amd64.tar.gz --repo DaphnisDuck/ddsonic` checks the build's provenance.
-
-On an Apple Silicon Mac, follow the macOS steps on the [1.1.0 release](https://github.com/DaphnisDuck/ddsonic/releases/tag/v1.1.0) page instead; they install `ddsonic-1.1.0-darwin-arm64.tar.gz` into a folder of your own.
 
 The archive also holds a launcher entry and ddsonic's icon in `share/`. To have ddsonic in your application menu, copy them and point the entry at the executable you installed:
 
@@ -117,7 +113,7 @@ ddsonic setup             # Spotify, YouTube Music and your music folder; each i
 ddsonic                   # open the library
 ```
 
-With nothing set up, ddsonic still opens with Local (your `~/Music` folder) and Radio. With Spotify set up and not signed in yet, the library's heading reads `Spotify sign-in required`: open **Spotify**, press `Enter` on **Sign in to Spotify**, and finish in your browser. Your library syncs as soon as you have signed in.
+With nothing set up, ddsonic still opens with Local (your `~/Music` folder) and Radio. With Spotify set up and not signed in yet, the library's heading reads `Spotify sign-in required`: open **Spotify**, press `Enter` on **Sign in to Spotify**, and finish in your browser. Your library syncs as soon as you have signed in. You can also start with files: `ddsonic ~/Music/some-album` loads a folder into the queue.
 
 In the library:
 
@@ -135,9 +131,7 @@ In the library:
 | `Z` | Sleep timer: 15, 30, 45, 60, 90 minutes, off |
 | `q` | Quit, from any screen |
 
-Choosing a track plays its album or playlist from that track. `Tab` shows the queue, where you can shuffle, repeat, reorder, open track info (`i`) and lyrics (`y`), and change the equalizer, visualizer and speed. In the queue, Enter plays the selected track, `/` filters, `r` cycles repeat, `x` removes a track and `X` clears the whole queue; `Ctrl+Z` brings it back until the queue next changes. The sleep timer (`Z`) shows the time left in the header, fades the music out (30 seconds by default) and then pauses; `Space` resumes. In Local > Folders, `f` switches between audio files only and every file. Where you are typing (search, the queue filter), letters such as `q` are text. Every screen lists its keys at the bottom; the complete tables are in [docs/ddsonic/navigation.md](docs/ddsonic/navigation.md).
-
-You can also start with files: `ddsonic ~/Music/some-album` loads a folder into the queue.
+Choosing a track plays its album or playlist from that track. `Tab` shows the queue, where you can shuffle, repeat, reorder, open track info (`i`) and lyrics (`y`), and change the equalizer, visualizer and speed. In the queue, Enter plays the selected track, `/` filters, `r` cycles repeat, `x` removes a track and `X` clears the whole queue; `Ctrl+Z` brings it back until the queue next changes. The sleep timer (`Z`) shows the time left in the header, fades the music out (30 seconds by default; `sleep_fade_seconds` in the `[ddsonic]` table sets it) and then pauses; `Space` resumes. In Local > Folders, `f` switches between audio files only and every file. Where you are typing (search, the queue filter), letters such as `q` are text. Every screen lists its keys at the bottom; the complete tables are in [docs/ddsonic/navigation.md](docs/ddsonic/navigation.md).
 
 ## Configuration
 
@@ -147,8 +141,8 @@ ddsonic reads `~/.config/ddsonic/config.toml`. `ddsonic setup` writes the parts 
 - **YouTube Music:** browser cookies or your own Google OAuth client; see [docs/ddsonic/youtube.md](docs/ddsonic/youtube.md).
 - **Local music:** one folder is indexed: `initial_directory` in `config.toml`, else `$XDG_MUSIC_DIR`, else `~/Music`. Only changed files are reread at each start.
 - **Radio:** add your own stations in `~/.config/ddsonic/radios.toml`; see [Custom Radio Stations](docs/configuration.md#custom-radio-stations).
-- **Lyrics:** looked up on LRCLIB over HTTPS. The NetEase fallback is off by default because it sends the artist and title over unencrypted HTTP; `netease_lyrics = true` turns it on ([lyrics](docs/ddsonic/lyrics.md)).
-- **How often sources sync, artwork, the border, the sleep timer's fade and NetEase lyrics:**
+- **Lyrics:** looked up on LRCLIB over HTTPS. The NetEase fallback is off by default because it sends the artist and title over unencrypted HTTP; `netease_lyrics = true` in the `[ddsonic]` table turns it on. Without it, "No lyrics found" can mean a song's lyrics are only on NetEase; "Lyrics service unavailable" means LRCLIB could not be reached, and `r` in the lyrics view tries again ([lyrics](docs/ddsonic/lyrics.md)).
+- **How often sources sync, artwork and the border:**
 
   ```toml
   [ddsonic]
@@ -157,9 +151,6 @@ ddsonic reads `~/.config/ddsonic/config.toml`. `ddsonic setup` writes the parts 
   youtube_refresh = "2h"
   artwork = true
   border = true
-  # seconds the sleep timer fades out before pausing (0 to 3600; 0 pauses without a fade)
-  sleep_fade_seconds = 30
-  netease_lyrics = false
   ```
 
   A comment needs a line of its own: ddsonic does not read one that follows a value.
@@ -175,7 +166,6 @@ ddsonic reads `~/.config/ddsonic/config.toml`. `ddsonic setup` writes the parts 
 | Album artwork and terminals | [docs/ddsonic/artwork.md](docs/ddsonic/artwork.md) |
 | How ddsonic uses the window | [docs/ddsonic/layout.md](docs/ddsonic/layout.md) |
 | Files and folders, running beside cliamp, moving from ddmus (1.0.0-rc.1 and earlier) | [docs/ddsonic/files.md](docs/ddsonic/files.md) |
-| Lyrics and the NetEase fallback | [docs/ddsonic/lyrics.md](docs/ddsonic/lyrics.md) |
 | 1.1.0: release notes, known limitations, files and checksums, macOS install | [1.1.0 release](https://github.com/DaphnisDuck/ddsonic/releases/tag/v1.1.0) |
 | Release history | [CHANGELOG.md](CHANGELOG.md) |
 | Reporting a security problem | [SECURITY.md](SECURITY.md) |
@@ -197,7 +187,6 @@ Their pages on other providers, plugins, headless mode and keybindings describe 
 - **Some local files won't play:** AAC, ALAC, Opus and WMA need `ffmpeg`.
 - **YouTube Music is empty or won't play:** it needs `yt-dlp`, which you install yourself, and a working sign-in; [docs/ddsonic/youtube.md](docs/ddsonic/youtube.md) covers the usual causes.
 - **Spotify says "rate limited until …":** Spotify has asked ddsonic to wait. Until that time ddsonic sends Spotify's Web API nothing, so syncs, searches and album opens fail at once; a failed sync retries when the wait ends, and the wait is kept across restarts. "quota exceeded (no reset time given)" pauses automatic sync until a sync you start with `r` (or signing in) succeeds. See [docs/ddsonic/catalog.md](docs/ddsonic/catalog.md).
-- **Lyrics say "No lyrics found":** some lyrics exist only on NetEase, which is off by default; see [docs/ddsonic/lyrics.md](docs/ddsonic/lyrics.md). "Lyrics service unavailable" means LRCLIB was busy or could not be reached; `r` in the lyrics view tries again.
 - **The log** is `~/.config/ddsonic/ddsonic.log`; `--log-level debug` says more.
 
 ## Project status
