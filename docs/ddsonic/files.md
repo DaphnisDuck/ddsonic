@@ -81,3 +81,14 @@ Upstream tests hard-code `cliamp` as a path segment under a temporary HOME. ddso
 files=$(grep -rl --include=*_test.go -E '"\.config", "cliamp"|"Music", "cliamp"|share", "cliamp"|\.config/cliamp' . | grep -v upgrade/)
 sed -i -E 's/"\.config", "cliamp"/".config", "ddsonic"/g; s/"Music", "cliamp"/"Music", "ddsonic"/g; s/("share", )"cliamp"/\1"ddsonic"/g; s#\.config/cliamp#.config/ddsonic#g' $files
 ```
+
+## Agent team startup and recovery (ddsonic-dev)
+
+The dev VM's recovery helper (`~/.local/share/ddsonic-dev/startup.py`, not in this repo) was written for a persistent Reviewer. The Reviewer is now on demand: each round is a fresh `codex exec` in a plain shell pane, started by `ddnetmirror-herdr review` (see `CLAUDE.md`, "Review loop"). State and logs for the helper live in `~/.local/state/ddnetmirror-herdr/`; `reviewer-session` no longer identifies a Reviewer.
+
+Read-only verification against a simulated team (stub `herdr`, temporary HOME; the live helper was not run), with the Reviewer pane a plain shell:
+
+- Without a valid `reviewer-session` designation the helper fails closed before starting anything (`reviewer: no valid saved session ID; refusing a fresh replacement.`), so it also does not recover a dead Dispatcher or Writer, and, from reading the code (not simulated), `--stop` refuses because it expects three live agents.
+- With a stale designation it resumes the old Codex Reviewer into the pane. That breaks the on-demand model: the pane then holds an agent and `review` refuses it.
+
+So the unmodified helper must not be used to recover or stop the team while the Reviewer is on demand. Adapting it is a change to a file outside the repo and needs the owner's approval; the adaptation treats the Reviewer as on demand (no resume, no live-reviewer validation, no Reviewer in the stop preflight) and still preserves a live Codex Reviewer if one exists. Until then, recover the Dispatcher and Writer by hand (`DDHERDR_PROFILE=ddsonic ddnetmirror-herdr layout`, then `start <role>`; fresh sessions, never resumed) and leave the Reviewer pane as a shell.
