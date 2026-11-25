@@ -8,7 +8,7 @@
 
 ddsonic is a fork of [cliamp](https://github.com/bjarneo/cliamp), the Winamp-inspired terminal player by Bjarne Øverli. It keeps cliamp's audio engine, equalizer and visualizers, and changes how you find your music.
 
-**ddsonic 1.0.0**, the first stable release, was released on 2026-10-31: [release notes and downloads](https://github.com/DaphnisDuck/ddsonic/releases/tag/v1.0.0). It has a build for Linux x86-64; an AUR package is planned but not in the AUR yet.
+**ddsonic 1.1.0** is the current release, published on 2026-11-19: [release notes and downloads](https://github.com/DaphnisDuck/ddsonic/releases/tag/v1.1.0). It has a build for Linux x86-64 and a provisional build for macOS on Apple Silicon; an AUR package is planned but not in the AUR yet.
 
 ```
 Music
@@ -16,7 +16,7 @@ Music
 ├── Spotify        Albums · Artists · Playlists · Liked Songs
 ├── YouTube Music  Albums from tracks · Artists from tracks · Playlists · Liked Music
 ├── Local          Albums · Artists · Genres · Folders · Playlists
-├── Radio          Favorites · Browse Stations
+├── Radio          Favorites · Browse Stations (cliamp radio · Countries · Genres & Tags)
 └── Search
 ```
 
@@ -28,7 +28,7 @@ Each source has its own entry. All Music lists the albums and artists of Spotify
 - **Instant and offline.** Your libraries are kept in a local catalog and synced in the background, so lists open at once and browsing and search work without a network. ([catalog](docs/ddsonic/catalog.md))
 - **Search as you type.** `/` searches your Spotify and YouTube Music libraries, your local music and your radio stations at once, with operators such as `artist:`, `album:` and `source:local`. Rows at the end of the results search Spotify itself or the radio station directory. ([search](docs/ddsonic/search.md))
 - **Keyboard all the way.** Vim-style movement, consistent navigation keys, and a bar at the bottom that lists exactly the keys that work where you are. ([navigation](docs/ddsonic/navigation.md))
-- **A real player underneath.** Gapless playback, a 10-band equalizer with presets, spectrum visualizers, themes, lyrics, playback speed, shuffle and repeat, all inherited from cliamp.
+- **A real player underneath.** Gapless playback, a 10-band equalizer with presets, spectrum visualizers, themes, lyrics, playback speed, shuffle and repeat, all inherited from cliamp, plus a sleep timer that fades the music out before it pauses.
 - **Fits your desktop.** Media keys and desktop widgets work through MPRIS, and `ddsonic pause`, `ddsonic next`, `ddsonic status` and friends control the running player from a script or a keybinding.
 - **Album artwork** beside a track's details, in Kitty and Ghostty. ([artwork](docs/ddsonic/artwork.md))
 
@@ -37,32 +37,36 @@ Each source has its own entry. All Music lists the albums and artists of Spotify
 | Source | What you get | What it needs |
 | --- | --- | --- |
 | **Spotify** | Saved albums, followed artists, playlists, Liked Songs, and Spotify's own search | A Spotify Premium account |
-| **YouTube Music** | Your playlists and Liked Music, and **Albums from tracks** and **Artists from tracks**: the albums and artists read from those tracks (albums may be incomplete). Saved Library Albums and followed artists are not synchronized ([details](docs/ddsonic/youtube.md#albums-from-tracks-and-artists-from-tracks-enrichment)). Live search of YouTube Music works only when it signs in with browser cookies alone; with an OAuth client configured, YouTube Music has no live search | [yt-dlp](https://github.com/yt-dlp/yt-dlp), and a browser you are signed in to or your own Google OAuth client |
-| **Local files** | Albums, artists and genres from the tags in your music folder, a folder browser, and saved playlists | Nothing; [ffmpeg](https://ffmpeg.org/) for AAC, ALAC, Opus and WMA files |
-| **Internet radio** | Your favorite stations, the [Radio Browser](https://www.radio-browser.info/) directory by country or tag, cliamp's radio channels, and stations you add yourself | Nothing |
+| **YouTube Music** | Your playlists and Liked Music, and **Albums from tracks** and **Artists from tracks**: the albums and artists read from those tracks (albums may be incomplete). Saved Library Albums and followed artists are not synchronized ([details](docs/ddsonic/youtube.md#albums-from-tracks-and-artists-from-tracks-enrichment)). Live search of YouTube Music works only when it signs in with browser cookies alone; with an OAuth client configured, YouTube Music has no live search | [yt-dlp](https://github.com/yt-dlp/yt-dlp), installed by you (ddsonic does not install it; without it, YouTube is off), and a browser you are signed in to or your own Google OAuth client |
+| **Local files** | Albums, artists and genres from the tags in your music folder, a folder browser that lists playable audio files (`f` shows every file), and saved playlists | Nothing; [ffmpeg](https://ffmpeg.org/) for AAC, ALAC, Opus and WMA files |
+| **Internet radio** | Your favorite stations, the [Radio Browser](https://www.radio-browser.info/) directory by country or tag (its 200 most-voted stations), cliamp's radio channels, and stations you add yourself; Favorites, the channels and the directory's lists sort A–Z | Nothing |
 
-Local files and radio need no account at all. cliamp's other sources (Navidrome, Plex, Jellyfin, SoundCloud, podcasts and more) and its Lua plugins are not part of ddsonic 1.0.
+Local files and radio need no account at all. cliamp's other sources (Navidrome, Plex, Jellyfin, SoundCloud, podcasts and more) and its Lua plugins are not part of ddsonic 1.1.
 
 ## Requirements
 
-- **Linux on x86-64** is the supported platform. ddsonic is developed and used on Arch. The project's CI builds and tests it on Ubuntu; the 1.0.0 release itself was built locally in the project's pinned build image, not in CI.
-- **macOS** is provisional. The v1.0.0 release has a provisional build for Apple Silicon (macOS 13 or later), tested by hand on one Apple Silicon Mac. It is not signed with an Apple Developer ID or notarized; its release page says how to install it. Other Macs have no release build. An informational macOS CI job runs on GitHub-hosted Apple Silicon runners; it is not a required check, and some validation-tooling tests that need the Linux development shell are skipped there. Publishing a release stays manual. On macOS, some of the yt-dlp cleanup tests at the `v1.0.0` tag fail. With corrected test files, and production code unchanged, they pass. Whether ddsonic cleans up yt-dlp's processes and temporary files on macOS in real use, where yt-dlp may have copied a browser's cookie database, is unverified. Verifying that remains a prerequisite for macOS support and for making its CI a required check. The provisional build is a narrow exception decided by the owner ([releasing.md](docs/ddsonic/releasing.md)); it is not macOS support.
+- **Linux on x86-64** is the supported platform. ddsonic is developed and used on Arch. The project's CI builds and tests it on Ubuntu; the 1.1.0 release was built by the project's Release workflow in its pinned build image, and was tested on Arch and Debian 13.
+- **macOS** is provisional. The 1.1.0 release has a provisional build for Apple Silicon (macOS 13 or later), built by CI and qualified by hand on one Apple Silicon Mac (macOS 27) with a local file, a radio stream and a public YouTube URL; Spotify, YouTube Music and the other sources were not qualified on macOS. It is ad-hoc signed, not signed with an Apple Developer ID or notarized, and has no build attestation; its [release page](https://github.com/DaphnisDuck/ddsonic/releases/tag/v1.1.0) says how to install it and what was checked. Intel Macs are not supported and have no release build. An informational macOS CI job runs on GitHub-hosted Apple Silicon runners; it is not a required check, and some validation-tooling tests that need the Linux development shell are skipped there. This is not a statement of broad macOS support.
 - **Windows** is not supported.
 - **Sound** through ALSA. On PipeWire or PulseAudio, install `pipewire-alsa` or `pulseaudio-alsa` (`libasound2-plugins` on Debian).
-- **Optional:** `ffmpeg` and `yt-dlp`, as in the table above.
+- **Optional:** `ffmpeg` and `yt-dlp`, as in the table above. ddsonic does not install yt-dlp; when it is missing, ddsonic says how to install it and starts with YouTube off.
 - **Terminal:** any modern terminal. Artwork needs Kitty or Ghostty; everywhere else, and inside tmux, ddsonic works the same without it.
 
 ## Install
 
 **Release build**
 
-Download `ddsonic-1.0.0-linux-amd64.tar.gz` and `SHA256SUMS` from the [1.0.0 release](https://github.com/DaphnisDuck/ddsonic/releases/tag/v1.0.0); every release is on the [Releases](https://github.com/DaphnisDuck/ddsonic/releases) page, where release candidates are marked "Pre-release". The build is for Linux x86-64 (glibc 2.36 or newer; it needs only ALSA and glibc from your system):
+Download `ddsonic-1.1.0-linux-amd64.tar.gz` and `SHA256SUMS` from the [1.1.0 release](https://github.com/DaphnisDuck/ddsonic/releases/tag/v1.1.0); every release is on the [Releases](https://github.com/DaphnisDuck/ddsonic/releases) page, where release candidates are marked "Pre-release". The build is for Linux x86-64 (glibc 2.36 or newer; it needs only ALSA and glibc from your system):
 
 ```sh
 sha256sum -c --ignore-missing SHA256SUMS
 tar -xzf ddsonic-*-linux-amd64.tar.gz
 install -Dm755 ddsonic-*-linux-amd64/ddsonic ~/.local/bin/ddsonic
 ```
+
+With the [GitHub CLI](https://cli.github.com/), `gh attestation verify ddsonic-1.1.0-linux-amd64.tar.gz --repo DaphnisDuck/ddsonic` checks the build's provenance.
+
+On an Apple Silicon Mac, follow the macOS steps on the [1.1.0 release](https://github.com/DaphnisDuck/ddsonic/releases/tag/v1.1.0) page instead; they install `ddsonic-1.1.0-darwin-arm64.tar.gz` into a folder of your own.
 
 The archive also holds a launcher entry and ddsonic's icon in `share/`. To have ddsonic in your application menu, copy them and point the entry at the executable you installed:
 
@@ -128,9 +132,10 @@ In the library:
 | `p` `n` | Previous, next track |
 | `Tab` | Switch between the library and the queue |
 | `r` | Sync the source you're browsing |
+| `Z` | Sleep timer: 15, 30, 45, 60, 90 minutes, off |
 | `q` | Quit, from any screen |
 
-Choosing a track plays its album or playlist from that track. `Tab` shows the queue, where you can shuffle, repeat, reorder, open track info (`i`) and lyrics (`y`), and change the equalizer, visualizer and speed. In the queue, Enter plays the selected track, `/` filters, and `r` cycles repeat. Where you are typing (search, the queue filter), letters such as `q` are text. Every screen lists its keys at the bottom; the complete tables are in [docs/ddsonic/navigation.md](docs/ddsonic/navigation.md).
+Choosing a track plays its album or playlist from that track. `Tab` shows the queue, where you can shuffle, repeat, reorder, open track info (`i`) and lyrics (`y`), and change the equalizer, visualizer and speed. In the queue, Enter plays the selected track, `/` filters, `r` cycles repeat, `x` removes a track and `X` clears the whole queue; `Ctrl+Z` brings it back until the queue next changes. The sleep timer (`Z`) shows the time left in the header, fades the music out (30 seconds by default) and then pauses; `Space` resumes. In Local > Folders, `f` switches between audio files only and every file. Where you are typing (search, the queue filter), letters such as `q` are text. Every screen lists its keys at the bottom; the complete tables are in [docs/ddsonic/navigation.md](docs/ddsonic/navigation.md).
 
 You can also start with files: `ddsonic ~/Music/some-album` loads a folder into the queue.
 
@@ -142,7 +147,8 @@ ddsonic reads `~/.config/ddsonic/config.toml`. `ddsonic setup` writes the parts 
 - **YouTube Music:** browser cookies or your own Google OAuth client; see [docs/ddsonic/youtube.md](docs/ddsonic/youtube.md).
 - **Local music:** one folder is indexed: `initial_directory` in `config.toml`, else `$XDG_MUSIC_DIR`, else `~/Music`. Only changed files are reread at each start.
 - **Radio:** add your own stations in `~/.config/ddsonic/radios.toml`; see [Custom Radio Stations](docs/configuration.md#custom-radio-stations).
-- **How often sources sync, artwork and the border:**
+- **Lyrics:** looked up on LRCLIB over HTTPS. The NetEase fallback is off by default because it sends the artist and title over unencrypted HTTP; `netease_lyrics = true` turns it on ([lyrics](docs/ddsonic/lyrics.md)).
+- **How often sources sync, artwork, the border, the sleep timer's fade and NetEase lyrics:**
 
   ```toml
   [ddsonic]
@@ -151,6 +157,9 @@ ddsonic reads `~/.config/ddsonic/config.toml`. `ddsonic setup` writes the parts 
   youtube_refresh = "2h"
   artwork = true
   border = true
+  # seconds the sleep timer fades out before pausing (0 to 3600; 0 pauses without a fade)
+  sleep_fade_seconds = 30
+  netease_lyrics = false
   ```
 
   A comment needs a line of its own: ddsonic does not read one that follows a value.
@@ -166,7 +175,8 @@ ddsonic reads `~/.config/ddsonic/config.toml`. `ddsonic setup` writes the parts 
 | Album artwork and terminals | [docs/ddsonic/artwork.md](docs/ddsonic/artwork.md) |
 | How ddsonic uses the window | [docs/ddsonic/layout.md](docs/ddsonic/layout.md) |
 | Files and folders, running beside cliamp, moving from ddmus (1.0.0-rc.1 and earlier) | [docs/ddsonic/files.md](docs/ddsonic/files.md) |
-| 1.0.0: release notes, known limitations, files and checksums | [1.0.0 release](https://github.com/DaphnisDuck/ddsonic/releases/tag/v1.0.0) |
+| Lyrics and the NetEase fallback | [docs/ddsonic/lyrics.md](docs/ddsonic/lyrics.md) |
+| 1.1.0: release notes, known limitations, files and checksums, macOS install | [1.1.0 release](https://github.com/DaphnisDuck/ddsonic/releases/tag/v1.1.0) |
 | Release history | [CHANGELOG.md](CHANGELOG.md) |
 | Reporting a security problem | [SECURITY.md](SECURITY.md) |
 
@@ -185,13 +195,14 @@ Their pages on other providers, plugins, headless mode and keybindings describe 
 
 - **"audio output unavailable":** ALSA cannot reach your sound server. Install `pipewire-alsa` or `pulseaudio-alsa`.
 - **Some local files won't play:** AAC, ALAC, Opus and WMA need `ffmpeg`.
-- **YouTube Music is empty or won't play:** it needs `yt-dlp` and a working sign-in; [docs/ddsonic/youtube.md](docs/ddsonic/youtube.md) covers the usual causes.
-- **Spotify says "rate limited until …":** Spotify has blocked the client for a while; ddsonic waits it out and retries by itself. See [docs/ddsonic/catalog.md](docs/ddsonic/catalog.md).
+- **YouTube Music is empty or won't play:** it needs `yt-dlp`, which you install yourself, and a working sign-in; [docs/ddsonic/youtube.md](docs/ddsonic/youtube.md) covers the usual causes.
+- **Spotify says "rate limited until …":** Spotify has asked ddsonic to wait. Until that time ddsonic sends Spotify's Web API nothing, so syncs, searches and album opens fail at once; a failed sync retries when the wait ends, and the wait is kept across restarts. "quota exceeded (no reset time given)" pauses automatic sync until a sync you start with `r` (or signing in) succeeds. See [docs/ddsonic/catalog.md](docs/ddsonic/catalog.md).
+- **Lyrics say "No lyrics found":** some lyrics exist only on NetEase, which is off by default; see [docs/ddsonic/lyrics.md](docs/ddsonic/lyrics.md). "Lyrics service unavailable" means LRCLIB was busy or could not be reached; `r` in the lyrics view tries again.
 - **The log** is `~/.config/ddsonic/ddsonic.log`; `--log-level debug` says more.
 
 ## Project status
 
-ddsonic 1.0.0, its first stable release, was released on 2026-10-31; its [release page](https://github.com/DaphnisDuck/ddsonic/releases/tag/v1.0.0) has the notes, the known limitations and the files. Release candidates and releases are listed on the [Releases](https://github.com/DaphnisDuck/ddsonic/releases) page, and [CHANGELOG.md](CHANGELOG.md) says what each changes. The project's website is [ddsonic.app](https://ddsonic.app); this repository holds the code, the issues and the releases. From 1.0 on, a newer 1.x opens the config and catalog of an older one; going back to an older version is not supported. The catalog (`~/.local/share/ddsonic/library.db`) can always be deleted and rebuilt by a sync; your sign-ins and settings live in `~/.config/ddsonic`.
+ddsonic 1.1.0, the current release, was published on 2026-11-19; its [release page](https://github.com/DaphnisDuck/ddsonic/releases/tag/v1.1.0) has the notes, the known limitations (among them Spotify memory use in long sessions, and a brief stutter on pause and resume) and the files. The first stable release, 1.0.0, was released on 2026-10-31. Release candidates and releases are listed on the [Releases](https://github.com/DaphnisDuck/ddsonic/releases) page, and [CHANGELOG.md](CHANGELOG.md) says what each changes. The project's website is [ddsonic.app](https://ddsonic.app); this repository holds the code, the issues and the releases. From 1.0 on, a newer 1.x opens the config and catalog of an older one; going back to an older version is not supported. The catalog (`~/.local/share/ddsonic/library.db`) can always be deleted and rebuilt by a sync; your sign-ins and settings live in `~/.config/ddsonic`.
 
 ddsonic is maintained by one person. Bug reports are welcome in [Issues](https://github.com/DaphnisDuck/ddsonic/issues), which is also where planned and proposed work is tracked.
 
@@ -207,9 +218,9 @@ Both build on [Bubble Tea](https://github.com/charmbracelet/bubbletea), [Lip Glo
 
 ddsonic's source code is MIT-licensed, the same as cliamp: see [LICENSE](LICENSE). The original copyright belongs to Bjarne Øverli.
 
-The `ddsonic` executable is a different matter. It links [go-librespot](https://github.com/devgianlu/go-librespot), which is GPL-3.0, so the executable as a whole is distributed under **GPL-3.0** ([LICENSE-GPL-3.0](LICENSE-GPL-3.0)). The 1.0.0 release carries the complete corresponding source (`ddsonic-1.0.0-source.tar.gz`) and a `THIRD_PARTY_NOTICES` file listing everything linked in, with its license; its provisional macOS build adds the codec sources and build scripts it used (`ddsonic-1.0.0-darwin-arm64-build-sources.tar.gz`). [docs/ddsonic/releasing.md](docs/ddsonic/releasing.md) describes the release build.
+The `ddsonic` executable is a different matter. It links [go-librespot](https://github.com/devgianlu/go-librespot), which is GPL-3.0, so the executable as a whole is distributed under **GPL-3.0** ([LICENSE-GPL-3.0](LICENSE-GPL-3.0)). Each release carries the complete corresponding source (for 1.1.0, `ddsonic-1.1.0-source.tar.gz`) and a `THIRD_PARTY_NOTICES` file listing everything linked in, with its license; a provisional macOS build adds the codec sources and build scripts it used (`ddsonic-1.1.0-darwin-arm64-build-sources.tar.gz`). [docs/ddsonic/releasing.md](docs/ddsonic/releasing.md) describes the release build.
 
-The only official binaries are those published on this repository's [Releases](https://github.com/DaphnisDuck/ddsonic/releases) page, and the AUR package `ddsonic-bin` built from them once it exists. `v1.0.0` has no build attestation: it was built locally, not by the release workflow, and its release page says which source it was built from. If you distribute a modified ddsonic, please give it another name.
+The only official binaries are those published on this repository's [Releases](https://github.com/DaphnisDuck/ddsonic/releases) page, and the AUR package `ddsonic-bin` built from them once it exists. The Linux files of `v1.1.0` have a build attestation from the release workflow. Its macOS files have none and cannot be reproduced from the tag alone. `v1.0.0` has no build attestation: it was built locally, not by the release workflow, and its release page says which source it was built from. If you distribute a modified ddsonic, please give it another name.
 
 **Name and artwork.** The software licenses above apply to ddsonic's code, not to the ddsonic name, logo, or icon artwork. The branding assets may be redistributed with ddsonic and with packages or distributions of ddsonic, including technical transformations such as resizing, format conversion, and optimization required for packaging or presentation. This permission does not grant permission to use the ddsonic name, logo, or icons to identify a modified or unrelated project. The script that assembles the artwork, [`assets/branding/source/build.py`](assets/branding/source/build.py), is code and is MIT-licensed like the rest.
 
