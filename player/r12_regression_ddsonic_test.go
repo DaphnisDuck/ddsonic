@@ -14,9 +14,9 @@ import (
 // #83 (R-12) regression tests, on the output model of
 // r12_output_ddsonic_test.go. Each case runs on both device shapes (a Linux
 // period is half the driver buffer, a macOS one a quarter), with the device
-// still taking 0-2 periods after Suspend is called, from every point of the
-// player buffer's refill cycle, and for two sources: a local WAV file, and
-// the same audio through a registered StreamerFactory, the path Spotify's
+// still taking 0-2 periods after Suspend is called and 0 or 1 inside Resume,
+// from every point of the player buffer's refill cycle, and for two sources:
+// a local WAV file, and the same audio through a registered StreamerFactory, the path Spotify's
 // stream takes into the player (pipeline.go buildPipeline). The second is
 // not Spotify's prefetch adapter and not real Spotify audio.
 //
@@ -32,26 +32,30 @@ type r12Case struct {
 	before     int // driver writes between the start and the action
 	source     string
 	lateRefill bool
+	resumeLag  int
 }
 
 func r12Cases() []r12Case {
 	var cases []r12Case
-	for _, refill := range []string{"eager", "late"} {
-		for _, source := range []string{"local", "factory"} {
-			for _, dev := range []struct {
-				name    string
-				periods int
-			}{{"linux", 2}, {"macos", 4}} {
-				for lag := range 3 {
-					for before := 6; before <= 6+dev.periods; before++ {
-						cases = append(cases, r12Case{
-							name:       fmt.Sprintf("%s/%s/%s/lag%d/before%d", refill, source, dev.name, lag, before),
-							periods:    dev.periods,
-							suspendLag: lag,
-							before:     before,
-							source:     source,
-							lateRefill: refill == "late",
-						})
+	for resume := range 2 {
+		for _, refill := range []string{"eager", "late"} {
+			for _, source := range []string{"local", "factory"} {
+				for _, dev := range []struct {
+					name    string
+					periods int
+				}{{"linux", 2}, {"macos", 4}} {
+					for lag := range 3 {
+						for before := 6; before <= 6+dev.periods; before++ {
+							cases = append(cases, r12Case{
+								name:       fmt.Sprintf("resume%d/%s/%s/%s/lag%d/before%d", resume, refill, source, dev.name, lag, before),
+								periods:    dev.periods,
+								suspendLag: lag,
+								before:     before,
+								source:     source,
+								lateRefill: refill == "late",
+								resumeLag:  resume,
+							})
+						}
 					}
 				}
 			}
@@ -92,6 +96,7 @@ func TestR12PauseResumeIsSeamless(t *testing.T) {
 	for _, c := range r12Cases() {
 		t.Run(c.name, func(t *testing.T) {
 			p, m := newModelPlayer(t, r12BufferMs, c.periods, c.suspendLag, c.lateRefill)
+			m.resumeLag = c.resumeLag
 			a, _ := r12Tracks(t, p, c)
 			if err := p.PlayAt(a, 0, 0); err != nil {
 				t.Fatal(err)
@@ -132,6 +137,7 @@ func TestR12StopDoesNotReplayTheStoppedTrack(t *testing.T) {
 		for _, wait := range []string{"drained", "at-once"} {
 			t.Run(c.name+"/"+wait, func(t *testing.T) {
 				p, m := newModelPlayer(t, r12BufferMs, c.periods, c.suspendLag, c.lateRefill)
+				m.resumeLag = c.resumeLag
 				a, b := r12Tracks(t, p, c)
 				if err := p.PlayAt(a, 0, 0); err != nil {
 					t.Fatal(err)
@@ -241,6 +247,7 @@ func TestR12SwitchWhilePausedPlaysNoOldAudio(t *testing.T) {
 	for _, c := range r12Cases() {
 		t.Run(c.name, func(t *testing.T) {
 			p, m := newModelPlayer(t, r12BufferMs, c.periods, c.suspendLag, c.lateRefill)
+			m.resumeLag = c.resumeLag
 			a, b := r12Tracks(t, p, c)
 			if err := p.PlayAt(a, 0, 0); err != nil {
 				t.Fatal(err)
@@ -267,6 +274,7 @@ func TestR12SwitchAfterPauseAndStopPlaysNoOldAudio(t *testing.T) {
 	for _, c := range r12Cases() {
 		t.Run(c.name, func(t *testing.T) {
 			p, m := newModelPlayer(t, r12BufferMs, c.periods, c.suspendLag, c.lateRefill)
+			m.resumeLag = c.resumeLag
 			a, b := r12Tracks(t, p, c)
 			if err := p.PlayAt(a, 0, 0); err != nil {
 				t.Fatal(err)
@@ -295,6 +303,7 @@ func TestR12SeekWhilePausedResumesAtTheNewPosition(t *testing.T) {
 	for _, c := range r12Cases() {
 		t.Run(c.name, func(t *testing.T) {
 			p, m := newModelPlayer(t, r12BufferMs, c.periods, c.suspendLag, c.lateRefill)
+			m.resumeLag = c.resumeLag
 			a, _ := r12Tracks(t, p, c)
 			if err := p.PlayAt(a, 0, 0); err != nil {
 				t.Fatal(err)

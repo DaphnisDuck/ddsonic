@@ -47,6 +47,10 @@ import (
 //     loop pauses the queue on its next turn ($OTO/driver_darwin.go:163-198).
 //     suspendLag is how many periods the device still takes after Suspend is
 //     called; it is a parameter, not a measured value.
+//   - Resume lets the driver take periods at once, and the mux refills from
+//     the chain, before Resume's caller gets the speaker lock: a driver whose
+//     ring emptied during a pause writes as soon as it may. resumeLag is how
+//     many periods it takes inside Resume, also a parameter.
 //   - The mux is its own goroutine ($OTO/internal/mux/mux.go:68, :90-119),
 //     signalled by each driver read (:155); whether it refills before or
 //     after a pause or Stop changes the chain, and whether before Suspend,
@@ -71,6 +75,7 @@ type otoModel struct {
 	suspendLag int                // periods taken after Suspend is called
 	suspendErr error              // a device that cannot be suspended
 	lateRefill bool               // the mux refills at the next event, not at once
+	resumeLag  int                // periods the device takes inside Resume, before its caller goes on
 
 	pending bool // a refill the mux has not done yet (lateRefill)
 
@@ -143,6 +148,7 @@ func (m *otoModel) Suspend() error {
 func (m *otoModel) Resume() error {
 	m.runPending()
 	m.suspended = false
+	m.steps(m.resumeLag)
 	return nil
 }
 

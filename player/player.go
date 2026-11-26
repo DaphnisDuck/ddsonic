@@ -303,7 +303,18 @@ func (p *Player) playPipelineForGeneration(tp *trackPipeline, generation uint64)
 	}
 	// The suspended speaker still holds the samples of a paused track. Only
 	// a plain resume of that track may play them.
-	p.resumeSpeaker(p.paused.Load())
+	paused := p.paused.Load() // ddsonic: read once (#83)
+	if paused {
+		// ddsonic: the chain still holds the paused track (togglePause),
+		// and the device may read it between the resume and the swap
+		// below, which unpauses (#83).
+		speaker.Lock()
+		if p.ctrl != nil {
+			p.ctrl.Paused = true
+		}
+		speaker.Unlock()
+	}
+	p.resumeSpeaker(paused)
 
 	// Collect old pipelines to close after releasing locks.
 	var oldCurrent, oldNext *trackPipeline

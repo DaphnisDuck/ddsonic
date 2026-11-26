@@ -108,11 +108,13 @@ func (p *Player) markQueuedStale() bool {
 
 // dropSilently is speaker.Drop with the chain out of the mixer. Drop refills
 // the device's queue from the mixer at once, and it may only read silence:
-// the chain keeps running while paused (togglePause), so on a switch while
-// paused it would still read the paused track. Taking the chain out leaves
-// ctrl.Paused to its owners. Call it under suspendMu, without the speaker
-// lock, with the device suspended: oto's queue is then full after the drop,
-// and nothing reads the chain until the device resumes.
+// the chain keeps running while paused (togglePause), and a resume after a
+// seek while paused has already unpaused it. A start while paused also
+// silences the chain itself (playPipeline), as the device may read it after
+// the resume. Taking the chain out leaves ctrl.Paused to its owners. Call
+// it under suspendMu, without the speaker lock, with the device suspended:
+// oto's queue is then full after the drop, and nothing reads the chain until
+// the device resumes.
 func (p *Player) dropSilently() {
 	p.mu.Lock()
 	ctrl := p.ctrl
