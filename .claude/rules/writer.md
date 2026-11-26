@@ -19,13 +19,7 @@ Ask only at coherent slice boundaries, not after every patch. Leave the working 
 
 ## Triage
 
-Every finding gets exactly one disposition:
-- **fix**, with a regression test confirmed to fail without the fix;
-- **dispute**, with technical reasoning and evidence;
-- **defer**, for LOW/NIT or out-of-scope items;
-- **owner**, when it needs a product decision.
-
-Dispute on the merits, never just to disagree. The verify round's prompt carries the original findings and a response covering every one.
+Give every finding exactly one disposition, meeting its criteria in `CLAUDE.md` (the loop). Dispute on the merits, never just to disagree. The verify round's prompt carries the original findings and a response covering every one.
 
 ## Staging a dev candidate
 
