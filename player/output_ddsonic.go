@@ -60,7 +60,7 @@ func (p *Player) togglePause() {
 
 // suspendAfterDrain suspends the device once it has played out what it
 // holds, unless a track starts or another suspend is asked for first. Stop
-// calls it with the chain silenced.
+// calls it with the chain silenced, under lifecycleMu.
 func (p *Player) suspendAfterDrain() {
 	gen := p.drainGen.Add(1)
 	if p.markQueuedStale() {

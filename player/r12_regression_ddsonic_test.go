@@ -342,3 +342,59 @@ func TestR12PlainPauseResumeDoesNotDrop(t *testing.T) {
 		t.Errorf("%d drops, want none:%s", m.drops, describe(m))
 	}
 }
+
+// closeHook runs onClose once when its stream closes.
+type closeHook struct {
+	beep.StreamSeekCloser
+	onClose func()
+}
+
+func (c *closeHook) Close() error {
+	if f := c.onClose; f != nil {
+		c.onClose = nil
+		f()
+	}
+	return c.StreamSeekCloser.Close()
+}
+
+// TestR12StartDuringStopAfterPauseDropsOldAudio: pause, then Stop, with the
+// next track starting while Stop closes the paused one, after Stop has
+// released lifecycleMu. The start must still drop the paused track's
+// read-ahead frames.
+func TestR12StartDuringStopAfterPauseDropsOldAudio(t *testing.T) {
+	p, m := newModelPlayer(t, r12BufferMs, 2, 1, false)
+	a := writeFixture(t, "a.wav", 1, 3)
+	b := writeFixture(t, "b.wav", -1, 3)
+	var at int
+	var startErr error
+	p.RegisterStreamerFactory("r12:", func(uri string) (beep.StreamSeekCloser, beep.Format, time.Duration, error) {
+		f, err := os.Open(a)
+		if err != nil {
+			return nil, beep.Format{}, 0, err
+		}
+		s, format, err := wav.Decode(f)
+		if err != nil {
+			return nil, beep.Format{}, 0, err
+		}
+		return &closeHook{StreamSeekCloser: s, onClose: func() {
+			m.mark("playB")
+			at = len(m.out)
+			startErr = p.PlayAt(b, 0, 0)
+		}}, format, 0, nil
+	})
+	if err := p.PlayAt("r12:a", 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	m.steps(6)
+	p.TogglePause()
+	m.steps(4)
+	p.Stop()
+	if startErr != nil {
+		t.Fatal(startErr)
+	}
+	if at == 0 {
+		t.Fatal("track A was not closed by Stop")
+	}
+	m.steps(8)
+	onlyFromStart(t, m, at, 'B', 1)
+}

@@ -519,14 +519,15 @@ func (p *Player) Stop() {
 	p.paused.Store(false)
 	p.mu.Unlock()
 	speaker.Unlock()
+	// ddsonic: not with the track's last frames in the device; under
+	// lifecycleMu, so a start cannot resume before a paused stop is marked (#83)
+	p.suspendAfterDrain()
 	p.lifecycleMu.Unlock()
 
 	// Now safe to close decoder resources: speaker cannot be reading them.
 
 	p.stopStreamMetadata()
 	closePipelines(oldCurrent, oldNext)
-
-	p.suspendAfterDrain() // ddsonic: not with the track's last frames in the device (#83)
 }
 
 // Seek moves the playback position by the given duration (positive or negative).
