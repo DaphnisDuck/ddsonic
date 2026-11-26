@@ -24,24 +24,21 @@ import (
 // A file that is not TOML is a *SyntaxError.
 func decodeConfig(path, text string) (map[string]any, toml.MetaData, error) {
 	data, md, err := decodeTOML(text)
-	if err == nil {
-		return data, md, nil
-	}
 	var parse toml.ParseError
-	if !errors.As(err, &parse) {
-		// Not a place in the file (the parser gives none): still a refusal.
-		return nil, md, &SyntaxError{Path: path, Line: 1, Column: 1, Message: err.Error(), cause: err}
-	}
 	// The one exception: the parser stopped at the device line older
 	// versions wrote. With that line quoted, the file is parsed again, and
 	// whatever else is wrong with it is reported as it stands.
-	if quoted, ok := quoteLegacyAudioDevice(text, parse.Position.Line); ok {
-		if data, md, err = decodeTOML(quoted); err == nil {
-			return data, md, nil
+	if errors.As(err, &parse) {
+		if quoted, ok := quoteLegacyAudioDevice(text, parse.Position.Line); ok {
+			data, md, err = decodeTOML(quoted)
 		}
-		if !errors.As(err, &parse) {
-			return nil, md, &SyntaxError{Path: path, Line: 1, Column: 1, Message: err.Error(), cause: err}
-		}
+	}
+	if err == nil {
+		return data, md, nil
+	}
+	if !errors.As(err, &parse) {
+		// Not a place in the file (the parser gives none): still a refusal.
+		return nil, md, &SyntaxError{Path: path, Line: 1, Column: 1, Message: err.Error(), cause: err}
 	}
 	return nil, md, &SyntaxError{Path: path, Line: parse.Position.Line, Column: parse.Position.Col, Message: parse.Message, cause: err}
 }
@@ -92,17 +89,24 @@ func configEntries(data map[string]any, md toml.MetaData) []configEntry {
 	return out
 }
 
-// sectionName is a table's name as Load's switch matches it: its parts in
-// lower case joined with dots, a part that is empty or holds a dot keeping
-// its quotes, so that [plugins.""] or ["plugins.x"] is no other table's
-// name (the top-level [plugins] allowlist included).
+// sectionName is a table's name as Load's switch matches it: keyName in
+// lower case.
 func sectionName(key toml.Key) string {
+	return strings.ToLower(keyName(key))
+}
+
+// keyName joins a key's parts with dots, a part that is empty or holds a dot
+// keeping its quotes, so that [plugins.""] or ["plugins.x"] is no other
+// table's name (the top-level [plugins] allowlist included). Not
+// toml.Key.String: it would also quote a part with a space, renaming such a
+// section for Load.
+func keyName(key toml.Key) string {
 	parts := make([]string, len(key))
 	for i, k := range key {
 		if k == "" || strings.Contains(k, ".") {
 			k = strconv.Quote(k)
 		}
-		parts[i] = strings.ToLower(k)
+		parts[i] = k
 	}
 	return strings.Join(parts, ".")
 }
@@ -146,12 +150,6 @@ func renderValue(v any) string {
 	case time.Time:
 		return v.Format(time.RFC3339Nano)
 	case []any:
-		parts := make([]string, len(v))
-		for i, e := range v {
-			parts[i] = renderValue(e)
-		}
-		return "[" + strings.Join(parts, ", ") + "]"
-	case []map[string]any:
 		parts := make([]string, len(v))
 		for i, e := range v {
 			parts[i] = renderValue(e)
@@ -244,11 +242,11 @@ func parsedStatement(lines []string, i, j int, md toml.MetaData) Statement {
 	if typ := md.Type(first...); strings.HasPrefix(strings.TrimSpace(lines[i]), "[") && (typ == "Hash" || typ == "ArrayHash") {
 		s.Header = true
 		if typ == "Hash" {
-			s.Name = strings.Join(first, ".")
+			s.Name = keyName(first)
 		}
 		return s
 	}
-	s.Key = strings.Join(first, ".")
+	s.Key = keyName(first)
 	return s
 }
 

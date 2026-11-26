@@ -893,32 +893,36 @@ func saveSectionValue(section, key, value string) error {
 	lines := strings.Split(string(data), "\n")
 	// A broken file may repeat the section: the key is replaced in any of
 	// them, and added to the first.
-	inSection, firstDone := false, false
-	insertAt := -1
-	replaced := false
-	for _, s := range Statements(lines) {
+	stmts := Statements(lines)
+	inSection, replaced := false, false
+	for _, s := range stmts {
 		if s.Header {
-			firstDone = firstDone || insertAt >= 0
 			inSection = strings.EqualFold(s.Name, section)
-		}
-		if !inSection {
-			continue
-		}
-		if !s.Header && s.Key == key {
+		} else if inSection && s.Key == key {
 			lines = ReplaceStatement(lines, s, line)
 			replaced = true
 			break
 		}
-		if !firstDone {
-			insertAt = s.End
-		}
 	}
-	switch {
-	case replaced:
-	case insertAt >= 0:
-		lines = slices.Insert(lines, insertAt, line)
-	default:
-		lines = append(lines, "["+section+"]", line)
+	if !replaced {
+		inSection = false
+		insertAt := -1
+		for _, s := range stmts {
+			if s.Header {
+				if insertAt >= 0 {
+					break // the first section ended
+				}
+				inSection = strings.EqualFold(s.Name, section)
+			}
+			if inSection {
+				insertAt = s.End
+			}
+		}
+		if insertAt >= 0 {
+			lines = slices.Insert(lines, insertAt, line)
+		} else {
+			lines = append(lines, "["+section+"]", line)
+		}
 	}
 
 	if err := fileutil.WriteFileAtomic(path, []byte(strings.Join(lines, "\n")), 0o600); err != nil {
