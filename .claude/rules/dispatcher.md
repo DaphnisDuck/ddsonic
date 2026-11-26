@@ -16,12 +16,12 @@ Never end a turn inside an active review cycle without a tracked wait pending, e
 ## Starting a review round
 
 - **Reviewer.** Check that the Reviewer pane holds no agent (end a finished Reviewer with `/exit`), run `ddsonic-herdr start Reviewer` (the dd-devops README is the reference; the `ddsonic` profile sets the project, workspace and `default` Herdr session), and relay the Writer's prompt file with herdr (`herdr_relay`, or `herdr_agent_send` naming the file). The Reviewer is a managed agent: wait for it as above.
-- **Supplemental Codex round**, only with the owner's authorization for it: `ddsonic-herdr review --repo DIR --prompt-file FILE [--timeout SECS]`, started with `run_in_background`; the helper's `--timeout` bounds the wait. The helper reports a round as success only with a new session ID and the profile's header. The profile blocks local sockets, so socket-dependent Go tests (`ipc/`, `internal/...`, httptest servers) rest on Writer or GitHub CI evidence in a Codex round (an owner-accepted limitation).
-- **Verify round.** A fresh round whose prompt carries the original findings and the Writer's response to every one. Repeat only while a BLOCKER/HIGH is open or a fix caused a regression.
+- **Supplemental Codex round**, only with the owner's authorization for it: `ddsonic-herdr review --repo DIR --prompt-file FILE [--timeout SECS]`, started with `run_in_background`; the helper's `--timeout` bounds the wait. The helper reports a round as success only with a new session ID and the profile's header.
+- **Verify round.** A fresh round whose prompt carries the original findings and the Writer's response to every one (when to repeat: `CLAUDE.md`).
 
 ## Reporting to the owner
 
-Stop and report: the outcome, what was fixed, every dispute with both positions, deferred items, unresolved MEDIUMs, and the checks run. Escalate immediately, without further rounds, on product decisions, material architecture disagreement, scope growth, or anything destructive. A review that did not finish is reported as such. Before reporting a round or a task closed, check that its findings, blockers, decisions and outcome are on the issue (Recording, in `CLAUDE.md`) and post what is missing.
+Stop and report: the outcome, what was fixed, every dispute with both positions, deferred items, unresolved MEDIUMs, and the checks run. A review that did not finish is reported as such. Before reporting a round or a task closed, check that its findings, blockers, decisions and outcome are on the issue (Recording, in `CLAUDE.md`) and post what is missing.
 
 A dev candidate's SHA goes to the owner for `ddsonic-fetch` only after the Writer's staging has succeeded.
 

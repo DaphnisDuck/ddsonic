@@ -1,6 +1,6 @@
 # startup.py: on-demand Reviewer adaptation (proposed, not applied)
 
-Refs #189. `~/.local/share/ddsonic-dev/startup.py` (the dev VM's recovery helper, outside this repo) assumes a persistent Reviewer. With the Reviewer on demand (`ddsonic-herdr review`, see `CLAUDE.md`, "Review loop"), the unmodified helper fails or resumes a retired Reviewer; this page records the verified behaviour and a tested patch. The patch is a reviewable artifact only: nothing here changes the live file, and applying it needs the owner's go-ahead.
+Refs #189. `~/.local/share/ddsonic-dev/startup.py` (the dev VM's recovery helper, outside this repo) assumes a persistent Reviewer. With the Reviewer on demand (`ddsonic-herdr review`, see `.claude/rules/dispatcher.md`), the unmodified helper fails or resumes a retired Reviewer; this page records the verified behaviour and a tested patch. The patch is a reviewable artifact only: nothing here changes the live file, and applying it needs the owner's go-ahead.
 
 ## What the patch does
 
