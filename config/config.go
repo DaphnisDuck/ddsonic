@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -809,41 +810,26 @@ func Save(key, value string) error {
 		return fileutil.WriteFileAtomic(path, []byte(line+"\n"), 0o600)
 	}
 
-	// Scan existing lines and replace the matching key in-place,
-	// but only in the top-level scope (before any [section] header).
+	// Replace the matching key in the top-level scope (before any
+	// [section] header), or insert it before the first header to keep
+	// top-level keys together. ddsonic: statements, not lines, so that a
+	// value over several lines is replaced whole (#75).
 	lines := strings.Split(string(data), "\n")
+	insertAt := len(lines)
 	found := false
-	for i, l := range lines {
-		trimmed := strings.TrimSpace(l)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		// Stop searching once we hit a section header — the key
-		// belongs in the top-level scope only.
-		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+	for _, s := range Statements(lines) {
+		if s.Header {
+			insertAt = s.Start
 			break
 		}
-		k, _, ok := strings.Cut(trimmed, "=")
-		if ok && strings.TrimSpace(k) == key {
-			lines[i] = line
+		if s.Key == key {
+			lines = ReplaceStatement(lines, s, line)
 			found = true
 			break
 		}
 	}
 	if !found {
-		// Insert before the first section header to keep top-level keys together.
-		inserted := false
-		for i, l := range lines {
-			trimmed := strings.TrimSpace(l)
-			if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
-				lines = append(lines[:i], append([]string{line}, lines[i:]...)...)
-				inserted = true
-				break
-			}
-		}
-		if !inserted {
-			lines = append(lines, line)
-		}
+		lines = slices.Insert(lines, insertAt, line)
 	}
 
 	return fileutil.WriteFileAtomic(path, []byte(strings.Join(lines, "\n")), 0o600)
@@ -901,49 +887,37 @@ func saveSectionValue(section, key, value string) error {
 		return nil
 	}
 
+	// Replace the key inside the requested section, or add it after the
+	// section's last line, or append the section. ddsonic: statements, not
+	// lines, so that a value over several lines is replaced whole (#75).
 	lines := strings.Split(string(data), "\n")
-
-	// Try to replace the existing key inside the requested section.
-	inSection := false
-	for i, l := range lines {
-		trimmed := strings.TrimSpace(l)
-		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
-			inSection = strings.EqualFold(trimmed[1:len(trimmed)-1], section)
+	// A broken file may repeat the section: the key is replaced in any of
+	// them, and added to the first.
+	inSection, firstDone := false, false
+	insertAt := -1
+	replaced := false
+	for _, s := range Statements(lines) {
+		if s.Header {
+			firstDone = firstDone || insertAt >= 0
+			inSection = strings.EqualFold(s.Name, section)
+		}
+		if !inSection {
 			continue
 		}
-		if inSection {
-			k, _, ok := strings.Cut(trimmed, "=")
-			if ok && strings.TrimSpace(k) == key {
-				lines[i] = line
-				if err := fileutil.WriteFileAtomic(path, []byte(strings.Join(lines, "\n")), 0o600); err != nil {
-					return fmt.Errorf("write config: %w", err)
-				}
-				return nil
-			}
+		if !s.Header && s.Key == key {
+			lines = ReplaceStatement(lines, s, line)
+			replaced = true
+			break
+		}
+		if !firstDone {
+			insertAt = s.End
 		}
 	}
-
-	// Key not found: append after the last line in the requested section, or
-	// append a new section at the end.
-	inSection = false
-	insertAt := -1
-	for i, l := range lines {
-		trimmed := strings.TrimSpace(l)
-		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
-			if inSection && insertAt >= 0 {
-				break
-			}
-			inSection = strings.EqualFold(trimmed[1:len(trimmed)-1], section)
-		}
-		if inSection {
-			insertAt = i
-		}
-	}
-
-	if insertAt >= 0 {
-		tail := append([]string{line}, lines[insertAt+1:]...)
-		lines = append(lines[:insertAt+1], tail...)
-	} else {
+	switch {
+	case replaced:
+	case insertAt >= 0:
+		lines = slices.Insert(lines, insertAt, line)
+	default:
 		lines = append(lines, "["+section+"]", line)
 	}
 

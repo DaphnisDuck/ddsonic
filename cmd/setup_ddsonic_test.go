@@ -102,14 +102,19 @@ func TestDdsonicSetupFresh(t *testing.T) {
 
 // TestDdsonicSetupRerunKeepsOtherKeys: an existing config and a rerun. The
 // wizard's own keys change (client_id goes with the switch to the shared
-// client); everything else stays where it was.
+// client); everything else stays where it was. A managed value over
+// several lines goes whole; an unknown one stays whole (#75).
 func TestDdsonicSetupRerunKeepsOtherKeys(t *testing.T) {
 	initial := `theme = "nord"
 
-[spotify]
+[spotify] # mine
 # my app
-client_id = "abc"
+client_id = """
+abc"""
 bitrate   = 160
+extra = [
+  "x", # note
+]
 device_name = "desk"
 
 [ddsonic]
@@ -119,8 +124,11 @@ spotify_refresh = "1h"
 	fillSetup(t, "spotify", "default", map[string]string{"bitrate": "96"})
 	want := `theme = "nord"
 
-[spotify]
+[spotify] # mine
 # my app
+extra = [
+  "x", # note
+]
 device_name = "desk"
 bitrate   = 96
 
@@ -323,6 +331,11 @@ func TestSetTopLevelKey(t *testing.T) {
 		{"replaced in place", "a = 1\nk = 9\n\n[s]\nk = 3\n", "a = 1\nk = 1\n\n[s]\nk = 3\n"},
 		{"a section's key isn't top-level", "[s]\nk = 3\n", "k = 1\n\n[s]\nk = 3\n"},
 		{"comments stay above", "# mine\n\n[s]\n", "# mine\nk = 1\n\n[s]\n"},
+		// #75: statements, not lines.
+		{"a value over several lines is replaced whole", "k = [\n  2, # two\n]\n[s]\n", "k = 1\n[s]\n"},
+		{"a comment after the value stays", "k = 9 # mine\n", "k = 1 # mine\n"},
+		{"a string over several lines is no header", "a = \"\"\"\n[x]\n\"\"\"\n[s]\n", "a = \"\"\"\n[x]\n\"\"\"\nk = 1\n\n[s]\n"},
+		{"a header with a comment", "[s] # mine\nk = 3\n", "k = 1\n\n[s] # mine\nk = 3\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

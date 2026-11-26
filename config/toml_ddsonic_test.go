@@ -9,12 +9,15 @@ import (
 	"time"
 )
 
-// writeConfigFile writes body as the config file under a scratch HOME and
-// returns its path.
+// writeConfigFile writes body as the config file in a scratch config
+// folder (CLIAMP_CONFIG_DIR, which wins over XDG_CONFIG_HOME and HOME), under
+// a scratch HOME, and returns its path.
 func writeConfigFile(t *testing.T, body string) string {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
-	path := filepath.Join(os.Getenv("HOME"), ".config", "ddsonic", "config.toml")
+	dir := filepath.Join(t.TempDir(), "config")
+	t.Setenv("CLIAMP_CONFIG_DIR", dir)
+	path := filepath.Join(dir, "config.toml")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -122,5 +125,67 @@ func TestLoadRefusesInvalidTOML(t *testing.T) {
 		if got, _ := os.ReadFile(path); string(got) != body {
 			t.Errorf("%q: the file became %q", body, got)
 		}
+	}
+}
+
+// TestWritersReplaceTOMLStatements: Save and saveSectionValue replace a
+// key's whole statement, a value over several lines included, and keep every
+// other byte: unrelated and unknown keys, comments, a comment after a
+// replaced one-line value (#75). A file the parser refuses is still edited
+// line by line, never replaced by the defaults.
+func TestWritersReplaceTOMLStatements(t *testing.T) {
+	tests := []struct {
+		name, initial string
+		save          func() error
+		want          string
+	}{
+		{"one-line value keeps its comment",
+			"volume = 1 # loud\ntheme = \"x\" # mine\nmystery = 7\n",
+			func() error { return Save("volume", "-3") },
+			"volume = -3 # loud\ntheme = \"x\" # mine\nmystery = 7\n"},
+		{"a string over several lines is not scanned as lines",
+			"notes = \"\"\"\n[not a header]\nvolume = 9\n\"\"\"\nvolume = 1\n[ddsonic]\n",
+			func() error { return Save("volume", "-3") },
+			"notes = \"\"\"\n[not a header]\nvolume = 9\n\"\"\"\nvolume = -3\n[ddsonic]\n"},
+		{"a new key goes above a header with a comment",
+			"volume = 1\n[ddsonic] # mine\nborder = 1\n",
+			func() error { return Save("theme", `"nord"`) },
+			"volume = 1\ntheme = \"nord\"\n[ddsonic] # mine\nborder = 1\n"},
+		{"a section's value over several lines is replaced whole",
+			"# top\n[mixcloud] # mine\nstyles = [\n  \"a\", # first\n  \"b\",\n]\nother = 1 # keep\n\n[radio]\ncountry = \"US\"\n",
+			func() error { return SaveMixcloudStyles([]string{"c"}) },
+			"# top\n[mixcloud] # mine\nstyles = [\"c\"]\nother = 1 # keep\n\n[radio]\ncountry = \"US\"\n"},
+		{"a section's one-line value keeps its comment",
+			"[radio]\ncountry = \"US\" # home\n",
+			func() error { return SaveRadioCountry("DE") },
+			"[radio]\ncountry = \"DE\" # home\n"},
+		{"a new key goes at the end of its section",
+			"[radio] # mine\nlist = [\n  1,\n]\n\n[ddsonic]\n",
+			func() error { return SaveRadioCountry("DE") },
+			"[radio] # mine\nlist = [\n  1,\n]\n\ncountry = \"DE\"\n[ddsonic]\n"},
+		{"a broken file is edited line by line",
+			"volume = 1\n[[[ broken\n",
+			func() error { return Save("volume", "-3") },
+			"volume = -3\n[[[ broken\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeConfigFile(t, tt.initial)
+			if err := tt.save(); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tt.want {
+				t.Errorf("got\n%s\nwant\n%s", got, tt.want)
+			}
+			if checkSyntax(path, []byte(tt.initial)) == nil {
+				if err := checkSyntax(path, got); err != nil {
+					t.Errorf("a valid file became invalid: %v", err)
+				}
+			}
+		})
 	}
 }
