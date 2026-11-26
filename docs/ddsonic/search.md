@@ -24,11 +24,11 @@ Results come in sections, best match first:
 | Albums | 8 | Saved Spotify albums and local albums, labelled with their source, and albums found in your YouTube Music tracks, labelled `YouTube · from tracks` (not your saved Library Albums, and possibly incomplete) |
 | Tracks | 20 | Liked, playlist, cached-album and local tracks, each labelled with its source after its name (`Local`, `Spotify`, `YouTube`) |
 | Playlists | 5 | Spotify playlists you own or follow |
-| Stations | 5 | Your favorite radio stations first, then the built-in and `radios.toml` stations, labelled `Radio` |
+| Stations | 5 | Your favorite cliamp radio channels whose saved name matches, then your favorite radio stations, then the built-in and `radios.toml` stations, labelled `Radio` |
 
 A full section ends in **More…**, which lists up to 200 matches of that kind.
 
-Opening a result works exactly as it does while browsing: an album opens its tracks, an artist their albums, a playlist its tracks. **Enter on a track plays its album from that track.** A Spotify album whose tracks aren't cached yet is fetched first. Offline, or for a track with no album, only the track plays. A station plays as a live stream. On a starred station, and on a station in the radio directory's results, `f` adds it to Radio → Favorites or takes it out; the results follow.
+Opening a result works exactly as it does while browsing: an album opens its tracks, an artist their albums, a playlist its tracks. **Enter on a track plays its album from that track.** A Spotify album whose tracks aren't cached yet is fetched first. Offline, or for a track with no album, only the track plays. A station plays as a live stream. On a starred station, and on a station in the radio directory's results, `f` adds it to Radio → Favorites or takes it out; the results follow. A favorite cliamp radio channel, marked `cliamp radio`, queues its songs, and `f` on it takes it out. Channels match by their saved name only: an `artist:`, `album:` or `genre:` term, a `type:` other than stations, or a `source:` other than radio leaves them out.
 
 ## Beyond your library
 
@@ -53,7 +53,7 @@ Everything must match. A single letter matches only a whole word: prefix matchin
 
 ## Ranking
 
-Within each section, a match in the title outweighs one in the artist, which outweighs one in the album, then the genre. Items in your library (saved albums, followed artists, liked and local tracks) rank above ones the catalog only knows of, and an exact title match ranks higher still. Among stations, favorites always come first.
+Within each section, a match in the title outweighs one in the artist, which outweighs one in the album, then the genre. Items in your library (saved albums, followed artists, liked and local tracks) rank above ones the catalog only knows of, and an exact title match ranks higher still. Among stations, favorites always come first: favorite channels, A–Z, then favorite stations.
 
 ## Without a catalog
 

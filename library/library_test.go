@@ -218,7 +218,7 @@ func (*starredRadio) FavoriteTracks() []playlist.Track {
 }
 
 func TestRadioFavoritesSortedByName(t *testing.T) {
-	favs := load(t, child(t, radio(&starredRadio{fakeRadio{fakeProvider{name: "Radio"}}}, nil), "Favorites"))
+	favs := load(t, child(t, radio(&starredRadio{fakeRadio{fakeProvider{name: "Radio"}}}, nil, nil), "Favorites"))
 	if got := titles(favs); !slices.Equal(got, []string{"BBC Radio 3", "SomaFM", "WBGO"}) {
 		t.Errorf("favorites = %v, want A–Z", got)
 	}
@@ -252,7 +252,7 @@ func (countries) GenreTracks(id, sort string) ([]playlist.Track, error) {
 func TestRadioLevels(t *testing.T) {
 	r := &fakeRadio{fakeProvider{name: "Radio"}}
 	channels := &fakeProvider{name: "cliamp radio", lists: []playlist.PlaylistInfo{{ID: "ch1", Name: "Chill"}}}
-	root := radio(r, channels)
+	root := radio(r, channels, nil)
 	if got := titles(load(t, root)); !slices.Equal(got, []string{"Favorites", "Browse Stations"}) {
 		t.Fatalf("radio menu = %v", got)
 	}

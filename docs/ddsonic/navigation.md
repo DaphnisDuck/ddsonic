@@ -24,7 +24,7 @@ Music
   - **Folders** opens the file browser. It lists folders and the audio files ddsonic can play, and leaves out other files such as covers, logs and cue sheets; the header says how many it left out. `f` lists every file, and `f` again only audio, for the rest of the session. Files whose names start with a dot stay hidden either way.
   - **Playlists** are your saved local playlists.
 - **Radio:**
-  - **Favorites** are your starred stations. Enter plays one.
+  - **Favorites** are your starred stations and favorite cliamp radio channels, in one A–Z list; a channel is marked `cliamp radio`. Enter on a station plays it; Enter on a channel queues its songs, as in Browse Stations. A channel with no songs now shows an error rather than playing its live stream; one the channel list no longer has shows "channel no longer available", and one whose list cannot load shows the load error. A favorite is never removed for you: `f` removes it.
   - **Browse Stations** lists the cliamp radio channels and the station directory by country or tag.
 - **Search:** searches everything the catalog holds as you type; `/` opens it from anywhere. See [search.md](search.md). Without a catalog it is the provider's own search (Spotify if configured, else Local).
 
@@ -48,7 +48,7 @@ The bar at the bottom of each view lists every key that works there, and only th
 | `g` `G` / `Home` `End` | Top / bottom |
 | `Ctrl+D` `Ctrl+U` / `PgDn` `PgUp` | Page down / up |
 | `l` `Enter` `→` | Open, or play |
-| `f` | On a station from the radio directory: add it to Radio → Favorites, or take it out |
+| `f` | On a station from the radio directory, or a cliamp radio channel with songs: add it to Radio → Favorites, or take it out |
 | `h` `Esc` `Backspace` `←` | Back; at Music, nothing |
 | `q` | Quit |
 | `/` | Search |
@@ -61,7 +61,7 @@ The bar at the bottom of each view lists every key that works there, and only th
 | `+` `-` | Volume |
 | `Ctrl+G` | Hide or show the key bar |
 
-`f` works on the highlighted station, whether or not anything is playing: in a country's or a tag's list, in the results of "Search the radio directory", in Favorites, and on a starred station among search results. The key bar shows `f Favorite`, or `f Unfavorite` when the station is already a favorite, and shows neither on a row that is not a directory station: a menu, a cliamp radio channel, a station from radios.toml, a track. A station is saved under the directory's name for it and its stream address. Favorites and search follow as soon as the change is saved: unstarred in Favorites, a station leaves the list. Saving happens in the background, so ddsonic stays responsive even while another ddsonic is writing the favorites file; until a station's change is saved the key bar shows no `f` for it and a second `f` on it does nothing.
+`f` works on the highlighted station, whether or not anything is playing: in a country's or a tag's list, in the results of "Search the radio directory", in Favorites, and on a starred station among search results. The key bar shows `f Favorite`, or `f Unfavorite` when the station is already a favorite, and shows neither on a row that is neither a directory station nor a channel: a menu, a station from radios.toml, a track. A station is saved under the directory's name for it and its stream address. `f` also works on a cliamp radio channel that has songs: on its row in Browse Stations → cliamp radio, on a channel in Favorites, and on a favorite channel among search results. A channel is saved by its ID, under the name it had when you starred it, in `radio_channel_favorites.toml`, apart from the station favorites; a channel renamed later stays one favorite under its saved name. Channel favorites are kept in the library only: `f` on a queued channel does nothing. Favorites and search follow as soon as the change is saved: unstarred in Favorites, a station leaves the list. Saving happens in the background, so ddsonic stays responsive even while another ddsonic is writing the favorites file; until a station's change is saved the key bar shows no `f` for it and a second `f` on it does nothing.
 
 On an error screen, Enter retries.
 

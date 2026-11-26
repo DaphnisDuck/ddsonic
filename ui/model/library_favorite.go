@@ -27,7 +27,8 @@ var (
 // libSelectedStation is the directory station selected in the view in
 // front, as the directory names it: never a row's decorated title or the
 // song a stream is playing. ok is false for everything else (a menu row, a
-// cliamp radio channel, a radios.toml station, any other stream or file)
+// cliamp radio channel, which has its own f (library_channel_favorite.go),
+// a radios.toml station, any other stream or file)
 // and on a list that is loading or failed. While the query is being typed
 // no row is selected: the input takes f as text and its key table is its
 // own (handleLibraryKey, libraryKeyView).
@@ -63,6 +64,9 @@ func (m Model) libSelectedStation() (station radio.CatalogStation, ok bool) {
 // is not a directory station, or is one whose toggle is still being saved:
 // f does nothing on it until then.
 func (m Model) libFavoriteKeys() []libKeyHelp {
+	if keys, ok := m.libChannelFavoriteKeys(); ok { // ddsonic: #135
+		return keys
+	}
 	station, ok := m.libSelectedStation()
 	switch {
 	case !ok || m.lib.favSaving[station.URL]:
@@ -88,6 +92,9 @@ type libFavoriteSavedMsg struct {
 // ignored: one press, one toggle. Other stations' toggles go ahead; the
 // store takes them one at a time.
 func (m *Model) libToggleFavorite() tea.Cmd {
+	if cmd, ok := m.libToggleChannelFavorite(); ok { // ddsonic: #135
+		return cmd
+	}
 	station, ok := m.libSelectedStation()
 	if !ok || m.lib.favSaving[station.URL] {
 		return nil

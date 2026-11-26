@@ -4,7 +4,7 @@ DaphnisDuck's Music Player (`ddsonic`) keeps its own files and runtime names, so
 
 | What | ddsonic | cliamp |
 |---|---|---|
-| Config (config.toml, playlists, history, resume, radio favorites, credentials, log, IPC socket) | `~/.config/ddsonic` | `~/.config/cliamp` |
+| Config (config.toml, playlists, history, resume, radio favorites (`radio_favorites.toml`) and channel favorites (`radio_channel_favorites.toml`), credentials, log, IPC socket) | `~/.config/ddsonic` | `~/.config/cliamp` |
 | Data (music catalog `library.db`, embedded album art extracted for MPRIS) | `~/.local/share/ddsonic` | `~/.local/share/cliamp` |
 | Downloaded album artwork for the info view (`artwork/`, trimmed past 100 MB; safe to delete) | `$XDG_CACHE_HOME/ddsonic`, else `~/.cache/ddsonic` | — |
 | Default downloads (`Ctrl+S`) | `~/Music/ddsonic` | `~/Music/cliamp` |
@@ -38,7 +38,7 @@ sed -i -E 's/^[[:space:]]*\[ddmus\][[:space:]]*$/[ddsonic]/I' ~/.config/ddsonic/
 - **Quit ddmus first.** `library.db` is an SQLite database with a write-ahead log (`library.db-wal`, `library.db-shm`); moving it while ddmus runs can lose its latest changes. `ddmus status` says whether one is running.
 - **If you already started ddsonic once**, it created `~/.config/ddsonic` and `~/.local/share/ddsonic`. Remove them first: `mv -T` refuses to move onto a folder that holds anything.
 - **The section header matters.** ddsonic reads `[ddsonic]` and ignores `[ddmus]` without a message, so `spotify_refresh`, `youtube_refresh`, `youtube_playlists`, `border` and `artwork` fall back to their defaults until the header is changed. The `sed` line does it, however the header is capitalised or indented.
-- **What comes along:** `config.toml`, the Spotify and YouTube Music sign-ins, radio favorites, playlists, history, the resume position, themes, and the catalog with everything it has synced. Nothing inside these files names the config, data or cache folders, so no file needs editing but `config.toml`.
+- **What comes along:** `config.toml`, the Spotify and YouTube Music sign-ins, radio and channel favorites, playlists, history, the resume position, themes, and the catalog with everything it has synced. Nothing inside these files names the config, data or cache folders, so no file needs editing but `config.toml`.
 - **Leave `~/Music/ddmus` where it is.** Tracks saved with `Ctrl+S` went there, and the history, the resume position, playlists and the catalog remember each of them by its full path; moving or renaming the folder breaks every one of those. ddsonic saves new tracks to `~/Music/ddsonic`. To keep saving into the old folder instead, set it in `config.toml`, as a full path (`~` is not expanded here):
 
   ```toml

@@ -14,6 +14,7 @@ import (
 	"github.com/bjarneo/cliamp/artwork"
 	"github.com/bjarneo/cliamp/catalog"
 	"github.com/bjarneo/cliamp/external/local"
+	"github.com/bjarneo/cliamp/external/radio"
 	"github.com/bjarneo/cliamp/internal/appdir"
 	"github.com/bjarneo/cliamp/internal/httpclient"
 	"github.com/bjarneo/cliamp/library"
@@ -88,3 +89,18 @@ func artworkLoader(enabled bool) func(context.Context, artwork.Ref) (image.Image
 
 // artworkFetchTimeout bounds one artwork download.
 const artworkFetchTimeout = 20 * time.Second
+
+// channelFavorites loads the favorite cliamp radio channels (issue #135),
+// shares the store with the library's f, and lists them for its Favorites
+// and search.
+func channelFavorites(m *model.Model) func() []library.ChannelRef {
+	favs := radio.LoadChannelFavorites()
+	m.SetChannelFavorites(favs)
+	return func() []library.ChannelRef {
+		var refs []library.ChannelRef
+		for _, c := range favs.Channels() {
+			refs = append(refs, library.ChannelRef{ID: c.ID, Name: c.Name})
+		}
+		return refs
+	}
+}

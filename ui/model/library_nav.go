@@ -15,6 +15,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/bjarneo/cliamp/catalog"
+	"github.com/bjarneo/cliamp/external/radio"
 	"github.com/bjarneo/cliamp/library"
 	"github.com/bjarneo/cliamp/playlist"
 )
@@ -72,6 +73,11 @@ type libraryState struct {
 	// favSaving holds the stream URLs of the stations whose f is still
 	// being saved (library_favorite.go).
 	favSaving map[string]bool
+
+	// ddsonic: #135. The channel favorites store, and the IDs of the
+	// channels whose f is still being saved (library_channel_favorite.go).
+	channelFavs *radio.ChannelFavorites
+	chanSaving  map[string]bool
 }
 
 // libSync is one provider's catalog sync status as the library shows it.
@@ -477,6 +483,9 @@ func (m *Model) handleLibraryMsg(msg tea.Msg) (tea.Cmd, bool) {
 
 	case libFavoriteSavedMsg:
 		return m.libFavoriteSaved(msg), true
+
+	case libChannelFavoriteSavedMsg: // ddsonic: #135
+		return m.libChannelFavoriteSaved(msg), true
 
 	case libraryPlayMsg:
 		if msg.gen != m.lib.playGen {

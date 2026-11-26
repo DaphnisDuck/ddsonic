@@ -68,13 +68,17 @@ type catalogView struct {
 	// name, and the radio directory.
 	liveSearch []liveSearcher
 	radioProv  playlist.Provider
+	// ddsonic: the favorite cliamp radio channels search lists (#135).
+	channels    playlist.Provider
+	channelFavs func() []ChannelRef
 	// albumOrder is the Library Albums list's order, a catalog.AlbumOrder.
 	albumOrder atomic.Int32
 }
 
 func newCatalogView(cat catalog.Catalog, src Sources) *catalogView {
 	s := &catalogView{cat: cat, synced: map[string]*catalogBrowser{},
-		local: localBrowser(cat, src.Local, src.MusicDir), radioProv: src.Radio}
+		local: localBrowser(cat, src.Local, src.MusicDir), radioProv: src.Radio,
+		channels: src.Channels, channelFavs: src.ChannelFavorites} // ddsonic: #135
 	for _, ss := range src.Synced {
 		s.synced[ss.Provider] = syncedBrowser(cat, ss)
 		s.addLiveSearch(ss.Title, ss.Player)
@@ -122,6 +126,7 @@ func (s *catalogView) results(ctx context.Context, query string) ([]Entry, error
 	if q.Empty() {
 		return nil, nil
 	}
+	channels := channelFavoriteMatches(q, s.channels, s.channelFavs) // ddsonic: #135
 	var found catalog.SearchResults
 	if s.restrict(&q) {
 		var err error
@@ -132,7 +137,7 @@ func (s *catalogView) results(ctx context.Context, query string) ([]Entry, error
 	var entries []Entry
 	for _, sec := range searchSections {
 		rs := found[sec.kind]
-		for _, e := range s.rows(rs[:min(len(rs), sec.limit)]) {
+		for _, e := range s.withChannels(sec.kind, channels, s.rows(rs[:min(len(rs), sec.limit)])) {
 			e.Section = sec.heading
 			entries = append(entries, e)
 		}
@@ -153,15 +158,16 @@ func (s *catalogView) results(ctx context.Context, query string) ([]Entry, error
 func (s *catalogView) more(q catalog.Query, kind catalog.SearchKind, heading string) Level {
 	q.Kinds = []catalog.SearchKind{kind}
 	return &catalogLevel{funcLevel{heading, func(ctx context.Context) ([]Entry, error) {
-		q := q // loads of this level can overlap; each restricts its own copy
+		q := q                                                           // loads of this level can overlap; each restricts its own copy
+		channels := channelFavoriteMatches(q, s.channels, s.channelFavs) // ddsonic: #135
 		if !s.restrict(&q) {
-			return nil, nil
+			return channels, nil
 		}
 		found, err := s.cat.Search(ctx, q, moreLimit)
 		if err != nil {
 			return nil, err
 		}
-		return s.rows(found[kind]), nil
+		return s.withChannels(kind, channels, s.rows(found[kind])), nil
 	}}, "", nil} // read from the catalog alone, so a sync rereads it
 }
 
