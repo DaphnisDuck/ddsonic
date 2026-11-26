@@ -1,6 +1,6 @@
 # ddsonic plan (DaphnisDuck's Music Player)
 
-This is the working anchor for the ddsonic fork of cliamp. Read it before starting any task. Its **Status** and **Decisions log** are historical records, not the current authority: current status and new decisions live on GitHub issues and the owner's Project.
+This is the design record for the ddsonic fork of cliamp. Read the section a task needs (`CLAUDE.md` says which). Its **Status** and **Decisions log** are historical records, not the current authority: current status and new decisions live on GitHub issues and the owner's Project.
 
 The project was called omatunes until v0.6 and ddmus from v0.6 to `v1.0.0-rc.1`; it has been ddsonic since 2026-10-04. The milestone plans, **Status** and the **Decisions log** below are history and keep the names, paths and file names that were true when each entry was written (`ddmus`, `docs/ddmus/`, `*_ddmus.go`, `// ddmus:`). Read them as today's `ddsonic` equivalents.
 
