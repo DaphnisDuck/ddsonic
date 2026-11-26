@@ -160,8 +160,9 @@ func (s *catalogView) results(ctx context.Context, query string) ([]Entry, error
 func (s *catalogView) more(q catalog.Query, kind catalog.SearchKind, heading string) Level {
 	q.Kinds = []catalog.SearchKind{kind}
 	return &catalogLevel{funcLevel{heading, func(ctx context.Context) ([]Entry, error) {
-		q := q                                                           // loads of this level can overlap; each restricts its own copy
-		channels := channelFavoriteMatches(q, s.channels, s.channelFavs) // ddsonic: #135
+		q := q // loads of this level can overlap; each restricts its own copy
+		// ddsonic: #135
+		channels := channelFavoriteMatches(q, s.channels, s.channelFavs)
 		if !s.restrict(&q) {
 			return channels, nil
 		}

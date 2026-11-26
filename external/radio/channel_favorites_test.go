@@ -3,6 +3,7 @@ package radio
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -43,7 +44,7 @@ func TestChannelFavoritesTogglePersistsByID(t *testing.T) {
 // A channel renamed on the server stays one favorite: the ID is the key and
 // the saved name is kept (issue #135, owner clarification of 2026-11-25).
 func TestChannelFavoritesRenameIsNotADuplicate(t *testing.T) {
-	a, _ := newChannelFavoritesAt(t)
+	a, dir := newChannelFavoritesAt(t)
 	b := LoadChannelFavorites() // another instance that has not seen the add
 	if _, err := a.Toggle(ChannelFavorite{ID: "lofi", Name: "Lofi"}); err != nil {
 		t.Fatal(err)
@@ -57,6 +58,14 @@ func TestChannelFavoritesRenameIsNotADuplicate(t *testing.T) {
 	got := LoadChannelFavorites().Channels()
 	if len(got) != 1 || got[0].Name != "Lofi" {
 		t.Fatalf("channels = %+v; want one lofi, saved name kept", got)
+	}
+	// The loader drops a repeated ID, so check the file itself: one entry.
+	data, err := os.ReadFile(filepath.Join(dir, channelFavoritesFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(data), "[[channel]]"); n != 1 {
+		t.Fatalf("file has %d [[channel]] entries, want 1:\n%s", n, data)
 	}
 }
 

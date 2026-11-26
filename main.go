@@ -593,8 +593,8 @@ func run(overrides config.Overrides, positional []string, daemon, visualizer60FP
 	// synced catalog when one is available.
 	cat := openCatalog(spotifyProv, radioProv, cfg)
 	defer cat.close()
-	src := librarySources(providers, cfg.InitialDirectory, cat)
-	src.ChannelFavorites = channelFavorites(&m) // ddsonic: #135
+	src := librarySources(providers, cfg.InitialDirectory, cat) // ddsonic: #135
+	src.ChannelFavorites = channelFavorites(&m)                 // ddsonic: #135
 	m.SetLibrary(library.Root(src))
 	m.SetFrameBorder(cfg.Ddsonic.Border)
 	m.SetArtwork(artworkLoader(cfg.Ddsonic.Artwork)) // ddsonic: main_ddsonic.go
