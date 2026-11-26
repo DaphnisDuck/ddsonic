@@ -137,9 +137,9 @@ func currentMusicDir() string {
 }
 
 // folderPath is a typed folder made absolute, with ~ expanded, without
-// touching the disk. config.toml's reader strips the quotes around a value
-// and decodes no escapes, so the path is written between plain quotes; one
-// that wouldn't read back the same is refused.
+// touching the disk. The path is written as a quoted TOML string
+// (config.QuoteString); a line break or a quote at the end is still refused,
+// as before #75.
 func folderPath(input string) (string, error) {
 	dir := local.ExpandPath(strings.TrimSpace(input))
 	if dir == "" {

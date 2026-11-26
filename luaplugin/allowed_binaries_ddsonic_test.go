@@ -39,9 +39,11 @@ func TestAllowedBinariesFromConfigFile(t *testing.T) {
 		{"dotted key: the same table", "plugins.allowed_binaries = \"curl\"\n", with("curl")},
 		{"a string over several lines", "[plugins]\nallowed_binaries = \"\"\"ffprobe,\ncurl\"\"\"\n", with("ffprobe", "curl")},
 		{"an escaped comma separates", "[plugins]\nallowed_binaries = \"a\\u002Cb\"\n", with("a", "b")},
-		// An array is not the documented form; its text is split as it
-		// always was, so no bare name is allowed.
+		// An array is not the documented form; its text is split on commas
+		// as a one-line array's always was. A name is allowed only where the
+		// user wrote it between commas: "y, sh, z" allows sh.
 		{"an array", "[plugins]\nallowed_binaries = [\"sh\",\n \"curl\"]\n", with(`["sh"`, `"curl"]`)},
+		{"an array element with commas", "[plugins]\nallowed_binaries = [\"x\",\n \"y, sh, z\"]\n", with(`["x"`, `"y`, "sh", `z"]`)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()

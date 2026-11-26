@@ -371,8 +371,8 @@ func TestDdsonicSetupClearsEveryAliasSection(t *testing.T) {
 	}
 }
 
-// TestDdsonicSetupLocalRoundTrips: config.toml's reader strips the quotes and
-// decodes no escapes, so the saved folder must read back unchanged.
+// TestDdsonicSetupLocalRoundTrips: the saved folder, a quoted TOML string,
+// must read back unchanged.
 func TestDdsonicSetupLocalRoundTrips(t *testing.T) {
 	for _, name := range []string{`music\archive`, `a "quoted" name`, "with # hash", "space and ümlaut", `it's`} {
 		t.Run(name, func(t *testing.T) {
