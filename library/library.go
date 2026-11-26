@@ -125,6 +125,9 @@ type Entry struct {
 	Provider playlist.Provider
 	// Query is the text an IntentSearch row searches for.
 	Query string
+	// Channel, set on a cliamp radio channel row that can be a favorite,
+	// names the channel for f. ddsonic: issue #135.
+	Channel *ChannelRef
 	// Source is the catalog provider (catalog.Spotify, catalog.Radio, …)
 	// whose content the row holds. Rows beneath inherit it, so it is set
 	// only where the source is decided: a source's menu entry, and the rows

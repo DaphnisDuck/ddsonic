@@ -17,7 +17,6 @@ func TestLoadDdsonicSection(t *testing.T) {
 	}{
 		{"default without the section", "volume = -3\n", DefaultSpotifyRefresh},
 		{"quoted duration", "[ddsonic]\nspotify_refresh = \"45m\"\n", 45 * time.Minute},
-		{"bare duration", "[ddsonic]\nspotify_refresh = 90s\n", 90 * time.Second},
 		{"zero syncs every startup", "[ddsonic]\nspotify_refresh = \"0s\"\n", 0},
 		{"invalid keeps the default", "[ddsonic]\nspotify_refresh = \"soon\"\n", DefaultSpotifyRefresh},
 		{"negative keeps the default", "[ddsonic]\nspotify_refresh = \"-5m\"\n", DefaultSpotifyRefresh},
@@ -172,5 +171,39 @@ func TestLoadIgnoresOldDdmusSection(t *testing.T) {
 	if got.SpotifyRefresh != want.SpotifyRefresh || got.YouTubeRefresh != want.YouTubeRefresh ||
 		len(got.YouTubePlaylists) != 0 || got.Border != want.Border || got.Artwork != want.Artwork {
 		t.Errorf("a [ddmus] section changed the config: got %+v, want the defaults %+v", got, want)
+	}
+}
+
+// netease_lyrics is off by default and on only when set to true (#136).
+func TestLoadNetEaseLyrics(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		toml string
+		want bool
+	}{
+		{"off without the section", "", false},
+		{"off without the key", "[ddsonic]\nborder = true\n", false},
+		{"on", "[ddsonic]\nnetease_lyrics = true\n", true},
+		{"off", "[ddsonic]\nnetease_lyrics = false\n", false},
+		{"invalid keeps it off", "[ddsonic]\nnetease_lyrics = \"yes\"\n", false},
+		{"not from another section", "[lyrics]\nnetease_lyrics = true\n", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			path := filepath.Join(os.Getenv("HOME"), ".config", "ddsonic", "config.toml")
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(tt.toml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Ddsonic.NetEaseLyrics != tt.want {
+				t.Errorf("NetEaseLyrics = %v, want %v", cfg.Ddsonic.NetEaseLyrics, tt.want)
+			}
+		})
 	}
 }

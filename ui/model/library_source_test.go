@@ -105,7 +105,7 @@ func TestLibraryRowsDropControlCharacters(t *testing.T) {
 		{Track: &playlist.Track{Path: "/m/a.flac", Title: evil}},
 	}
 	for i, e := range rows {
-		if got := libEntryLabel(e, 1, 0); strings.ContainsAny(got, "\x1b\x07") {
+		if got := libEntryLabel(e, 1, measureLibCols([]library.Entry{e})); strings.ContainsAny(got, "\x1b\x07") {
 			t.Errorf("row %d label %q keeps control characters", i, got)
 		}
 	}

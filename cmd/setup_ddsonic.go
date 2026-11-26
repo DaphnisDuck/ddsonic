@@ -137,9 +137,9 @@ func currentMusicDir() string {
 }
 
 // folderPath is a typed folder made absolute, with ~ expanded, without
-// touching the disk. config.toml's reader strips the quotes around a value
-// and decodes no escapes, so the path is written between plain quotes; one
-// that wouldn't read back the same is refused.
+// touching the disk. The path is written as a quoted TOML string
+// (config.QuoteString); a line break or a quote at the end is still refused,
+// as before #75.
 func folderPath(input string) (string, error) {
 	dir := local.ExpandPath(strings.TrimSpace(input))
 	if dir == "" {
@@ -192,9 +192,9 @@ func mergeSave(spec providerSpec) func(map[string]string) (string, error) {
 		for _, f := range spec.fields {
 			managed[f.key] = true
 		}
-		for _, line := range strings.Split(body, "\n") {
-			if k, ok := tomlKey(line); ok {
-				managed[k] = true
+		for _, st := range config.Statements(strings.Split(body, "\n")) {
+			if st.Key != "" {
+				managed[st.Key] = true
 			}
 		}
 		names := append([]string{spec.section}, sectionAliases[spec.section]...)
@@ -231,49 +231,55 @@ func mergeSection(names []string, body string, managed map[string]bool) (string,
 		lines = strings.Split(strings.TrimRight(string(data), "\n"), "\n")
 	}
 
-	named := func(line string) bool {
-		return isHeader(line) && slices.ContainsFunc(names, func(n string) bool {
-			return strings.EqualFold(strings.TrimSpace(line), "["+n+"]")
+	// ddsonic: statements, not lines, so that a managed key's value over
+	// several lines goes whole (#75).
+	stmts := config.Statements(lines)
+	text := func(st config.Statement) []string { return lines[st.Start:st.End] }
+	named := func(st config.Statement) bool {
+		return st.Header && slices.ContainsFunc(names, func(n string) bool {
+			return strings.EqualFold(st.Name, n)
 		})
 	}
 	last := -1 // the last matching header, where the body goes
-	for i, line := range lines {
-		if named(line) {
+	for i, st := range stmts {
+		if named(st) {
 			last = i
 		}
 	}
 
 	var out []string
 	header := ""
-	for i := 0; i < len(lines); {
-		at, line := i, lines[i]
+	for i := 0; i < len(stmts); {
+		at, st := i, stmts[i]
 		i++
-		if !named(line) {
-			out = append(out, line)
+		if !named(st) {
+			out = append(out, text(st)...)
 			continue
 		}
-		// A matching section: its lines up to the next header.
+		// A matching section: its statements up to the next header.
 		end := i
-		for end < len(lines) && !isHeader(lines[end]) {
+		for end < len(stmts) && !stmts[end].Header {
 			end++
 		}
-		section := lines[i:end]
+		section := stmts[i:end]
 		i = end
 		trail := len(section) // blank lines before the next section stay last
-		for trail > 0 && strings.TrimSpace(section[trail-1]) == "" {
+		for trail > 0 && isBlank(text(section[trail-1])) {
 			trail--
 		}
-		out = append(out, line)
-		for _, l := range section[:trail] {
-			if k, ok := tomlKey(l); !ok || !managed[k] {
-				out = append(out, l)
+		out = append(out, text(st)...)
+		for _, s := range section[:trail] {
+			if s.Key == "" || !managed[s.Key] {
+				out = append(out, text(s)...)
 			}
 		}
 		if at == last {
-			header = strings.TrimSpace(line)
+			header = "[" + st.Name + "]"
 			out = append(out, bodyLines...)
 		}
-		out = append(out, section[trail:]...)
+		for _, s := range section[trail:] {
+			out = append(out, text(s)...)
+		}
 	}
 	if header == "" {
 		header = "[" + names[0] + "]"
@@ -285,9 +291,8 @@ func mergeSection(names []string, body string, managed map[string]bool) (string,
 	return header, writeConfigAtomic(path, out)
 }
 
-func isHeader(line string) bool {
-	t := strings.TrimSpace(line)
-	return strings.HasPrefix(t, "[") && strings.HasSuffix(t, "]")
+func isBlank(lines []string) bool {
+	return !slices.ContainsFunc(lines, func(l string) bool { return strings.TrimSpace(l) != "" })
 }
 
 // setTopLevelKey sets a key above the first section: in place when it is
@@ -310,21 +315,18 @@ func setTopLevelKey(key, value string) error {
 	if len(data) > 0 {
 		lines = strings.Split(strings.TrimRight(string(data), "\n"), "\n")
 	}
-	first := slices.IndexFunc(lines, func(l string) bool {
-		t := strings.TrimSpace(l)
-		return strings.HasPrefix(t, "[") && strings.HasSuffix(t, "]")
-	})
-	if first < 0 {
-		first = len(lines)
-	}
-	at := 0 // after the last non-blank top-level line
-	for i, l := range lines[:first] {
-		if k, ok := tomlKey(l); ok && k == key {
-			lines[i] = line
-			return writeConfigAtomic(path, lines)
+	first := len(lines)
+	at := 0 // after the last non-blank top-level statement
+	for _, st := range config.Statements(lines) {
+		if st.Header {
+			first = st.Start
+			break
 		}
-		if strings.TrimSpace(l) != "" {
-			at = i + 1
+		if st.Key == key {
+			return writeConfigAtomic(path, config.ReplaceStatement(lines, st, line))
+		}
+		if !isBlank(lines[st.Start:st.End]) {
+			at = st.End
 		}
 	}
 	insert := []string{line}
@@ -332,17 +334,6 @@ func setTopLevelKey(key, value string) error {
 		insert = append(insert, "") // directly above a section header
 	}
 	return writeConfigAtomic(path, slices.Insert(lines, at, insert...))
-}
-
-// tomlKey is the key of a "key = value" line, or ok=false for anything else
-// (comments, blank lines, headers).
-func tomlKey(line string) (string, bool) {
-	t := strings.TrimSpace(line)
-	if t == "" || strings.HasPrefix(t, "#") || strings.HasPrefix(t, "[") {
-		return "", false
-	}
-	k, _, ok := strings.Cut(t, "=")
-	return strings.TrimSpace(k), ok
 }
 
 func writeConfigAtomic(path string, lines []string) error {

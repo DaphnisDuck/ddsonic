@@ -119,15 +119,18 @@ func (m *Model) libCanSignIn(f *libFrame) bool {
 // The address is the part that cannot be done without, so it is offered in a
 // form that needs no repair. Its rows are a terminal hyperlink (OSC 8) whose
 // target is the whole address: opening or copying the link gives the address
-// intact, however many rows it takes. The rows hold nothing but the address,
-// with no indentation, and come first in the claim on space: the two lines
-// above them give way before any row of the address does.
+// intact, however many rows it takes. Selecting the rows by mouse does not:
+// the terminal copies the line breaks and frame padding between them, and a
+// browser that keeps them in the pasted address damages its parameters (#181),
+// so the line above says to click or Ctrl+click the link instead. The rows hold
+// nothing but the address, with no indentation, and come first in the claim on
+// space: the two lines above them give way before any row of the address does.
 func (m Model) libSigningInLines(budget int) []string {
 	head := []string{loadingLine(libSigningIn)}
 	if m.lib.authURL == "" {
 		return head
 	}
-	head = append(head, dimStyle.Render("  If no browser opened, open this address (the rows below are one link):"))
+	head = append(head, dimStyle.Render("  No browser? Click or Ctrl+click the link. Selecting its rows breaks it."))
 	var address []string
 	width := max(ui.PanelWidth, 20)
 	for rest := []rune(m.lib.authURL); len(rest) > 0; {

@@ -158,6 +158,7 @@ func (m *Model) handleIPCQueue(request ipc.QueueRequestMsg) tea.Cmd {
 		}
 		track := ipcTrackFromInfo(*request.Track)
 		if track.Feed {
+			m.sleepLaterPlay(request.Op == "track.play") // ddsonic: the feed plays when it arrives (sleep_ddsonic.go)
 			return ipcFeedLoadCmd(context.Background(), request, track, nil, "", 0)
 		}
 		request.Reply <- ipc.Response{OK: true}
@@ -414,6 +415,7 @@ func (m *Model) handleIPCLibrary(request ipc.LibraryRequestMsg) tea.Cmd {
 			return nil
 		}
 	case "provider.load":
+		m.sleepCommand() // ddsonic: an accepted load plays, a transport command for the sleep timer (#35)
 		return func() tea.Msg {
 			tracks, err := entry.Provider.Tracks(request.Playlist)
 			return ipcProviderLoadResult{request: request, tracks: tracks, loaded: request.Playlist, err: err}
@@ -502,6 +504,9 @@ func (m *Model) handleIPCLibrary(request ipc.LibraryRequestMsg) tea.Cmd {
 		if !ok {
 			request.Reply <- ipc.Response{OK: false, Error: "provider does not support album tracks"}
 			return nil
+		}
+		if request.Op == "provider.load_album" {
+			m.sleepCommand() // ddsonic: an accepted load plays, a transport command for the sleep timer (#35)
 		}
 		return func() tea.Msg {
 			tracks, err := loader.AlbumTracks(request.Album)

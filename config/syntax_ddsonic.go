@@ -7,12 +7,10 @@ package config
 // word. CheckSyntax parses the file as TOML and reports the parser's error
 // with its place.
 //
-// It checks syntax and nothing else. The parsed values are thrown away: Load
-// still reads the file, in its own way, and which keys and sections exist is
-// no concern of this check, so an unknown one is as welcome as ever. That
-// also means a file can be valid TOML and still be read by Load differently
-// from what TOML says (a comment after a [section] or after a value, an
-// array over several lines); those are Load's limits, and not errors here.
+// It checks syntax and nothing else: which keys and sections exist is no
+// concern of this check, so an unknown one is as welcome as ever. Load reads
+// the file with the same parser (decodeConfig, toml_ddsonic.go), so a file
+// that passes is read as TOML says.
 
 import (
 	"errors"
@@ -21,8 +19,6 @@ import (
 	"os"
 	"strings"
 	"unicode"
-
-	"github.com/BurntSushi/toml"
 )
 
 // SyntaxError is where config.toml is not valid TOML, as the parser reports it.
@@ -60,34 +56,8 @@ func CheckSyntax() error {
 }
 
 func checkSyntax(path string, data []byte) error {
-	text := string(data)
-	err := parseTOML(text)
-	if err == nil {
-		return nil // valid TOML is never looked at again, let alone rewritten
-	}
-	var parse toml.ParseError
-	if !errors.As(err, &parse) {
-		// Not a place in the file (the parser gives none): still a refusal.
-		return &SyntaxError{Path: path, Line: 1, Column: 1, Message: err.Error(), cause: err}
-	}
-	// The one exception: the parser stopped at the device line older
-	// versions wrote. With that line quoted, the file is parsed again, and
-	// whatever else is wrong with it is reported as it stands.
-	if quoted, ok := quoteLegacyAudioDevice(text, parse.Position.Line); ok {
-		if err = parseTOML(quoted); err == nil {
-			return nil
-		}
-		if !errors.As(err, &parse) {
-			return &SyntaxError{Path: path, Line: 1, Column: 1, Message: err.Error(), cause: err}
-		}
-	}
-	return &SyntaxError{Path: path, Line: parse.Position.Line, Column: parse.Position.Col, Message: parse.Message, cause: err}
-}
-
-func parseTOML(text string) error {
-	var discard map[string]any
-	_, err := toml.Decode(text, &discard)
-	return err
+	_, _, err := decodeConfig(path, string(data))
+	return err // valid TOML is never rewritten
 }
 
 // audioDeviceKey is the one setting ddsonic used to write without quotes:
@@ -224,14 +194,11 @@ func topLevel(before string) bool {
 	return depth == 0
 }
 
-// QuoteString writes s as a TOML string, in the form Load reads back as s
-// where there is one. Load strips the quotes around a value and decodes no
-// escapes, so s goes between plain double quotes when it needs no escape,
-// and between single quotes (a TOML literal string, which has none) when it
-// holds a backslash or a double quote. Anything else, a control character or
-// both kinds of quote, is written as a basic string with TOML's escapes:
-// always valid TOML that means exactly s, though Load's reader does not
-// undo the escapes.
+// QuoteString writes s as a TOML string that Load reads back as s: between
+// plain double quotes when it needs no escape, between single quotes (a TOML
+// literal string, which has none) when it holds a backslash or a double
+// quote, and otherwise, a control character or both kinds of quote, as a
+// basic string with TOML's escapes.
 func QuoteString(s string) string {
 	control := strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f })
 	switch {

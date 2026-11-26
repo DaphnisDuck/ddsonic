@@ -7,16 +7,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"golang.org/x/oauth2"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 	"google.golang.org/api/youtube/v3"
 
@@ -33,7 +36,38 @@ type fakeDataAPI struct {
 	duration  map[string]string           // video ID → ISO 8601
 	totalBump map[string]int              // playlist ID → extra reported total
 	refuse    map[string]string           // playlist ID → 403 reason for its lookup
+	fail      map[string]apiFail          // endpoint (see endpoint) → its failure
 	calls     []string
+}
+
+// apiFail is an endpoint's scripted failure: a status and, when set, a
+// googleapi reason.
+type apiFail struct {
+	code   int
+	reason string
+}
+
+// endpoint names a request for fakeDataAPI.fail: "playlists" (yours),
+// "playlistItems", "videos:snippet" (categories), "videos:contentDetails"
+// (durations).
+func endpoint(r *http.Request) string {
+	name := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+	if name == "videos" {
+		return name + ":" + r.URL.Query().Get("part")
+	}
+	if name == "playlists" && r.URL.Query().Get("id") != "" {
+		return "playlists:id"
+	}
+	return name
+}
+
+func writeFail(w http.ResponseWriter, f apiFail) {
+	body := map[string]any{"code": f.code, "message": "refused"}
+	if f.reason != "" {
+		body["errors"] = []map[string]any{{"reason": f.reason, "message": "refused"}}
+	}
+	w.WriteHeader(f.code)
+	json.NewEncoder(w).Encode(map[string]any{"error": body})
 }
 
 func item(videoID, title, channel, channelID string) map[string]any {
@@ -50,6 +84,10 @@ func (f *fakeDataAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f.calls = append(f.calls, r.URL.Path+"?"+q.Get("playlistId")+strings.Join(q["id"], ","))
 	write := func(v any) { json.NewEncoder(w).Encode(v) }
+	if fail, ok := f.fail[endpoint(r)]; ok {
+		writeFail(w, fail)
+		return
+	}
 	switch {
 	case strings.HasSuffix(r.URL.Path, "/playlists"):
 		if id := q.Get("id"); id != "" {
@@ -230,12 +268,14 @@ func TestOAuthPlaylistRecord(t *testing.T) {
 
 // Running out of quota is not a playlist that has gone: it must fail the
 // read, not mark the playlist forbidden, or a sync drops a followed playlist.
+// ddsonic (#170): it fails it as a held limit, which stops the sync.
 func TestOAuthPlaylistRecordQuota(t *testing.T) {
 	c, f := newOAuthFixture(t)
 	f.refuse = map[string]string{"PLroad": "quotaExceeded", "PLshows": "rateLimitExceeded", "PLprivate": "forbidden"}
 	for _, id := range []string{"PLroad", "PLshows"} {
-		if _, err := c.PlaylistRecord(context.Background(), id); err == nil || errors.Is(err, catalog.ErrForbidden) {
-			t.Errorf("%s over quota = %v, want a plain error", id, err)
+		_, err := c.PlaylistRecord(context.Background(), id)
+		if rl, ok := errors.AsType[*catalog.RateLimitError](err); !ok || !rl.Quota || errors.Is(err, catalog.ErrForbidden) {
+			t.Errorf("%s over quota = %v, want a held limit", id, err)
 		}
 	}
 	if _, err := c.PlaylistRecord(context.Background(), "PLprivate"); !errors.Is(err, catalog.ErrForbidden) {
@@ -283,5 +323,134 @@ func TestSignInError(t *testing.T) {
 		if errors.Is(got, playlist.ErrNeedsAuth) != tt.needsAuth || !errors.Is(got, tt.err) {
 			t.Errorf("signInError(%v) = %v, want needs auth %v", tt.err, got, tt.needsAuth)
 		}
+	}
+}
+
+// ddsonic (#170): the Data API's rate-limit and quota answers are held
+// limits, each saying which; ordinary refusals and server errors are not.
+func TestDataAPILimits(t *testing.T) {
+	gerr := func(code int, reason string) error {
+		e := &googleapi.Error{Code: code, Message: "x"}
+		if reason != "" {
+			e.Errors = []googleapi.ErrorItem{{Reason: reason}}
+		}
+		return fmt.Errorf("call: %w", e)
+	}
+	tests := []struct {
+		err       error
+		reason    string // "" when not a limit
+		forbidden bool
+	}{
+		{gerr(403, "quotaExceeded"), "YouTube Data API: quotaExceeded", false},
+		{gerr(403, "dailyLimitExceeded"), "YouTube Data API: dailyLimitExceeded", false},
+		{gerr(403, "rateLimitExceeded"), "YouTube Data API: rateLimitExceeded", false},
+		{gerr(403, "userRateLimitExceeded"), "YouTube Data API: userRateLimitExceeded", false},
+		{gerr(429, ""), "YouTube Data API: HTTP 429", false},
+		{gerr(429, "rateLimitExceeded"), "YouTube Data API: rateLimitExceeded", false},
+		{gerr(403, "forbidden"), "", true},
+		{gerr(403, ""), "", true},
+		{gerr(404, "playlistNotFound"), "", true},
+		{gerr(500, "backendError"), "", false},
+		{gerr(503, ""), "", false},
+		{errors.New("dial tcp: refused"), "", false},
+	}
+	for _, tt := range tests {
+		err := apiError(tt.err)
+		rl, limited := errors.AsType[*catalog.RateLimitError](err)
+		switch {
+		case tt.reason != "" && (!limited || !rl.Quota || rl.Reason != tt.reason || !rl.Until.IsZero() || rl.RetryAfter != 0):
+			t.Errorf("apiError(%v) = %v, want a held limit %q with no reset time", tt.err, err, tt.reason)
+		case tt.reason == "" && limited:
+			t.Errorf("apiError(%v) = %v, want no limit", tt.err, err)
+		case errors.Is(err, catalog.ErrForbidden) != tt.forbidden:
+			t.Errorf("apiError(%v) = %v, forbidden want %t", tt.err, err, tt.forbidden)
+		case !errors.Is(err, tt.err):
+			t.Errorf("apiError(%v) = %v lost the original", tt.err, err)
+		}
+	}
+}
+
+// ddsonic (#170): every OAuth catalog read fails with a held limit when the
+// API answers one: listing playlists, classifying them, reading a
+// playlist's items, and its durations (no longer swallowed). An ordinary
+// duration failure still only leaves durations unknown.
+func TestOAuthReadsStopAtALimit(t *testing.T) {
+	limit := apiFail{403, "quotaExceeded"}
+	reads := map[string]func(c *OAuthCatalog) error{
+		"playlists": func(c *OAuthCatalog) error { _, err := c.PlaylistRecords(context.Background(), nil); return err },
+		"videos:snippet": func(c *OAuthCatalog) error {
+			_, err := c.PlaylistRecords(context.Background(), nil)
+			return err
+		},
+		"playlistItems": func(c *OAuthCatalog) error { _, err := c.LikedTrackRecords(context.Background()); return err },
+		"videos:contentDetails": func(c *OAuthCatalog) error {
+			_, err := c.PlaylistTrackRecords(context.Background(), "PLroad")
+			return err
+		},
+	}
+	for ep, read := range reads {
+		t.Run(ep, func(t *testing.T) {
+			c, f := newOAuthFixture(t)
+			f.fail = map[string]apiFail{ep: limit}
+			err := read(c)
+			if rl, ok := errors.AsType[*catalog.RateLimitError](err); !ok || !rl.Quota {
+				t.Errorf("= %v, want a held limit", err)
+			}
+		})
+	}
+	t.Run("ordinary duration failure", func(t *testing.T) {
+		c, f := newOAuthFixture(t)
+		f.fail = map[string]apiFail{"videos:contentDetails": {500, "backendError"}}
+		tracks, err := c.PlaylistTrackRecords(context.Background(), "PLroad")
+		if err != nil || len(tracks) != 60 || tracks[0].Duration != 0 {
+			t.Errorf("= %d tracks, %v; want 60 with unknown durations", len(tracks), err)
+		}
+	})
+}
+
+// durationAPI is an in-memory Data API for duration batches: the first
+// batch answers with quota after five batches are in flight; the others
+// wait for their context (or, if never cancelled, answer after a while).
+type durationAPI struct{ sends atomic.Int32 }
+
+func (d *durationAPI) RoundTrip(r *http.Request) (*http.Response, error) {
+	n := d.sends.Add(1)
+	if n == 1 {
+		for deadline := time.Now().Add(2 * time.Second); d.sends.Load() < 5 && time.Now().Before(deadline); {
+			time.Sleep(time.Millisecond)
+		}
+		body := `{"error":{"code":403,"message":"quota","errors":[{"reason":"quotaExceeded","message":"quota"}]}}`
+		return &http.Response{StatusCode: 403, Header: http.Header{"Content-Type": {"application/json"}},
+			Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+	}
+	select {
+	case <-r.Context().Done():
+		return nil, r.Context().Err()
+	case <-time.After(2 * time.Second):
+	}
+	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}},
+		Body: io.NopCloser(strings.NewReader(`{"items":[]}`)), Request: r}, nil
+}
+
+// ddsonic (#170): concurrent duration batches keep a quota answer. Once
+// one batch is answered with quota, no further batch is sent (those in
+// flight, five here, cannot be recalled and are cancelled), and the quota
+// is returned rather than swallowed.
+func TestDurationsStopAtALimit(t *testing.T) {
+	api := &durationAPI{}
+	svc, err := youtube.NewService(context.Background(), option.WithHTTPClient(&http.Client{Transport: api}), option.WithEndpoint("http://data.invalid/"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var items []itemInfo
+	for i := range 12 * youtubeAPIBatchSize {
+		items = append(items, itemInfo{videoID: "v" + strconv.Itoa(i)})
+	}
+	_, err = (*baseProvider)(nil).fetchDurations(context.Background(), svc, items)
+	if rl, ok := errors.AsType[*catalog.RateLimitError](err); !ok || !rl.Quota {
+		t.Errorf("fetchDurations = %v, want the quota", err)
+	}
+	if n := api.sends.Load(); n != 5 {
+		t.Errorf("%d batches sent; want 5 (those in flight when the quota came), not 12", n)
 	}
 }

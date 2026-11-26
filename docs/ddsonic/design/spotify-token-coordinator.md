@@ -5,7 +5,7 @@ review round 9 and marked where it stands (section 4.3, "CORRECTION"): the
 claim that closing a never-accepted Vorbis decoder is safe was wrong. The
 owner's decision on that (2026-10-13) is recorded there too.
 The design is implemented on branch `fix/spotify-signin`
-(see `plan.md`); the implementation is in review and is not accepted.
+(see `plan.md`); at revision 10 it was in review and not accepted (note, 2026-11-09: it shipped in `v1.0.0`).
 Revision 10 differs from revision 9, which was the reviewed design, in two
 things only, both in 14.5: the contract runner is a separate mandatory gate
 (`make sdk-contract`) and not part of `make check` (owner decision,

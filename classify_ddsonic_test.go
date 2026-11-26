@@ -194,7 +194,26 @@ func TestClassifyChange(t *testing.T) {
 			f.write("go.mod", "module x\n")
 		}, "full", rule("full go.mod")},
 		{"README is code, not docs", func(f *fixture) { f.write("README.md", "changed\n") }, "code", rule("code README.md")},
-		{"policy docs are full", func(f *fixture) { f.write("docs/ddsonic/acceptance.md", "x\n") }, "full", rule("full docs/ddsonic/acceptance.md")},
+		{"acceptance material is full", func(f *fixture) { f.write("docs/ddsonic/acceptance.md", "x\n") }, "full", rule("full docs/ddsonic/acceptance.md")},
+		{"policy prose is docs: CLAUDE.md", func(f *fixture) { f.write("CLAUDE.md", "x\n") }, "docs", rule("docs CLAUDE.md")},
+		{"policy prose is docs: SECURITY.md", func(f *fixture) { f.write("SECURITY.md", "x\n") }, "docs", rule("docs SECURITY.md")},
+		{"policy prose is docs: releasing.md", func(f *fixture) { f.write("docs/ddsonic/releasing.md", "x\n") }, "docs", rule("docs docs/ddsonic/releasing.md")},
+		{"policy prose is docs: a design note", func(f *fixture) { f.write("docs/ddsonic/design/n.md", "x\n") }, "docs", rule("docs docs/ddsonic/design/*.md")},
+		{"policy prose is docs: a nested design note", func(f *fixture) { f.write("docs/ddsonic/design/sub/n.md", "x\n") }, "docs", rule("docs docs/ddsonic/design/*.md")},
+		{"not prose in the design notes is full: text", func(f *fixture) { f.write("docs/ddsonic/design/n.txt", "x\n") }, "full", rule("full docs/ddsonic/design/*")},
+		{"not prose in the design notes is full: Go", func(f *fixture) { f.write("docs/ddsonic/design/x.go", "package design\n") }, "full", rule("full docs/ddsonic/design/*")},
+		{"not prose in the design notes is full: a test", func(f *fixture) { f.write("docs/ddsonic/design/x_test.go", "package design\n") }, "full", rule("full docs/ddsonic/design/*")},
+		{"not prose in the design notes is full: svg", func(f *fixture) { f.write("docs/ddsonic/design/d.svg", "<svg/>\n") }, "full", rule("full docs/ddsonic/design/*")},
+		{"not prose in the design notes is full: nested Go", func(f *fixture) { f.write("docs/ddsonic/design/sub/y.go", "package sub\n") }, "full", rule("full docs/ddsonic/design/*")},
+		{"AGENTS.md is full", func(f *fixture) { f.write("AGENTS.md", "x\n") }, "full", rule("full AGENTS.md")},
+		{"mixed: policy prose and code is code", func(f *fixture) {
+			f.write("CLAUDE.md", "x\n")
+			f.write("library/x.go", "package library\n// more\n")
+		}, "code", ""},
+		{"mixed: policy prose and the Makefile is full", func(f *fixture) {
+			f.write("CLAUDE.md", "x\n")
+			f.write("Makefile", "all:\n\ttrue\n")
+		}, "full", rule("full Makefile")},
 		{"an unknown path is full", func(f *fixture) { f.write("new/thing.txt", "x\n") }, "full", "no rule matches"},
 		{"downgrade: a Go file renamed to .md", func(f *fixture) {
 			f.git("mv", "library/y.go", "docs/y.md")

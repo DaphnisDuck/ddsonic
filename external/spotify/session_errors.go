@@ -32,7 +32,7 @@ func silentSessionError(err error) error {
 	if needsSignIn(err) {
 		return playlist.ErrNeedsAuth
 	}
-	return fmt.Errorf("spotify: sign-in unavailable: %w", err)
+	return fmt.Errorf("spotify: Spotify is unavailable for now; your sign-in is kept, try again later: %w", err) // not an account problem (#61)
 }
 
 // needsSignIn reports whether err means the stored sign-in is missing or no

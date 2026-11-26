@@ -40,6 +40,7 @@ import (
 	"github.com/bjarneo/cliamp/ipc"
 	"github.com/bjarneo/cliamp/library"
 	"github.com/bjarneo/cliamp/luaplugin"
+	"github.com/bjarneo/cliamp/lyrics"
 	"github.com/bjarneo/cliamp/mediactl"
 	"github.com/bjarneo/cliamp/player"
 	"github.com/bjarneo/cliamp/playlist"
@@ -115,6 +116,8 @@ func run(overrides config.Overrides, positional []string, daemon, visualizer60FP
 	}
 	overrides.Apply(&cfg)
 	hideProviders(&cfg) // ddsonic: only 1.0's providers (providers_ddsonic.go)
+	// ddsonic: the plain-HTTP NetEase lyrics only when asked for (#136).
+	lyrics.SetNetEaseFallback(cfg.Ddsonic.NetEaseLyrics)
 
 	closeLog, appliedLevel, logErr := initLogging(cfg.LogLevel)
 	defer closeLog()
@@ -273,20 +276,7 @@ func run(overrides config.Overrides, positional []string, daemon, visualizer60FP
 		if !explicitOAuth && !hasCookies && !hasFallbackOAuth {
 			fmt.Fprintf(os.Stderr, "YouTube: no credentials available (configure client_id/client_secret or cookies_from in config.toml)\n")
 		} else {
-			if !player.YTDLPAvailable() {
-				fmt.Fprintf(os.Stderr, "\nYouTube requires yt-dlp for audio playback.\n")
-				fmt.Fprintf(os.Stderr, "Install command: %s\n\n", player.YtdlpInstallHint())
-				fmt.Fprintf(os.Stderr, "Press Enter to install automatically, or Ctrl+C to skip... ")
-				fmt.Scanln()
-				fmt.Fprintf(os.Stderr, "Installing yt-dlp...\n")
-				if err := player.InstallYTDLP(); err != nil {
-					fmt.Fprintf(os.Stderr, "Installation failed: %v\n", err)
-					fmt.Fprintf(os.Stderr, "YouTube providers disabled. Install manually and restart.\n\n")
-				} else {
-					fmt.Fprintf(os.Stderr, "yt-dlp installed successfully!\n\n")
-				}
-			}
-			if player.YTDLPAvailable() {
+			if ytdlpReady(os.Stderr) { // ddsonic: instructions only, never an install (ytdlp_missing_ddsonic.go, #82)
 				var all, video, music playlist.Provider
 				if explicitOAuth {
 					oauthProviders := ytmusic.New(nil, ytClientID, ytClientSecret, hasCookies)
@@ -524,6 +514,8 @@ func run(overrides config.Overrides, positional []string, daemon, visualizer60FP
 	m.SetIPCBroker(pluginBroker)
 	m.SetCustomEQBands(cfg.EQ)
 	m.SetVisVolumeLinked(cfg.VisVolumeLinked)
+	m.SetSleepFade(cfg.Ddsonic.SleepFade)       // ddsonic: the sleep timer
+	m.SetSleepPresets(cfg.Ddsonic.SleepPresets) // ddsonic: its presets (#204)
 	m.SetVisRows(cfg.VisRows)
 	m.SetVisualizer60FPS(visualizer60FPS)
 
@@ -602,7 +594,9 @@ func run(overrides config.Overrides, positional []string, daemon, visualizer60FP
 	// synced catalog when one is available.
 	cat := openCatalog(spotifyProv, radioProv, cfg)
 	defer cat.close()
-	m.SetLibrary(library.Root(librarySources(providers, cfg.InitialDirectory, cat)))
+	src := librarySources(providers, cfg.InitialDirectory, cat) // ddsonic: #135
+	src.ChannelFavorites = channelFavorites(&m)                 // ddsonic: #135
+	m.SetLibrary(library.Root(src))
 	m.SetFrameBorder(cfg.Ddsonic.Border)
 	m.SetArtwork(artworkLoader(cfg.Ddsonic.Artwork)) // ddsonic: main_ddsonic.go
 	cat.configure(&m)

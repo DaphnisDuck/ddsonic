@@ -68,6 +68,7 @@ type SpotifyProvider struct {
 	meFetched  bool   // /v1/me has been attempted this session; suppresses retry on failure
 	mu         sync.Mutex
 	rate       rateGate                  // ddsonic: Spotify's current rate-limit block
+	calls      webCalls                  // ddsonic: Web API requests in progress (StopRequests)
 	trackCache map[string]*playlistCache // playlist ID → cache entry
 	pending    map[string]*pendingTracks
 	authCancel context.CancelFunc // cancels any in-progress OAuth flow
@@ -777,14 +778,15 @@ func (p *SpotifyProvider) NewStreamer(uri string) (beep.StreamSeekCloser, beep.F
 	return s, s.Format(), s.Duration(), nil
 }
 
-// webAPI calls the Spotify Web API via the session with retry on 429.
+// webAPI calls the Spotify Web API via the session. A 429 is not retried
+// (ddsonic: request_ddsonic.go).
 func (p *SpotifyProvider) webAPI(ctx context.Context, method, path string, query url.Values) (*http.Response, error) {
 	return p.webAPIWithBody(ctx, method, path, query, nil, "", http.StatusOK)
 }
 
 // webAPIWithBody is like webAPI but accepts an optional request body, content type,
-// and a set of acceptable HTTP status codes (e.g. 200, 201). Retries 429 with
-// exponential backoff (honoring Retry-After when present).
+// and a set of acceptable HTTP status codes (e.g. 200, 201). ddsonic: a 429
+// closes the rate-limit gate and fails with a *catalog.RateLimitError.
 func (p *SpotifyProvider) webAPIWithBody(ctx context.Context, method, path string, query url.Values, body io.Reader, contentType string, acceptStatus ...int) (*http.Response, error) {
 	// Buffer the body so it can be replayed on retry.
 	var bodyBytes []byte
@@ -803,7 +805,7 @@ func (p *SpotifyProvider) webAPIWithBody(ctx context.Context, method, path strin
 	// write belongs to is fixed before the first wait: the caller's action
 	// (WithSignIn), or this request's own. Upstream read the session and
 	// sent the request here, and returned a 401 as any other status.
-	call := &apiCall{method: method, path: path, query: query, body: bodyBytes, contentType: contentType, waitRate: true}
+	call := &apiCall{method: method, path: path, query: query, body: bodyBytes, contentType: contentType}
 	if isWrite(method) {
 		call.pin = p.signInPinFrom(ctx)
 	}

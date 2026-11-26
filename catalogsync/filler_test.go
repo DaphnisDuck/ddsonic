@@ -257,3 +257,25 @@ func TestFetchAlbumTracksCachesAndSkipsTheFill(t *testing.T) {
 		t.Errorf("fetched %v", got)
 	}
 }
+
+// ddsonic: an exhausted quota is never retried in the background: the run
+// ends at once, with the quota error, without waiting and without fetching
+// the next album.
+func TestFillerStopsOnAnExhaustedQuota(t *testing.T) {
+	store, src, f, waits := fillerSetup(t, "A", "B")
+	quota := &catalog.RateLimitError{RetryAfter: time.Minute, Quota: true}
+	src.errs["A"] = []error{quota}
+	err := f.Run(context.Background())
+	if rl, ok := errors.AsType[*catalog.RateLimitError](err); !ok || !rl.Quota {
+		t.Fatalf("Run() = %v, want the quota error", err)
+	}
+	if got := src.callList(); !slices.Equal(got, []string{"A"}) {
+		t.Errorf("fetched %v, want A once and nothing after", got)
+	}
+	if len(*waits) != 0 {
+		t.Errorf("waits = %v, want none", *waits)
+	}
+	if left := uncached(t, store); len(left) != 2 {
+		t.Errorf("uncached = %v, want both left", left)
+	}
+}

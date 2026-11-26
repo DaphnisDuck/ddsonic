@@ -801,11 +801,11 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 
 	case "+", "=":
-		m.player.SetVolume(m.player.Volume() + 1)
+		m.setVolumeByUser(m.player.Volume() + 1) // ddsonic: and a command for the sleep timer
 		m.notifyPlayback()
 
 	case "-":
-		m.player.SetVolume(m.player.Volume() - 1)
+		m.setVolumeByUser(m.player.Volume() - 1) // ddsonic: and a command for the sleep timer
 		m.notifyPlayback()
 
 	case "r":
@@ -818,6 +818,9 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.playlist.ToggleShuffle()
 		m.saveConfigKey("shuffle", fmt.Sprintf("%v", m.playlist.Shuffled()))
 		return m.rearmPreload()
+
+	case "Z": // ddsonic: the sleep timer (sleep_ddsonic.go)
+		m.cycleSleepTimer()
 
 	case "tab":
 		m.focus = m.nextMainFocus(m.focus)
@@ -1063,10 +1066,10 @@ func (m *Model) handleFullVisualizerKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "shift+right":
 		return m.doSeek(m.seekStepLarge)
 	case "+", "=":
-		m.player.SetVolume(m.player.Volume() + 1)
+		m.setVolumeByUser(m.player.Volume() + 1) // ddsonic: and a command for the sleep timer
 		m.notifyPlayback()
 	case "-":
-		m.player.SetVolume(m.player.Volume() - 1)
+		m.setVolumeByUser(m.player.Volume() - 1) // ddsonic: and a command for the sleep timer
 		m.notifyPlayback()
 	case "v":
 		m.vis.CycleMode()
@@ -1225,6 +1228,7 @@ func (m *Model) handleJumpKey(msg tea.KeyPressMsg) tea.Cmd {
 			m.status.Warning(m.jumpErr, statusTTLDefault)
 			return nil
 		}
+		m.sleepCommand() // ddsonic: a transport command (sleep_ddsonic.go)
 		if err := m.player.Seek(target - m.player.Position()); err != nil {
 			m.jumpErr = "Seek failed: " + err.Error()
 			m.status.Warning(m.jumpErr, statusTTLDefault)
@@ -1750,6 +1754,7 @@ func (m *Model) handleURLInputKey(msg tea.KeyPressMsg) tea.Cmd {
 		if input != "" {
 			m.feedLoading = true
 			m.status.Activity("Loading URL...", statusTTLLong)
+			m.sleepLaterPlay(false) // ddsonic: the URL plays when it arrives (sleep_ddsonic.go)
 			return resolveURLCmd(input, true)
 		}
 		m.urlInputting = true
@@ -3103,8 +3108,9 @@ func (m *Model) handleQueueKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "d":
 		removed := false
 		if qLen > 0 {
-			m.playlistUndo = playlistUndo{active: true, snapshot: m.playlist.Snapshot()}
+			snapshot := m.playlist.Snapshot()
 			m.playlist.RemoveQueueAt(m.queue.cursor)
+			m.armPlaylistUndo(playlistUndo{snapshot: snapshot}) // ddsonic: #22
 			removed = true
 			m.status.Show("Removed queued track (Ctrl+Z to undo)", statusTTLDefault)
 		}
@@ -3115,8 +3121,9 @@ func (m *Model) handleQueueKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "c":
 		cleared := false
 		if qLen > 0 {
-			m.playlistUndo = playlistUndo{active: true, snapshot: m.playlist.Snapshot()}
+			snapshot := m.playlist.Snapshot()
 			m.playlist.ClearQueue()
+			m.armPlaylistUndo(playlistUndo{snapshot: snapshot}) // ddsonic: #22
 			cleared = true
 			m.normalizeQueueOverlay()
 			m.status.Show("Cleared queue (Ctrl+Z to undo)", statusTTLDefault)

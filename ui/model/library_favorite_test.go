@@ -6,6 +6,7 @@ package model
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -30,6 +31,7 @@ import (
 // favFixture is what newFavModel builds its library from.
 type favFixture struct {
 	favs     *radio.Favorites
+	chans    *radio.ChannelFavorites // ddsonic: #135
 	uno, dos radio.CatalogStation
 	loads    *[]string // the search level's queries, one per load
 }
@@ -39,7 +41,9 @@ type favFixture struct {
 //
 //	Radio          the library's own Radio menu (Favorites, Browse Stations)
 //	Chile          a directory list, titled as a country list decorates it
-//	cliamp radio   a channel row, which plays but is no directory station
+//	cliamp radio   a channel stream row (Groove), which plays but is no
+//	               directory station; the real channels, from the dated
+//	               snapshot, are under Radio > Browse Stations
 //	Mixed          a directory station among streams that are not
 //	Search         results holding a station row and a directory search
 func newFavModel(t *testing.T) (Model, favFixture) {
@@ -47,6 +51,7 @@ func newFavModel(t *testing.T) (Model, favFixture) {
 	t.Setenv("CLIAMP_CONFIG_DIR", t.TempDir())
 	fx := favFixture{
 		favs:  radio.LoadFavorites(),
+		chans: radio.LoadChannelFavorites(),
 		uno:   radio.CatalogStation{Name: "Radio Uno", URL: "https://uno.example/stream", Country: "Chile", Codec: "MP3", Bitrate: 128, Tags: "news"},
 		dos:   radio.CatalogStation{Name: "Radio Dos", URL: "https://dos.example/stream", Country: "Chile"},
 		loads: &[]string{},
@@ -67,7 +72,14 @@ func newFavModel(t *testing.T) (Model, favFixture) {
 	httpTrack := playlist.Track{Path: "https://files.example/song.mp3", Title: "A song", Stream: true}
 	file := playlist.Track{Path: "/music/song.flac", Title: "A file"}
 
-	entries, err := library.Root(library.Sources{Radio: prov}).Load(context.Background())
+	channels := snapshotChannels(t)
+	entries, err := library.Root(library.Sources{Radio: prov, Channels: channels, ChannelFavorites: func() []library.ChannelRef {
+		var refs []library.ChannelRef
+		for _, c := range fx.chans.Channels() {
+			refs = append(refs, library.ChannelRef{ID: c.ID, Name: c.Name})
+		}
+		return refs
+	}}).Load(context.Background())
 	if err != nil || len(entries) == 0 || entries[0].Title != "Radio" {
 		t.Fatalf("library root = %+v, %v; want Radio first", entries, err)
 	}
@@ -91,9 +103,44 @@ func newFavModel(t *testing.T) (Model, favFixture) {
 		library.Entry{Title: "Mixed", Open: tracks("Mixed", uno, channel, custom, httpTrack, file)},
 		library.Entry{Title: "Search", Open: search},
 	)
-	m := newLibraryModel(root)
+	// The stores are set before the library, in main.go's order.
+	m := Model{player: &playbackFakeEngine{}, playlist: playlist.New(), plVisible: 10}
 	m.SetRadioFavorites(fx.favs)
+	m.SetChannelFavorites(fx.chans)
+	m.SetLibrary(root)
 	return m, fx
+}
+
+// channelsProv is the cliamp radio channel list of the dated real snapshot
+// (external/radio/testdata), listed as radio.ChannelProvider lists it: each
+// channel with its song count; a channel's songs are one stand-in song.
+type channelsProv struct{ infos []playlist.PlaylistInfo }
+
+func snapshotChannels(t *testing.T) *channelsProv {
+	t.Helper()
+	data, err := os.ReadFile("../../external/radio/testdata/channels-20261125.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct{ Stations []radio.Channel }
+	if err := json.Unmarshal(data, &doc); err != nil || len(doc.Stations) == 0 {
+		t.Fatalf("snapshot: %v", err)
+	}
+	p := &channelsProv{}
+	for _, c := range doc.Stations {
+		p.infos = append(p.infos, playlist.PlaylistInfo{ID: c.ID, Name: c.Name, TrackCount: c.Tracks})
+	}
+	return p
+}
+
+func (*channelsProv) Name() string { return "cliamp radio" }
+
+func (p *channelsProv) Playlists() ([]playlist.PlaylistInfo, error) {
+	return slices.Clone(p.infos), nil
+}
+
+func (p *channelsProv) Tracks(id string) ([]playlist.Track, error) {
+	return []playlist.Track{{Path: "https://songs.example/" + id + "/1", Title: id + " song"}}, nil
 }
 
 // catalogSearch is a search level read from every source's catalog, as the
@@ -319,7 +366,7 @@ func TestFavoriteKeyIgnoresWhatIsNotADirectoryStation(t *testing.T) {
 	}{
 		{"menu row", func(t *testing.T, m Model) Model { libSelect(t, &m, "Radio"); return m }},
 		{"Favorites menu row", rowAt("Radio", "Favorites")},
-		{"cliamp radio channel row", rowAt("cliamp radio", "Groove")},
+		{"cliamp radio channel row without songs", rowAt("cliamp radio", "Groove")},
 		{"cliamp radio channel stream row", rowAt("Mixed", "Groove")},
 		{"radios.toml station row", rowAt("Mixed", "cliamp radio")},
 		{"HTTP track row", rowAt("Mixed", "A song")},
@@ -353,7 +400,56 @@ func TestFavoriteKeyIgnoresWhatIsNotADirectoryStation(t *testing.T) {
 			if got := favSaved(); len(got) != 0 {
 				t.Errorf("saved favorites = %+v, want none", got)
 			}
+			if got := fx.chans.Channels(); len(got) != 0 {
+				t.Errorf("channel favorites = %+v, want none", got)
+			}
 		})
+	}
+}
+
+// f favorites a cliamp radio channel with songs by its ID, apart from the
+// station favorites (issue #135). The channel shows, marked, in Radio →
+// Favorites, where Enter queues its songs and f removes it.
+func TestFavoriteKeyTogglesASelectedChannel(t *testing.T) {
+	m, fx := newFavModel(t)
+	m = libEnter(t, libEnter(t, libEnter(t, m, "Radio"), "Browse Stations"), "cliamp radio")
+	libSelect(t, &m, "Amiga")
+	if got := favKeyHint(m); got != "Favorite" {
+		t.Errorf("key bar hint for f = %q, want Favorite", got)
+	}
+	m = libPress(t, m, "f")
+	want := []radio.ChannelFavorite{{ID: "amiga", Name: "Amiga"}}
+	if got := radio.LoadChannelFavorites().Channels(); !slices.Equal(got, want) {
+		t.Fatalf("saved channel favorites = %+v, want %+v", got, want)
+	}
+	if !strings.Contains(m.status.text, "Favorited channel: Amiga") {
+		t.Errorf("status = %q", m.status.text)
+	}
+	if got := favKeyHint(m); got != "Unfavorite" {
+		t.Errorf("key bar hint for f on a favorite = %q, want Unfavorite", got)
+	}
+	if len(favSaved()) != 0 || len(fx.favs.Stations()) != 0 {
+		t.Errorf("station favorites = %+v, want none", favSaved())
+	}
+
+	m = libPress(t, libPress(t, m, "esc"), "esc")
+	m = libEnter(t, m, "Favorites")
+	if got := libRowTitles(m); !slices.Equal(got, []string{"Amiga"}) {
+		t.Fatalf("Favorites = %v, want the channel", got)
+	}
+	if e := m.libTop().entries[0]; e.Detail != "cliamp radio" {
+		t.Errorf("channel favorite's marker = %q", e.Detail)
+	}
+	m = libPress(t, m, "enter")
+	if cur, _ := m.playlist.Current(); cur.Path != "https://songs.example/amiga/1" {
+		t.Errorf("Enter plays %q, want the channel's songs", cur.Path)
+	}
+	m = libPress(t, m, "f")
+	if got := libRowTitles(m); len(got) != 0 {
+		t.Errorf("Favorites after f = %v, want empty", got)
+	}
+	if got := radio.LoadChannelFavorites().Channels(); len(got) != 0 {
+		t.Errorf("saved channel favorites = %+v, want none", got)
 	}
 }
 

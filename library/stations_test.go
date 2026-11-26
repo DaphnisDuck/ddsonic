@@ -229,7 +229,7 @@ func noteOf(l Level) []string {
 // all of them, says nothing.
 func TestStationListsSortAZ(t *testing.T) {
 	prov := &shuffledRadio{fakeProvider: fakeProvider{name: "Radio"}, stations: unsortedStations}
-	r := radio(prov, nil)
+	r := radio(prov, nil, nil)
 	browse := child(t, r, "Browse Stations")
 	selected := []string{"Top 200 by votes, listed A–Z."}
 	lists := []struct {
@@ -278,7 +278,7 @@ func TestStationListWithoutSelectionHasNoNote(t *testing.T) {
 // order too: grouped by region, the provider's order within one.
 func TestRadioCategories(t *testing.T) {
 	prov := &shuffledRadio{fakeProvider: fakeProvider{name: "Radio"}, stations: unsortedStations}
-	browse := child(t, radio(prov, nil), "Browse Stations")
+	browse := child(t, radio(prov, nil, nil), "Browse Stations")
 
 	tags := load(t, child(t, browse, "Genres & Tags"))
 	want := titles(sliceEntries(tagsByCount))
@@ -339,7 +339,7 @@ func TestCliampRadioChannelsSortAZ(t *testing.T) {
 	for _, l := range lists {
 		channels.tracks[l.ID] = []playlist.Track{st(l.Name, "https://"+l.ID)}
 	}
-	rows := load(t, child(t, child(t, radio(&fakeRadio{fakeProvider{name: "Radio"}}, channels), "Browse Stations"), "cliamp radio"))
+	rows := load(t, child(t, child(t, radio(&fakeRadio{fakeProvider{name: "Radio"}}, channels, nil), "Browse Stations"), "cliamp radio"))
 	if got, want := titles(rows), []string{"ambient", "Ambient · live", "Ambient · live", "Mixed", "Zen"}; !slices.Equal(got, want) {
 		t.Fatalf("channels = %q, want %q", got, want)
 	}
@@ -349,7 +349,7 @@ func TestCliampRadioChannelsSortAZ(t *testing.T) {
 			t.Errorf("row %d (%q) plays %+v, %v; want channel %q", i, rows[i].Title, played, err, wantID)
 		}
 	}
-	if noteOf(child(t, child(t, radio(&fakeRadio{fakeProvider{name: "Radio"}}, channels), "Browse Stations"), "cliamp radio")) != nil {
+	if noteOf(child(t, child(t, radio(&fakeRadio{fakeProvider{name: "Radio"}}, channels, nil), "Browse Stations"), "cliamp radio")) != nil {
 		t.Error("the channels have a note")
 	}
 	if !slices.EqualFunc(channels.lists, lists, func(a, b playlist.PlaylistInfo) bool { return a == b }) {

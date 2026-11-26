@@ -22,6 +22,9 @@ type Sources struct {
 	// Channels is the built-in "cliamp radio" channel list, shown under
 	// Radio → Browse Stations.
 	Channels playlist.Provider
+	// ChannelFavorites lists the favorite channels, in saved order, for
+	// Radio → Favorites and search. ddsonic: issue #135.
+	ChannelFavorites func() []ChannelRef
 	// MusicDir is the folder the catalog indexes for Local's Albums,
 	// Artists and Genres.
 	MusicDir string
@@ -60,7 +63,7 @@ func Root(src Sources) Level {
 		entries = append(entries, Entry{Title: "Local", Open: local(src.Local), Source: catalog.Local})
 	}
 	if src.Radio != nil || src.Channels != nil {
-		entries = append(entries, Entry{Title: "Radio", Open: radio(src.Radio, src.Channels), Source: catalog.Radio})
+		entries = append(entries, Entry{Title: "Radio", Open: radio(src.Radio, src.Channels, src.ChannelFavorites), Source: catalog.Radio})
 	}
 	// With a catalog, Search is the unified search screen; without, the
 	// provider's own search.
@@ -250,12 +253,12 @@ type starredStationsLevel struct{ funcLevel }
 func (*starredStationsLevel) StarredStations() {}
 
 // radio returns the Radio source menu: Favorites and Browse Stations.
-func radio(prov, channels playlist.Provider) Level {
+func radio(prov, channels playlist.Provider, channelFavs func() []ChannelRef) Level {
 	var entries []Entry
-	if fs, ok := prov.(favoriteStations); ok {
-		entries = append(entries, Entry{Title: "Favorites", Open: &starredStationsLevel{funcLevel{"Favorites", func(context.Context) ([]Entry, error) {
-			return trackEntries(sortedStations(fs.FavoriteTracks())), nil
-		}}}})
+	// ddsonic: Favorites also lists the favorite channels (#135).
+	fs, ok := prov.(favoriteStations)
+	if ok || (channels != nil && channelFavs != nil) {
+		entries = append(entries, Entry{Title: "Favorites", Open: &starredStationsLevel{funcLevel{"Favorites", radioFavorites(fs, channels, channelFavs)}}})
 	}
 	entries = append(entries, Entry{Title: "Browse Stations", Open: browseStations(prov, channels)})
 	return Menu("Radio", entries...)
@@ -268,9 +271,7 @@ func browseStations(prov, channels playlist.Provider) Level {
 		// channels (main.go, streams.m3u) is a separate list and keeps the
 		// server's order.
 		entries = append(entries, Entry{Title: channels.Name(), Open: playlistsLevel(channels.Name(), sortedPlaylists{channels}, nil, func(info playlist.PlaylistInfo) Entry {
-			return Entry{Title: info.Name, Play: func(context.Context) ([]playlist.Track, error) {
-				return channels.Tracks(info.ID)
-			}}
+			return channelRow(channels, info) // ddsonic: f favorites it (#135)
 		})})
 	}
 	// The provider advertises its category routes (countries, tags) as

@@ -46,6 +46,27 @@ native() {
 	cat "$2"
 }
 native "mpg123" /opt/mpg123/COPYING
+# ddsonic: one libmpg123 source file, src/libmpg123/icy2utf8.c, carries its
+# own notice, whose permission asks that it be retained or reproduced in an
+# accompanying document (#121). It is reproduced here from the mpg123 source
+# release in the build tree's native/ (release.sh), the archive the source
+# tarball ships, as packaging/darwin-arm64/notices.sh does.
+icy=$(tar -xOjf "native/mpg123-$MPG123_VERSION.tar.bz2" "mpg123-$MPG123_VERSION/src/libmpg123/icy2utf8.c" |
+	awk '$0 == "/*-" { on = 1; next } on && $0 == " *-" { exit } on')
+case $icy in
+*"retained or reproduced in an accompanying document"*) ;;
+*)
+	echo "notices: no notice found in mpg123's src/libmpg123/icy2utf8.c" >&2
+	exit 1
+	;;
+esac
+section "mpg123: src/libmpg123/icy2utf8.c"
+cat <<'ICY'
+This file of libmpg123 is linked into the executable. It carries its own
+notice, reproduced here from the file:
+
+ICY
+printf '%s\n' "$icy"
 native "FLAC" /usr/share/doc/libflac-dev/copyright
 native "libvorbis" /usr/share/doc/libvorbis-dev/copyright
 native "libogg" /usr/share/doc/libogg-dev/copyright

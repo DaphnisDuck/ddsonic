@@ -858,8 +858,8 @@ func waitFor(t *testing.T, what string, ok func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-// A write belongs to the sign-in it was asked under, for all of it: a wait
-// for a rate limit included, and the second request of a write made of two.
+// A write belongs to the sign-in it was asked under, for all of it: the
+// second request of a write made of two included.
 // When the sign-in changes meanwhile it ends unsent, and the user asks again.
 func TestWriteStaysWithItsSignIn(t *testing.T) {
 	post := func(p *SpotifyProvider, ctx context.Context) error {
@@ -870,40 +870,19 @@ func TestWriteStaysWithItsSignIn(t *testing.T) {
 		}
 		return err
 	}
-	rateLimitedOnce := func(n int, _ *http.Request) (int, http.Header) {
-		if n == 1 {
-			return http.StatusTooManyRequests, http.Header{"Retry-After": {"1"}}
-		}
-		return http.StatusOK, nil
-	}
-	t.Run("a rate-limit wait, the same sign-in", func(t *testing.T) {
+	// ddsonic: a write that is rate limited is not sent again (it used to
+	// be, after a wait in which the sign-in could change).
+	t.Run("a rate limit ends the write, sent once", func(t *testing.T) {
 		storeCreds(t)
-		h := fakeSpotifyHTTP(t, tokenOK, rateLimitedOnce)
+		h := fakeSpotifyHTTP(t, tokenOK, func(n int, _ *http.Request) (int, http.Header) {
+			if n == 1 {
+				return http.StatusTooManyRequests, http.Header{"Retry-After": {"1"}}
+			}
+			return http.StatusOK, nil
+		})
 		p := New(goodSession(), "client", 320)
-		if err := post(p, context.Background()); err != nil || h.apiCalls.Load() != 2 {
-			t.Errorf("the write = %v after %d requests, want it sent again after the wait", err, h.apiCalls.Load())
-		}
-	})
-	t.Run("a rate-limit wait, signed in again meanwhile", func(t *testing.T) {
-		storeCreds(t)
-		stubBuild(t)
-		h := fakeSpotifyHTTP(t, tokenOK, rateLimitedOnce)
-		sess := goodSession()
-		p := New(sess, "client", 320)
-
-		write := make(chan error, 1)
-		go func() { write <- post(p, context.Background()) }()
-		waitFor(t, "the first request", func() bool { return h.apiCalls.Load() == 1 })
-		sess.refuseSignIn(sess.generation())
-		if err := p.Authenticate(); err != nil {
-			t.Fatal(err)
-		}
-		err := <-write
-		if h.apiCalls.Load() != 1 {
-			t.Fatalf("the write was sent %d times, the second under the new sign-in; want 1", h.apiCalls.Load())
-		}
-		if !errors.Is(err, errSignInChanged) || errors.Is(err, playlist.ErrNeedsAuth) {
-			t.Errorf("the write = %v, want errSignInChanged", err)
+		if err := post(p, context.Background()); !errors.As(err, new(*catalog.RateLimitError)) || h.apiCalls.Load() != 1 {
+			t.Errorf("the write = %v after %d requests, want a RateLimitError after 1", err, h.apiCalls.Load())
 		}
 	})
 	t.Run("a write made of two requests", func(t *testing.T) {

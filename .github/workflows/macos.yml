@@ -68,13 +68,16 @@ jobs:
       - name: Codec libraries from their pinned sources (up to 3 attempts, for network resets)
         run: |
           for attempt in 1 2 3; do
-            rm -rf "$RUNNER_TEMP/codecs" "$RUNNER_TEMP/codecs.log"
-            if sh packaging/darwin-arm64/codecs.sh "$RUNNER_TEMP/codecs" > "$RUNNER_TEMP/codecs.log" 2>&1; then
+            # Each attempt keeps its own log, so every failure point is shown.
+            log="$RUNNER_TEMP/codecs.attempt-$attempt.log"
+            rm -rf "$RUNNER_TEMP/codecs"
+            if sh packaging/darwin-arm64/codecs.sh "$RUNNER_TEMP/codecs" > "$log" 2>&1; then
               echo "codecs.sh: attempt $attempt of 3 succeeded"
               break
             fi
-            echo "codecs.sh: attempt $attempt of 3 failed"
-            if [ "$attempt" = 3 ]; then tail -n 50 "$RUNNER_TEMP/codecs.log"; exit 1; fi
+            echo "codecs.sh: attempt $attempt of 3 failed; the end of its log:"
+            tail -n 50 "$log"
+            if [ "$attempt" = 3 ]; then exit 1; fi
             sleep 30
           done
           cat "$RUNNER_TEMP/codecs/codecs.txt"
@@ -148,19 +151,22 @@ jobs:
           if [ "$EVENT" != pull_request ]; then
             test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
           fi
-      - name: Go, as pinned in mise.toml, checked against its SHA-256
+      - name: Go, as pinned in the built commit's mise.toml, checked against its SHA-256
         run: |
-          sh packaging/darwin-arm64/ci-go.sh "$RUNNER_TEMP"
+          sh packaging/darwin-arm64/ci-go.sh "$RUNNER_TEMP" "$EXPECTED_COMMIT" # ddsonic: release.sh requires the tag's own Go
       - name: Codec libraries from their pinned sources (up to 3 attempts, for network resets)
         run: |
           for attempt in 1 2 3; do
-            rm -rf "$RUNNER_TEMP/codecs" "$RUNNER_TEMP/codecs.log"
-            if DDSONIC_MACOS_TARGET="$MACOS_TARGET" sh packaging/darwin-arm64/codecs.sh "$RUNNER_TEMP/codecs" > "$RUNNER_TEMP/codecs.log" 2>&1; then
+            # Each attempt keeps its own log, so every failure point is shown.
+            log="$RUNNER_TEMP/codecs.attempt-$attempt.log"
+            rm -rf "$RUNNER_TEMP/codecs"
+            if DDSONIC_MACOS_TARGET="$MACOS_TARGET" sh packaging/darwin-arm64/codecs.sh "$RUNNER_TEMP/codecs" > "$log" 2>&1; then
               echo "codecs.sh: attempt $attempt of 3 succeeded"
               break
             fi
-            echo "codecs.sh: attempt $attempt of 3 failed"
-            if [ "$attempt" = 3 ]; then tail -n 50 "$RUNNER_TEMP/codecs.log"; exit 1; fi
+            echo "codecs.sh: attempt $attempt of 3 failed; the end of its log:"
+            tail -n 50 "$log"
+            if [ "$attempt" = 3 ]; then exit 1; fi
             sleep 30
           done
           cat "$RUNNER_TEMP/codecs/codecs.txt"

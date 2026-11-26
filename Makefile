@@ -1,6 +1,8 @@
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+VERSION ?= $(shell sh tools/version.sh 2>/dev/null || echo dev)
 # ddsonic: fork binary name; `make build BINARY=cliamp` for the upstream name
 BINARY  ?= ddsonic
+# ddsonic: VERSION (line 1) is the highest stable tag below HEAD and the
+# commits since it, e.g. v1.0.0-56-g1a2b3c4 (tools/version.sh, #87).
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
 # ddsonic: the pinned developer tools (tools/devtools.sh, `make tools`) live

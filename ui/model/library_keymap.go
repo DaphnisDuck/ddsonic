@@ -66,6 +66,7 @@ var (
 	libQueueKeys = []libKeyHelp{
 		{[]string{"tab", "esc", "b"}, "Tab Esc", "Library"},
 		libSkipKey,
+		{[]string{"X"}, "X", "Clear queue"}, // library_queue_clear.go
 	}
 
 	// libPlayerKeys are cliamp's transport keys, live in every view but the
@@ -73,6 +74,7 @@ var (
 	libPlayerKeys = []libKeyHelp{
 		{[]string{"s"}, "s", "Stop"},
 		{[]string{"+", "=", "-"}, "+ -", "Volume"},
+		{[]string{"Z"}, "Z", "Sleep"}, // the sleep timer (sleep_ddsonic.go)
 		{[]string{"ctrl+g"}, "Ctrl+G", "Hide keys"},
 	}
 

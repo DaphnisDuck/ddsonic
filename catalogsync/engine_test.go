@@ -3,10 +3,12 @@ package catalogsync
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/bjarneo/cliamp/catalog"
 	"github.com/bjarneo/cliamp/catalog/sqlite"
@@ -21,6 +23,7 @@ type fakeSource struct {
 	pages   map[string][][]string
 	failAt  map[string]int
 	gate    chan struct{} // if set, Fetch waits on it
+	failErr error         // if set, what a failing page returns instead of errPage
 	known   Known
 	fetched []string
 }
@@ -72,6 +75,9 @@ func (f *fakeSource) Fetch(ctx context.Context, collection string, known Known) 
 	snap := catalog.Snapshot{Provider: catalog.Spotify, Collection: collection}
 	for i, page := range f.pages[collection] {
 		if f.failAt[collection] == i+1 {
+			if f.failErr != nil {
+				return catalog.Snapshot{}, f.failErr
+			}
 			return catalog.Snapshot{}, errPage
 		}
 		for _, id := range page {
@@ -316,5 +322,51 @@ func TestSyncCancelledBetweenCollectionsReportsIt(t *testing.T) {
 	}
 	if got := albumIDs(t, store); !slices.Equal(got, []string{"A"}) {
 		t.Errorf("albums = %v, want only the collection synced before cancelling", got)
+	}
+}
+
+// stoppingSource is fakeSource asking the engine to stop at a held limit,
+// as YouTube's source does.
+type stoppingSource struct{ *fakeSource }
+
+func (stoppingSource) StopsAtHold() bool { return true }
+
+// ddsonic (#170): for a source that asks for it (YouTube), a collection
+// that fails with a spent quota, or anything held like one, ends the sync:
+// the next collection is not fetched. An ordinary rate limit does not. A
+// source that does not ask (Spotify) goes on to the next collection, as
+// before.
+func TestSyncStopsAfterAQuota(t *testing.T) {
+	quota := &catalog.RateLimitError{Quota: true, Reason: "YouTube Data API: quotaExceeded"}
+	for name, tc := range map[string]struct {
+		err   error
+		stops bool // the source asks to stop
+		next  bool
+	}{
+		"quota":              {fmt.Errorf("page: %w", quota), true, false},
+		"rate limit":         {fmt.Errorf("page: %w", &catalog.RateLimitError{RetryAfter: time.Second}), true, true},
+		"quota, not stopped": {fmt.Errorf("page: %w", quota), false, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, src, _, _ := setup(t)
+			var engSrc Source = src
+			if tc.stops {
+				engSrc = stoppingSource{src}
+			}
+			eng := New(store, func(Event) {}, engSrc)
+			src.set("albums", []string{"A"})
+			src.set("other", []string{"X"})
+			src.fail("albums", 1)
+			src.failErr = tc.err
+			if err := eng.Sync(context.Background(), catalog.Spotify); !errors.Is(err, tc.err) {
+				t.Fatalf("Sync() = %v, want the albums failure", err)
+			}
+			src.mu.Lock()
+			fetched := slices.Clone(src.fetched)
+			src.mu.Unlock()
+			if got := slices.Contains(fetched, "other"); got != tc.next {
+				t.Errorf("fetched %v; next collection fetched %t, want %t", fetched, got, tc.next)
+			}
+		})
 	}
 }

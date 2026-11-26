@@ -12,8 +12,13 @@
 #   macOS workflow derives from the tag it was started for), the commit must
 #   be that one;
 # - a version that sources.txt does not pin needs DDSONIC_EXPECTED_COMMIT.
-# Any mismatch fails, so a moved or substituted tag cannot build under the
-# label.
+# Any mismatch fails. This checks the tag against DDSONIC_EXPECTED_COMMIT
+# and/or sources.txt; it does not check the checked-out commit.
+# Only a version pinned in sources.txt is checked against an
+# identity held outside the tag. For any other version the expected commit
+# comes from the same tag (or the commit the workflow run was started for),
+# so a tag moved before the run is not detected here; the repository's tag
+# ruleset is what guards that (docs/ddsonic/releasing.md).
 set -eu
 
 version=${1:?usage: tag-commit.sh <version>}

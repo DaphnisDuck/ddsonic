@@ -59,7 +59,7 @@ github.com/stretchr/testify/@v/v1.12.1
 root=$(cd "$(dirname "$0")/.." && pwd)
 devtools=${DDSONIC_DEVTOOLS:-$HOME/.local/share/ddsonic/devtools}
 
-# go_pin is the Go version mise.toml pins, e.g. 1.27.3.
+# go_pin is the Go version mise.toml pins, e.g. 1.27.4.
 go_pin() {
 	sed -n 's/^go *= *"\([^"]*\)".*/\1/p' "$root/mise.toml"
 }
@@ -121,6 +121,15 @@ fetch_archives() {
 	(cd tools/sdkgate && go mod download)
 	scratch=$(mktemp -d)
 	(cd "$scratch" && go mod init ddsonic.invalid/sdkfetch >/dev/null 2>&1 && go mod download github.com/devgianlu/go-librespot@v0.9.1)
+	rm -r "${scratch:?}"
+	# The gate's step 15 downloads the sealed stock archive's own module graph
+	# offline (stock-rc4.tar, payload/go.mod and go.sum), which can pin versions
+	# ddsonic's graph no longer does (otel 1.46.0 against 1.47.0). Prepare it
+	# the same way in a scratch module, so go.mod and go.sum here stay as they
+	# are; go.sum verifies every archive.
+	scratch=$(mktemp -d)
+	tar -xf external/spotify/sdkcontract/testdata/stock-rc4.tar -C "$scratch" payload/go.mod payload/go.sum
+	(cd "$scratch/payload" && go mod download && go list -m all >/dev/null)
 	rm -r "${scratch:?}"
 	missing=$(missing_archives)
 	if [ -n "$missing" ]; then

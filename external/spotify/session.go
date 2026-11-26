@@ -205,7 +205,7 @@ func newSessionFromStored(ctx context.Context, clientID string, creds *storedCre
 		if silentOnly {
 			// Continue without a token source — already-loaded tracks still stream
 			// via spclient; new Web API calls will return ErrNeedsAuth.
-			applog.UserError("spotify: stored auth no longer valid; run '%s spotify reset' or sign in again to fix", appmeta.ClientName()) // ddsonic
+			applog.UserError("%s", storedTokenMessage(creds.RefreshToken)) // ddsonic: no reset advice for a passing failure (session_messages_ddsonic.go)
 			// ddsonic: the credential is staged with the session's
 			// coordinator, and written when the session is taken.
 			s := builtSession(clientID, sess, storedCreds{

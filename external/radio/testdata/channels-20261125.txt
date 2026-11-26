@@ -1,0 +1,4 @@
+channels-20261125.json is the cliamp radio channel list, saved unchanged.
+Source: https://radio.cliamp.stream/stations (radio.ChannelsURL)
+Fetched: 2026-11-25, once, for the channel favorites tests (#135).
+Each of the 15 channels has a stream and a song list (tracks > 0, tracks_url).

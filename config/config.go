@@ -2,12 +2,12 @@
 package config
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -34,7 +34,7 @@ func configPath() (string, error) {
 // environment variable (or "" when unset). Mixed values containing other
 // characters are left untouched, so literal '$' in passwords is preserved.
 func parseString(s string) string {
-	s = strings.Trim(s, `"'`)
+	s = unquote(s) // ddsonic: one pair of quotes, not every quote at the ends (#75)
 	if len(s) < 2 || s[0] != '$' {
 		return s
 	}
@@ -434,26 +434,25 @@ func Load() (Config, error) {
 		return cfg, nil
 	}
 
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return cfg, nil
 		}
 		return cfg, err
 	}
-	defer f.Close()
+	// ddsonic: the file is read as TOML (toml_ddsonic.go, #75); invalid
+	// TOML is an error, with the defaults.
+	doc, md, err := decodeConfig(path, string(data))
+	if err != nil {
+		return cfg, err
+	}
 
-	scanner := bufio.NewScanner(f)
 	section := "" // current [section] header, empty = top-level
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
+	for _, e := range configEntries(doc, md) {
 		// Section header: [navidrome], [plex], [plugins.lastfm], etc.
-		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			section = strings.ToLower(line[1 : len(line)-1])
+		if e.header {
+			section = e.section
 			// Mark providers as enabled when their section exists.
 			// [yt], [youtube], and [ytmusic] all configure the same YouTube providers.
 			switch section {
@@ -483,12 +482,7 @@ func Load() (Config, error) {
 			continue
 		}
 
-		key, val, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		key = strings.TrimSpace(key)
-		val = strings.TrimSpace(val)
+		key, val := e.key, e.val
 
 		switch section {
 		case appdir.Name: // ddsonic: the [ddsonic] section, fork settings parsed in config/ddsonic.go
@@ -789,7 +783,7 @@ func Load() (Config, error) {
 	}
 
 	cfg.clamp()
-	return cfg, scanner.Err()
+	return cfg, nil
 }
 
 // Save updates only the given key in the existing config file, preserving
@@ -816,41 +810,26 @@ func Save(key, value string) error {
 		return fileutil.WriteFileAtomic(path, []byte(line+"\n"), 0o600)
 	}
 
-	// Scan existing lines and replace the matching key in-place,
-	// but only in the top-level scope (before any [section] header).
+	// Replace the matching key in the top-level scope (before any
+	// [section] header), or insert it before the first header to keep
+	// top-level keys together. ddsonic: statements, not lines, so that a
+	// value over several lines is replaced whole (#75).
 	lines := strings.Split(string(data), "\n")
+	insertAt := len(lines)
 	found := false
-	for i, l := range lines {
-		trimmed := strings.TrimSpace(l)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		// Stop searching once we hit a section header — the key
-		// belongs in the top-level scope only.
-		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+	for _, s := range Statements(lines) {
+		if s.Header {
+			insertAt = s.Start
 			break
 		}
-		k, _, ok := strings.Cut(trimmed, "=")
-		if ok && strings.TrimSpace(k) == key {
-			lines[i] = line
+		if s.Key == key {
+			lines = ReplaceStatement(lines, s, line)
 			found = true
 			break
 		}
 	}
 	if !found {
-		// Insert before the first section header to keep top-level keys together.
-		inserted := false
-		for i, l := range lines {
-			trimmed := strings.TrimSpace(l)
-			if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
-				lines = append(lines[:i], append([]string{line}, lines[i:]...)...)
-				inserted = true
-				break
-			}
-		}
-		if !inserted {
-			lines = append(lines, line)
-		}
+		lines = slices.Insert(lines, insertAt, line)
 	}
 
 	return fileutil.WriteFileAtomic(path, []byte(strings.Join(lines, "\n")), 0o600)
@@ -908,50 +887,42 @@ func saveSectionValue(section, key, value string) error {
 		return nil
 	}
 
+	// Replace the key inside the requested section, or add it after the
+	// section's last line, or append the section. ddsonic: statements, not
+	// lines, so that a value over several lines is replaced whole (#75).
 	lines := strings.Split(string(data), "\n")
-
-	// Try to replace the existing key inside the requested section.
-	inSection := false
-	for i, l := range lines {
-		trimmed := strings.TrimSpace(l)
-		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
-			inSection = strings.EqualFold(trimmed[1:len(trimmed)-1], section)
-			continue
+	// A broken file may repeat the section: the key is replaced in any of
+	// them, and added to the first.
+	stmts := Statements(lines)
+	inSection, replaced := false, false
+	for _, s := range stmts {
+		if s.Header {
+			inSection = strings.EqualFold(s.Name, section)
+		} else if inSection && s.Key == key {
+			lines = ReplaceStatement(lines, s, line)
+			replaced = true
+			break
 		}
-		if inSection {
-			k, _, ok := strings.Cut(trimmed, "=")
-			if ok && strings.TrimSpace(k) == key {
-				lines[i] = line
-				if err := fileutil.WriteFileAtomic(path, []byte(strings.Join(lines, "\n")), 0o600); err != nil {
-					return fmt.Errorf("write config: %w", err)
+	}
+	if !replaced {
+		inSection = false
+		insertAt := -1
+		for _, s := range stmts {
+			if s.Header {
+				if insertAt >= 0 {
+					break // the first section ended
 				}
-				return nil
+				inSection = strings.EqualFold(s.Name, section)
+			}
+			if inSection {
+				insertAt = s.End
 			}
 		}
-	}
-
-	// Key not found: append after the last line in the requested section, or
-	// append a new section at the end.
-	inSection = false
-	insertAt := -1
-	for i, l := range lines {
-		trimmed := strings.TrimSpace(l)
-		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
-			if inSection && insertAt >= 0 {
-				break
-			}
-			inSection = strings.EqualFold(trimmed[1:len(trimmed)-1], section)
+		if insertAt >= 0 {
+			lines = slices.Insert(lines, insertAt, line)
+		} else {
+			lines = append(lines, "["+section+"]", line)
 		}
-		if inSection {
-			insertAt = i
-		}
-	}
-
-	if insertAt >= 0 {
-		tail := append([]string{line}, lines[insertAt+1:]...)
-		lines = append(lines[:insertAt+1], tail...)
-	} else {
-		lines = append(lines, "["+section+"]", line)
 	}
 
 	if err := fileutil.WriteFileAtomic(path, []byte(strings.Join(lines, "\n")), 0o600); err != nil {

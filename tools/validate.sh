@@ -58,14 +58,18 @@ line="class=$class profile=$profile ${meta#\# }"
 echo "validate: $line"
 
 base=$(printf '%s\n' "$meta" | sed -n 's/^# base=\([0-9a-f]\{40,64\}\) .*/\1/p')
+# Every profile runs the citation check strictly, against this base
+# (citations_ddsonic_test.go): it never skips for want of one. Without a base
+# (a fail-closed full), the test falls back to origin/main's merge base and
+# fails if there is none.
 case $profile in
 docs)
 	[ -n "$base" ] || { echo "validate: no base for the docs profile" >&2 && exit 2; }
 	"$make" validate-docs VALIDATE_BASE="$base" || exit
 	;;
-test) "$make" validate-test || exit ;;
-code) "$make" ci-core || exit ;;
-*) "$make" ci || exit ;;
+test) DDSONIC_CITATION_BASE=$base DDSONIC_CITATION_STRICT=1 "$make" validate-test || exit ;;
+code) DDSONIC_CITATION_BASE=$base DDSONIC_CITATION_STRICT=1 "$make" ci-core || exit ;;
+*) DDSONIC_CITATION_BASE=$base DDSONIC_CITATION_STRICT=1 "$make" ci || exit ;;
 esac
 
 first=$class

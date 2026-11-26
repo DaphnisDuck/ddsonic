@@ -248,7 +248,7 @@ func TestAlbumTrackRecordsOnceReportsRateLimits(t *testing.T) {
 	now := time.Unix(1_790_000_000, 0)
 	p.rate.now = func() time.Time { return now }
 	var recorded []time.Time
-	p.OnRateLimited(func(until time.Time) { recorded = append(recorded, until) })
+	p.OnRateLimited(func(until time.Time, _ bool) { recorded = append(recorded, until) })
 
 	_, err := p.AlbumTrackRecordsOnce(context.Background(), "al1")
 	var rl *catalog.RateLimitError
@@ -258,8 +258,8 @@ func TestAlbumTrackRecordsOnceReportsRateLimits(t *testing.T) {
 	if _, err := p.AlbumTrackRecordsOnce(context.Background(), "al1"); !errors.As(err, &rl) || *calls != 1 {
 		t.Errorf("during the block: %v, calls %d; want a RateLimitError and no request", err, *calls)
 	}
-	if len(recorded) != 0 {
-		t.Errorf("recorded blocks = %v, want a short one kept in memory only", recorded)
+	if len(recorded) != 1 || !recorded[0].Equal(now.Add(7*time.Second)) {
+		t.Errorf("recorded blocks = %v, want the short one recorded too (ddsonic: persisted across restarts)", recorded)
 	}
 
 	now = now.Add(8 * time.Second)
@@ -267,7 +267,7 @@ func TestAlbumTrackRecordsOnceReportsRateLimits(t *testing.T) {
 	if _, err := p.AlbumTrackRecordsOnce(context.Background(), "al1"); !errors.As(err, &rl) || rl.RetryAfter != 48*time.Hour || *calls != 2 {
 		t.Errorf("huge Retry-After: %v, calls %d; want a 48h RateLimitError", err, *calls)
 	}
-	if len(recorded) != 1 || !recorded[0].Equal(now.Add(48*time.Hour)) {
+	if len(recorded) != 2 || !recorded[1].Equal(now.Add(48*time.Hour)) {
 		t.Errorf("recorded blocks = %v, want the 48h one", recorded)
 	}
 
@@ -311,7 +311,7 @@ func TestRestoredBlockHoldsUntilItEnds(t *testing.T) {
 	p, calls := rateLimitedAPI(t, &status, &retryAfter)
 	now := time.Unix(1_790_000_000, 0)
 	p.rate.now = func() time.Time { return now }
-	p.SetRateLimitedUntil(now.Add(time.Hour))
+	p.SetRateLimitedUntil(now.Add(time.Hour), false)
 	if _, err := p.AlbumTrackRecordsOnce(context.Background(), "al1"); !errors.As(err, new(*catalog.RateLimitError)) || *calls != 0 {
 		t.Errorf("restored block: %v, calls %d; want a RateLimitError and no request", err, *calls)
 	}

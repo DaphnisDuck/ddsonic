@@ -104,6 +104,18 @@ func (e *Engine) Sync(ctx context.Context, provider string) error {
 	return err
 }
 
+// HoldStopper is a Source whose sync ends at its first collection failing
+// with a held limit (a *catalog.RateLimitError with Quota) when StopsAtHold
+// says so (ddsonic, #170).
+type HoldStopper interface {
+	StopsAtHold() bool
+}
+
+func stopsAtHold(src Source) bool {
+	s, ok := src.(HoldStopper)
+	return ok && s.StopsAtHold()
+}
+
 func (e *Engine) syncAll(ctx context.Context, src Source) error {
 	provider := src.Provider()
 	snapshots, err := e.store.PlaylistSnapshots(ctx, provider)
@@ -125,6 +137,13 @@ func (e *Engine) syncAll(ctx context.Context, src Source) error {
 		e.emit(Event{Kind: CollectionDone, Provider: provider, Collection: collection, Err: err})
 		if err != nil {
 			errs = append(errs, err)
+		}
+		// ddsonic (#170): for a source that asks for it (YouTube), a spent
+		// quota, or anything held like one, ends the sync before the next
+		// collection sends anything. Other sources (Spotify, whose own gate
+		// decides) go on as before.
+		if rl, ok := errors.AsType[*catalog.RateLimitError](err); ok && rl.Quota && stopsAtHold(src) {
+			return errors.Join(errs...)
 		}
 	}
 	// Collect what the applied snapshots left unreferenced. Sweeping is safe

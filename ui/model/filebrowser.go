@@ -553,6 +553,9 @@ func (m *Model) fbConfirm(replace bool) tea.Cmd {
 			return nil
 		}
 	}
+	if target == "" && len(paths) > 0 {
+		m.sleepLaterPlay(replace) // ddsonic: the files play when they arrive (sleep_ddsonic.go)
+	}
 
 	return func() tea.Msg {
 		r, err := resolve.Args(paths)

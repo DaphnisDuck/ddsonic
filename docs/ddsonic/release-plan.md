@@ -97,7 +97,7 @@ I propose three ways to install 1.0, all on Linux x86-64, because that is the on
 
 **What a Linux install involves**
 
-- **Build:** Go 1.27.3 with cgo, `pkg-config`, and the headers for ALSA, FLAC, mpg123, Vorbis and Ogg. The build runs in one pinned environment (a container image), not on whatever machine is at hand.
+- **Build:** Go 1.27.4 with cgo, `pkg-config`, and the headers for ALSA, FLAC, mpg123, Vorbis and Ogg. The build runs in one pinned environment (a container image), not on whatever machine is at hand.
 - **Runtime:** the shared libraries for ALSA, FLAC, mpg123, Vorbis and Ogg, unless the release links some statically (a decision for the packaging work), plus `pipewire-alsa` or `pulseaudio-alsa`. Optional: `ffmpeg` (AAC, ALAC, Opus, WMA) and `yt-dlp` (YouTube Music). The release states the distributions and glibc baseline it was tested on.
 - **Paths:**
   - binary: `/usr/bin/ddsonic` (AUR) or `~/.local/bin` (manual)

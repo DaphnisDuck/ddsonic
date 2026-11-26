@@ -1044,7 +1044,7 @@ The owner then added P-40 to P-44 and the sleep-timer detail in P-01, and correc
 - **Flags:** STALE, OWNER.
 
 ### D-07 Version identification of source builds
-- **Outcome:** a source build of `main` reports a sensible version. Today `git describe` picks `v1.0.0-rc.3` and reports `v1.0.0-rc.3-N-g<sha>`.
+- **Outcome:** a source build of `main` reports a sensible version. Today `git describe` picks `v1.0.0-rc.3` and reports `v1.0.0-rc.3-N-g<sha>`. *(Note, 2026-11-09: #87 changes this. `make build` now reports the highest stable tag below the commit and the commits since it, e.g. `v1.0.0-97-g<sha>` (`tools/version.sh`); the sentence above is the state on the catalog's date.)*
 - **Source:** private maintenance records ("fix before the next release"); `Makefile:1`.
 - **Status / prior decisions:** accepted as a limitation for now (owner).
   - Candidates, none chosen: `describe --match` on stable tags or `--first-parent`; derive from `internal/appmeta` plus the commit; or let the next tag land on `main`'s first-parent line.

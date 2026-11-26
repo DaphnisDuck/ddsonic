@@ -216,6 +216,22 @@ func TestYTDLPError(t *testing.T) {
 	}
 }
 
+// ddsonic (#170): yt-dlp's throttle and its bot/account challenge are
+// held limits, told apart by their reason; neither is a refused video.
+func TestYTDLPHolds(t *testing.T) {
+	tests := []struct{ stderr, reason string }{
+		{"ERROR: [youtube] x: Sign in to confirm you're not a bot. Use --cookies-from-browser", "YouTube asks to confirm this is not a bot"},
+		{"ERROR: [youtube:tab] PLx: HTTP Error 429: Too Many Requests", "YouTube rate limit (HTTP 429)"},
+	}
+	for _, tt := range tests {
+		err := ytdlpError(tt.stderr, errors.New("exit 1"))
+		rl, ok := errors.AsType[*catalog.RateLimitError](err)
+		if !ok || !rl.Quota || rl.Reason != tt.reason || errors.Is(err, catalog.ErrForbidden) {
+			t.Errorf("ytdlpError(%q) = %v, want a held limit %q", tt.stderr, err, tt.reason)
+		}
+	}
+}
+
 // A video refused on a full read (blocked here) passes to the next; a
 // playlist whose sampled videos all refuse is left out, uncached, while the
 // rest still sync.

@@ -72,6 +72,10 @@ type libraryState struct {
 	// favSaving holds the stream URLs of the stations whose f is still
 	// being saved (library_favorite.go).
 	favSaving map[string]bool
+
+	// ddsonic: #135. The IDs of the channels whose f is still being saved
+	// (library_channel_favorite.go).
+	chanSaving map[string]bool
 }
 
 // libSync is one provider's catalog sync status as the library shows it.
@@ -182,17 +186,19 @@ type libFrame struct {
 	// source is the catalog provider of the level's content, from the row
 	// that opened it (or its frame); "" where sources mix.
 	source string
-	// needs is each row's width, and column the list's detail column
-	// (setEntries, library_layout.go).
+	// needs is each row's width, and column the widest (setEntries,
+	// library_rows.go).
 	needs  []int
 	column int
 	// rows are the entries as rendered lines (with section headings),
 	// numbers each track's number, and rowOf each entry's line: set with
 	// the entries, so a render costs the lines in view, not the list.
-	rows     []libRow
-	numbers  []int
-	rowOf    []int
-	titleCol int // the title column of rows with a detail, on a wide terminal
+	rows    []libRow
+	numbers []int
+	rowOf   []int
+	cols    libCols // the fields of its browsable rows
+	// trackCols are the fields of its track rows.
+	trackCols libCols
 }
 
 func (f *libFrame) loading() bool { return f.cancel != nil }
@@ -476,6 +482,9 @@ func (m *Model) handleLibraryMsg(msg tea.Msg) (tea.Cmd, bool) {
 	case libFavoriteSavedMsg:
 		return m.libFavoriteSaved(msg), true
 
+	case libChannelFavoriteSavedMsg: // ddsonic: #135
+		return m.libChannelFavoriteSaved(msg), true
+
 	case libraryPlayMsg:
 		if msg.gen != m.lib.playGen {
 			return nil, true
@@ -533,6 +542,8 @@ func (m *Model) handleLibraryKey(msg tea.KeyPressMsg) (cmd tea.Cmd, handled bool
 			return m.librarySkip(key == "n"), true
 		case "f":
 			return m.libToggleFavorite(), true
+		case "X":
+			return m.libClearQueue(), true
 		}
 		return nil, !queuePassthroughKeys[key] && !libraryPassthroughKeys[key]
 	}
@@ -635,6 +646,7 @@ func (m *Model) libraryActivate() tea.Cmd {
 	}
 	e := f.entries[f.cursor]
 	source := cmp.Or(e.Source, f.source)
+	m.libSleepCommand(e) // a row that plays is a transport command (sleep_ddsonic.go)
 	switch {
 	case e.Open != nil:
 		if sl, ok := e.Open.(library.SearchLevel); ok {
@@ -680,6 +692,7 @@ func (m *Model) retireLibraryPlay() { m.lib.playGen = 0 }
 // plugin). Unlike the automatic advance at a track's end, it is a newer
 // intent, so it retires a pending library play.
 func (m *Model) skipByUser(next bool) tea.Cmd {
+	m.sleepCommand() // a transport command (sleep_ddsonic.go)
 	m.retireLibraryPlay()
 	if next {
 		return m.nextTrack()

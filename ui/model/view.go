@@ -810,6 +810,11 @@ func (m Model) renderPlaybackHeader() string {
 	// Badges in display order. A narrow pane drops whole badges off the tail
 	// rather than letting the separator slice one mid-token.
 	badges := make([]string, 0, 6)
+	// ddsonic: the sleep timer's countdown comes first, so a narrow pane
+	// drops the other badges before it (sleep_ddsonic.go).
+	if badge := m.sleepBadge(); badge != "" {
+		badges = append(badges, activeToggle.Render(badge))
+	}
 
 	// The two-column body carries shuffle and repeat in its settings pane, so
 	// the header only shows them when there is no pane to hold them.

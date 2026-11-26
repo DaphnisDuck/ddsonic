@@ -34,7 +34,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.3" # ddsonic: the pinned release toolchain (mise.toml, packaging/Dockerfile); go.mod keeps upstream's minimum
+          go-version: "1.27.4" # ddsonic: the pinned release toolchain (mise.toml, packaging/Dockerfile); go.mod keeps upstream's minimum
           cache: true
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libflac-dev libvorbis-dev libogg-dev libmpg123-dev shellcheck
       - run: go install honnef.co/go/tools/cmd/staticcheck@v0.7.0-0.dev.0.20261009221906-f1838cc308e5 # ddsonic: upstream commit f1838cc308e5cfbb38d91cfc973355611845997e (its move to x/tools v0.51.0), pinned exactly; v0.8.1, the newest release, cannot read Go 1.27.2 export data. Return to a release once one can
@@ -50,16 +50,17 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.3" # ddsonic: the pinned release toolchain (mise.toml, packaging/Dockerfile); go.mod keeps upstream's minimum
+          go-version: "1.27.4" # ddsonic: the pinned release toolchain (mise.toml, packaging/Dockerfile); go.mod keeps upstream's minimum
           cache: true
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libflac-dev libvorbis-dev libogg-dev libmpg123-dev shellcheck
       # ddsonic: the module archives (.info, .mod, .zip) the contract gate reads
       # offline from the module download cache (Makefile, sdk-contract): the
       # repository's modules, with the metadata of its whole graph (the gate's
       # go list -m all; go mod download all would add to go.sum), tools/sdkgate's,
-      # and upstream go-librespot v0.9.1. A build never downloads the last, as
-      # go.mod replaces it with the tracked tree, so it is fetched in a scratch
-      # module, where nothing replaces it. Go verifies each archive against go.sum
+      # upstream go-librespot v0.9.1, and the module graph of the sealed stock
+      # archive (stock-rc4.tar), which step 15 downloads offline. A build never
+      # downloads go-librespot, as go.mod replaces it with the tracked tree, so
+      # it is fetched in a scratch module, where nothing replaces it. Go verifies each archive against go.sum
       # or the checksum database; the gate authenticates the SDK archive again
       # against its provenance. The commands are tools/devtools.sh fetch, which
       # make tools runs locally; it fails when an archive is still missing.

@@ -479,7 +479,9 @@ func (m Model) renderLyricsBody() string {
 	case m.lyrics.loading:
 		lines = append(lines, dimStyle.Render("  Searching for lyrics..."))
 	case m.lyrics.err != nil:
-		if errors.Is(m.lyrics.err, lyrics.ErrNotFound) {
+		if errors.Is(m.lyrics.err, lyrics.ErrUnavailable) { // ddsonic: LRCLIB busy is not "no lyrics" (#82)
+			lines = append(lines, dimStyle.Render("  Lyrics service unavailable, try again later."))
+		} else if errors.Is(m.lyrics.err, lyrics.ErrNotFound) {
 			lines = append(lines, dimStyle.Render("  No lyrics found for this track."))
 		} else {
 			lines = append(lines, errorStyle.Render("  Lyrics fetch failed: "+m.lyrics.err.Error()))

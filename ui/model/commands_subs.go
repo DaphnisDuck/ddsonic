@@ -102,6 +102,9 @@ func (m *Model) loadShowEpisodesWith(loader provider.AlbumTrackLoader, id, name 
 		m.status.Warning("No provider can load episodes.", statusTTLDefault)
 		return nil
 	}
+	if mode == subsLoadPlay {
+		m.sleepCommand() // ddsonic: the accepted episodes play when they arrive (sleep_ddsonic.go)
+	}
 	m.subs.loading = true
 	m.subs.err = ""
 	m.subs.status = "Loading " + name + "..."

@@ -18,7 +18,7 @@ No account passwords or tokens are stored in the catalog: Spotify and YouTube cr
 | Source | At startup | On `r` | After a failure |
 |---|---|---|---|
 | Spotify | if the last successful sync is older than `spotify_refresh` (2 hours by default) | yes | retries after 1 minute, doubling up to every 30 minutes |
-| YouTube Music | if the last successful sync is older than `youtube_refresh` (2 hours by default) | yes | the same retries |
+| YouTube Music | if the last successful sync is older than `youtube_refresh` (2 hours by default) | yes | the same retries, except after a rate limit or challenge (below) |
 | Local | always; only files whose size or modification time changed are read again | yes | the same retries |
 
 A Spotify sync first asks for your saved albums' and liked songs' count and newest item (one request each). When both match the catalog, that list is not read again; it is still read in full at least once a day, so renamed titles and new artwork arrive. Playlists are refetched only when Spotify's version marker changed.
@@ -27,7 +27,13 @@ A Spotify sync first asks for your saved albums' and liked songs' count and newe
 
 **Spotify album tracks:** opening an album whose tracks aren't cached yet loads it from Spotify and caches it. A background fill then caches your other saved albums one at a time, newest saved first, one every 10 seconds. It pauses while you open an album or a sync runs, and when Spotify rate-limits it, it waits as long as Spotify asks (at least 5 seconds, doubling up to 10 minutes).
 
-**Spotify rate limits:** Spotify can block a client for hours when it asks too much (seen: 20 hours on a development-mode client ID). While a block lasts, ddsonic sends Spotify nothing: syncs, the fill and album opens fail at once with "rate limited until" and the time, and a failed sync retries when the block ends. Short waits (30 seconds or less) are waited out, or retried by the fill, and not remembered. A longer block is kept in `library.db` (at most 48 hours), so restarting ddsonic does not ask Spotify again early.
+**Spotify rate limits:** Spotify can block a client for hours when it asks too much (seen: 20 hours on a development-mode client ID). Every "too many requests" answer (HTTP 429) starts a block, for as long as Spotify's `Retry-After` asks, or 60 seconds when it gives no usable wait; a later answer never shortens a block. While a block lasts, ddsonic sends Spotify's Web API nothing: syncs, the fill, album opens, searches and edits fail at once with "rate limited until" and the time. No request waits a rate limit out and is sent again; a failed sync retries when the block ends. A request already on its way when the block starts cannot be called back. Every block, short ones included, is kept in `library.db` (at most 48 hours), so restarting ddsonic does not ask Spotify again early. In this fork, this replaces the retry and backoff on rate limits that the upstream [spotify.md](../spotify.md) and [cli.md](../cli.md) describe.
+
+**Spotify quota:** a development-mode app whose quota is used up gets a 429 that says `QUOTA_EXCEEDED` ([Spotify's quota modes](https://developer.spotify.com/documentation/web-api/concepts/quota-modes)). Spotify gives no reset time for it, and ddsonic does not guess one: it pauses the Web API as for any block, says "quota exceeded (no reset time given)", and stops retrying in the background. No automatic sync, retry or background fill runs, including at the next start, until a sync you start with `r` (or by signing in) succeeds. A quota answer also stops a background sync or background fill already running: the album being filled gets no further page. If the quota mark is written to `library.db` only after a sync you started has begun and that sync succeeds, the mark can outlive it: the next start holds again until another sync you start succeeds. This only pauses automatic work; it never sends more.
+
+**YouTube rate limits and challenges:** when YouTube answers ddsonic's background work with a rate limit (HTTP 429 from yt-dlp or the Data API), a spent Data API quota (`quotaExceeded`, `dailyLimitExceeded`, `rateLimitExceeded`, `userRateLimitExceeded`), or asks to confirm you are not a bot, ddsonic stops that work at once: the sync reads no further collection, the reading of track details ends without trying the track again or counting it as unreadable, and durations still queued are not asked for. A request already sent cannot be called back. ddsonic does not infer a reset time; automatic work remains suspended until a user-started sync succeeds. No automatic YouTube sync, retry or track-detail reading runs, including at the next start, until a sync you start with `r` (or by signing in) succeeds; a sync it stopped shows what YouTube said in the library. ddsonic never switches to the other sign-in to get around it. What you do yourself (browsing, search, playback) is not held.
+
+**Quitting:** when you quit, ddsonic starts no new Spotify Web API request and waits, up to 5 seconds, for the requests already under way, yours included; one that was just about to be sent may still go out, and is waited for like the others. A block or quota mark one of them brings back is written to `library.db` before the catalog closes; each such write is given up to 2 seconds. The overall five-second wait may expire before all persistence writes finish: one quota answer can take up to three writes, up to 6 seconds. A write that misses its time, a write still running when the five seconds end, an answer that arrives after the 5 seconds, or ddsonic being killed (`kill -9`), crashing or losing power may leave the block or mark unrecorded; the next start then does not know about it. Closing the terminal window is not guaranteed to quit this way.
 
 ## Status
 
@@ -44,7 +50,7 @@ With both Spotify and Local, each status is prefixed with its source. Details of
 A sync either applies completely or changes nothing:
 
 - **Spotify:** if any page of a collection fails, or the library changes while it's being read, that collection keeps what it had.
-- **Local:** if the music folder is missing, or is empty while the catalog holds files (an unmounted drive, for example), the index is left as it is. Files under a folder ddsonic can't read are kept too.
+- **Local:** if the music folder is missing, or is empty while the catalog holds files (an unmounted drive, for example), the index is left as it is. Files under a folder ddsonic can't read are kept too. One exception: when you haven't set a folder and `~/Music` doesn't exist yet, with nothing indexed, Local is simply empty ("No music found in …") rather than failed; ddsonic doesn't create the folder.
 - **Sign-in:** a Spotify sign-in that fails because Spotify is unreachable or down is reported as that error, not as "sign-in required". The sync retries by itself. When the sync does need you to sign in (never signed in, reset, or revoked by Spotify), the heading reads `Spotify sign-in required` and Spotify's menu offers **Sign in to Spotify** ([navigation.md](navigation.md)); the catalog keeps what it had. A sign-in Spotify revokes while ddsonic runs is noticed at the next call; the stored credential is replaced only when you have signed in again.
 - **Sign-in, two known limits in 1.0:**
   - Spotify hands out a new refresh token with some renewals, and ddsonic stores it only once the renewal has been accepted by a session that is still open. If you quit, or the work is cancelled, in the moment between Spotify issuing it and ddsonic accepting it, the stored sign-in is left as it was, and the next start may ask you to sign in again. The stored sign-in is never left half-written.
@@ -64,9 +70,7 @@ youtube_refresh = "2h"
 youtube_playlists = []
 ```
 
-Keep each comment on a line of its own, as here: ddsonic does not read a comment that follows a value.
-
-Durations use Go's format: `90s`, `30m`, `2h`. An invalid value keeps the default.
+Durations are strings in Go's format, in quotes: `"90s"`, `"30m"`, `"2h"`. An invalid value keeps the default.
 
 ## Starting over
 

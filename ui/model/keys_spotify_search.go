@@ -197,6 +197,7 @@ func (m *Model) expandSpotAlbum(album playlist.Track, action spotAlbumAction) te
 		m.setSpotSearchError("This provider cannot open albums.")
 		return nil
 	}
+	m.sleepLaterPlay(action == spotAlbumPlay) // ddsonic: the accepted album plays when it arrives (#35)
 	m.spotSearch.albumLoading = true
 	m.spotSearch.err = ""
 	ctx := m.newSpotRequestContext(30 * time.Second)

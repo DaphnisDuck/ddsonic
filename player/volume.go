@@ -16,6 +16,8 @@ type volumeStreamer struct {
 	mono       *atomic.Bool
 	cachedDB   float64 // last dB value used to compute cachedGain; starts NaN to force first compute
 	cachedGain float64 // precomputed linear gain = 10^(dB/20)
+
+	fade *fadeGain // ddsonic: the sleep timer's fade-out, after the volume (fade_ddsonic.go)
 }
 
 func (v *volumeStreamer) Stream(samples [][2]float64) (int, bool) {
@@ -40,6 +42,7 @@ func (v *volumeStreamer) Stream(samples [][2]float64) (int, bool) {
 			samples[i][1] = mid
 		}
 	}
+	v.fade.apply(samples[:n]) // ddsonic: fade_ddsonic.go
 	return n, ok
 }
 

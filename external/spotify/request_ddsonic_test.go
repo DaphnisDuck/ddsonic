@@ -6,30 +6,12 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/bjarneo/cliamp/catalog"
 	"github.com/bjarneo/cliamp/playlist"
-	"github.com/bjarneo/cliamp/provider"
 )
-
-// stubRateWait makes rate-limit waits return at once, counts them, and runs
-// during, if set, inside each.
-func stubRateWait(t *testing.T) (waits *atomic.Int32, during *func(n int)) {
-	t.Helper()
-	waits, during = new(atomic.Int32), new(func(int))
-	orig := rateWait
-	rateWait = func(ctx context.Context, _ time.Duration) error {
-		n := int(waits.Add(1))
-		if *during != nil {
-			(*during)(n)
-		}
-		return ctx.Err()
-	}
-	t.Cleanup(func() { rateWait = orig })
-	return waits, during
-}
 
 func get(p *SpotifyProvider, ctx context.Context) error {
 	resp, err := p.webAPI(ctx, "GET", "/v1/me", nil)
@@ -58,10 +40,11 @@ func statuses(seq ...int) func(int, *http.Request) (int, http.Header) {
 	}
 }
 
-// One logical request renews its token after a 401 once per sign-in,
-// however many rate-limit waits lie in between: what it has spent lives in
-// the request. (The first case is the reviewer's round-8 sequence.)
-func TestRequestKeepsRenewalBudgetAcross429(t *testing.T) {
+// ddsonic: a 429 ends the request, whatever came before it, read or write:
+// it is not sent again, and the request fails with a RateLimitError. (Until
+// the gate fix, a 429 was waited out and the request sent again, up to eight
+// times; TestRequestKeepsRenewalBudgetAcross429 pinned that.)
+func TestA429EndsTheRequest(t *testing.T) {
 	const (
 		ok          = http.StatusOK
 		unauth      = http.StatusUnauthorized
@@ -72,38 +55,28 @@ func TestRequestKeepsRenewalBudgetAcross429(t *testing.T) {
 		call                       func(*SpotifyProvider, context.Context) error
 		api                        []int
 		wantRequests, wantRenewals int32
-		wantWaits                  int32
-		wantNeedsAuth              bool
-		wantErr                    bool
 	}{
-		{"read: 401, renewal, 429, 401", get, []int{unauth, rateLimited, unauth, ok}, 3, 1, 1, true, true},
-		{"read: 401 and 429 alternating", get, []int{rateLimited, unauth, rateLimited, unauth, ok}, 4, 1, 2, true, true},
-		{"read: 429, 401, renewal, 429, then through", get, []int{rateLimited, unauth, rateLimited, ok}, 4, 1, 2, false, false},
-		{"read: only rate limits, then through", get, []int{rateLimited, rateLimited, rateLimited, ok}, 4, 0, 3, false, false},
-		{"write: 429 then sent again", post, []int{rateLimited, ok}, 2, 0, 1, false, false},
-		{"write: 429, then a 401 ends it, with one check", post, []int{rateLimited, unauth, ok}, 3, 1, 1, false, true},
+		{"read: 429", get, []int{rateLimited, ok}, 1, 0},
+		{"read: 401, renewal, 429", get, []int{unauth, rateLimited, ok}, 2, 1},
+		{"write: 429", post, []int{rateLimited, ok}, 1, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			storeCreds(t)
-			waits, _ := stubRateWait(t)
 			h := fakeSpotifyHTTP(t, tokenOK, statuses(tt.api...))
 			s := goodSession()
 			p := New(s, "client", 320)
 
 			err := tt.call(p, context.Background())
-			if (err != nil) != tt.wantErr || errors.Is(err, playlist.ErrNeedsAuth) != tt.wantNeedsAuth {
-				t.Errorf("the request = %v, want an error %t, a sign-in request %t", err, tt.wantErr, tt.wantNeedsAuth)
+			if _, isRate := errors.AsType[*catalog.RateLimitError](err); !isRate || errors.Is(err, playlist.ErrNeedsAuth) {
+				t.Errorf("the request = %v, want a RateLimitError", err)
 			}
-			if h.apiCalls.Load() != tt.wantRequests || h.tokenCalls.Load() != tt.wantRenewals || waits.Load() != tt.wantWaits {
-				t.Errorf("requests %d, renewals %d, waits %d; want %d, %d and %d",
-					h.apiCalls.Load(), h.tokenCalls.Load(), waits.Load(), tt.wantRequests, tt.wantRenewals, tt.wantWaits)
+			if h.apiCalls.Load() != tt.wantRequests || h.tokenCalls.Load() != tt.wantRenewals {
+				t.Errorf("requests %d, renewals %d; want %d and %d",
+					h.apiCalls.Load(), h.tokenCalls.Load(), tt.wantRequests, tt.wantRenewals)
 			}
-			if s.signInRefused() != tt.wantNeedsAuth {
-				t.Errorf("the session is refused: %t, want %t", s.signInRefused(), tt.wantNeedsAuth)
-			}
-			if tt.name == "write: 429, then a 401 ends it, with one check" && !provider.NotApplied(err) {
-				t.Errorf("the write that got a 401 = %v, want it reported as not applied", err)
+			if s.signInRefused() {
+				t.Error("a rate limit refused the sign-in")
 			}
 		})
 	}
@@ -125,92 +98,19 @@ func TestIndependentRequestsHaveIndependentBudgets(t *testing.T) {
 	}
 }
 
-// The limits are checked before the request goes round again: the eighth
-// rate limit ends it without a wait, and a waiting request never asks more
-// than eight times. A request that does not wait asks once.
+// ddsonic: a request that is always rate limited asks once, and the next
+// request, background or foreground, does not ask at all while the gate is
+// closed.
 func TestRequestLimits(t *testing.T) {
 	storeCreds(t)
-	waits, _ := stubRateWait(t)
 	h := fakeSpotifyHTTP(t, tokenOK, statuses(http.StatusTooManyRequests))
 	p := New(goodSession(), "client", 320)
 
-	err := get(p, context.Background())
-	if err == nil || h.apiCalls.Load() != maxRateRetries || waits.Load() != maxRateRetries-1 {
-		t.Errorf("a read that is always rate limited = %v after %d requests and %d waits; want %d and %d",
-			err, h.apiCalls.Load(), waits.Load(), maxRateRetries, maxRateRetries-1)
+	if err := get(p, context.Background()); err == nil || h.apiCalls.Load() != 1 {
+		t.Errorf("a read that is always rate limited = %v after %d requests; want 1", err, h.apiCalls.Load())
 	}
-	before := h.apiCalls.Load()
-	if _, err := p.AlbumTrackRecordsOnce(context.Background(), "album"); err == nil || h.apiCalls.Load() != before+1 || waits.Load() != maxRateRetries-1 {
-		t.Errorf("a read that does not wait = %v after %d requests, %d waits in all; want one request and no wait", err, h.apiCalls.Load()-before, waits.Load())
-	}
-}
-
-// A wait ends with its caller, and a sign-in accepted during a wait ends a
-// write (it was not asked for under the new one) and lets a read go on.
-func TestWhatHappensDuringARateWait(t *testing.T) {
-	t.Run("the caller cancels", func(t *testing.T) {
-		storeCreds(t)
-		_, during := stubRateWait(t)
-		h := fakeSpotifyHTTP(t, tokenOK, statuses(http.StatusTooManyRequests, http.StatusOK))
-		ctx, cancel := context.WithCancel(context.Background())
-		*during = func(int) { cancel() }
-		if err := get(New(goodSession(), "client", 320), ctx); !errors.Is(err, context.Canceled) || h.apiCalls.Load() != 1 {
-			t.Errorf("the read = %v after %d requests, want its cancellation after one", err, h.apiCalls.Load())
-		}
-	})
-	for _, kind := range []string{"read", "write"} {
-		t.Run("a sign-in during the wait: "+kind, func(t *testing.T) {
-			storeCreds(t)
-			stubSignIn(t, nil)
-			_, during := stubRateWait(t)
-			h := fakeSpotifyHTTP(t, tokenOK, statuses(http.StatusTooManyRequests, http.StatusOK))
-			s := goodSession()
-			p := New(s, "client", 320)
-			*during = func(int) {
-				s.refuseSignIn(s.generation())
-				if err := p.Authenticate(); err != nil {
-					t.Error(err)
-				}
-			}
-			call := map[string]func(*SpotifyProvider, context.Context) error{"read": get, "write": post}[kind]
-			err := call(p, context.Background())
-			if kind == "read" && (err != nil || h.apiCalls.Load() != 2) {
-				t.Errorf("the read = %v after %d requests, want it through on the new sign-in", err, h.apiCalls.Load())
-			}
-			if kind == "write" && (!errors.Is(err, errSignInChanged) || h.apiCalls.Load() != 1) {
-				t.Errorf("the write = %v after %d requests, want errSignInChanged and no second send", err, h.apiCalls.Load())
-			}
-		})
-	}
-}
-
-// A token that expires is refreshed whenever it is asked for, as it always
-// was, and that is not the request's renewal: with the token expiring during
-// every wait a read refreshes before each send, renews after no 401, and
-// goes through.
-func TestExpiryDuringEveryRateWait(t *testing.T) {
-	storeCreds(t)
-	_, during := stubRateWait(t)
-	h := fakeSpotifyHTTP(t, tokenOK, statuses(429, 429, 429, 429, 429, 429, 429, http.StatusOK))
-	s := goodSession()
-	tokens := s.viewNow().tokens
-	clock := time.Now()
-	tokens.now = func() time.Time { return clock }
-	*during = func(int) { clock = clock.Add(2 * time.Hour) } // the token runs out in each wait
-	p := New(s, "client", 320)
-
-	c := &apiCall{method: "GET", path: "/v1/me", waitRate: true}
-	resp, err := p.request(context.Background(), c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if h.apiCalls.Load() != 8 || h.tokenCalls.Load() != 7 || c.authRound != 0 || c.renewedIn != nil || c.rateTry != 7 {
-		t.Errorf("requests %d, refreshes %d, auth rounds %d, renewed after a 401 %t, waits %d; want 8, 7, 0, false and 7",
-			h.apiCalls.Load(), h.tokenCalls.Load(), c.authRound, c.renewedIn != nil, c.rateTry)
-	}
-	if revOf(tokens) != 8 {
-		t.Errorf("the token is at revision %d, want 8: the seed and seven refreshes", revOf(tokens))
+	if _, err := p.AlbumTrackRecordsOnce(context.Background(), "album"); err == nil || h.apiCalls.Load() != 1 {
+		t.Errorf("the next read = %v after %d requests in all; want none sent", err, h.apiCalls.Load())
 	}
 }
 
@@ -406,34 +306,42 @@ func TestRestartAfterRotation(t *testing.T) {
 }
 
 // One request through everything at once: its token has run out (a refresh
-// that is not its renewal), a 401 (its one renewal in this sign-in), a rate
-// limit during which the user signs in again, a 401 on the new sign-in (its
-// one renewal there), and a 401 once more, which refuses it. What it spent
-// was never reset. (Adapted from the reviewer's round-9 probe.)
+// that is not its renewal), a 401 (its one renewal in this sign-in), the
+// user signing in again just before the next send, a 401 on the new sign-in
+// (its one renewal there), and a 401 once more, which refuses it. What it
+// spent was never reset. (Adapted from the reviewer's round-9 probe; the
+// sign-in used to land during a rate-limit wait, which no longer exists.)
 func TestMixedExpiry401AndSignIn(t *testing.T) {
 	storeCreds(t)
 	stubSignIn(t, nil)
-	waits, during := stubRateWait(t)
-	h := fakeSpotifyHTTP(t, tokenOK, statuses(401, 429, 401, 401))
+	h := fakeSpotifyHTTP(t, tokenOK, statuses(401, 401, 401, 401))
 	s := expiredSession()
 	p := New(s, "client", 320)
 	t.Cleanup(p.Close)
-	*during = func(int) {
-		s.refuseSignIn(s.generation())
-		if err := p.Authenticate(); err != nil {
-			t.Error(err)
+	sends := 0
+	orig := beforeSend
+	beforeSend = func(string) {
+		if sends++; sends == 2 {
+			s.refuseSignIn(s.generation())
+			if err := p.Authenticate(); err != nil {
+				t.Error(err)
+			}
 		}
 	}
+	t.Cleanup(func() { beforeSend = orig })
 
-	c := &apiCall{method: "GET", path: "/v1/me", waitRate: true}
+	c := &apiCall{method: "GET", path: "/v1/me"}
 	_, err := p.request(context.Background(), c)
 	if !errors.Is(err, playlist.ErrNeedsAuth) {
 		t.Errorf("the request = %v, want the refusal of the second sign-in's renewed token", err)
 	}
 	// Token requests: the refresh on expiry, the first sign-in's renewal,
-	// the second sign-in's renewal.
-	if h.apiCalls.Load() != 4 || h.tokenCalls.Load() != 3 || waits.Load() != 1 || c.authRound != 2 || c.rateTry != 1 {
-		t.Errorf("requests %d, token requests %d, waits %d, auth rounds %d, rate tries %d; want 4, 3, 1, 2 and 1",
-			h.apiCalls.Load(), h.tokenCalls.Load(), waits.Load(), c.authRound, c.rateTry)
+	// the second sign-in's renewal. The second send still carries the first
+	// sign-in's renewed token (got before the user signed in again), so its
+	// 401 is about the old sign-in and takes one more round than when the
+	// sign-in landed in a wait.
+	if h.apiCalls.Load() != 4 || h.tokenCalls.Load() != 3 || c.authRound != 3 {
+		t.Errorf("requests %d, token requests %d, auth rounds %d; want 4, 3 and 3",
+			h.apiCalls.Load(), h.tokenCalls.Load(), c.authRound)
 	}
 }

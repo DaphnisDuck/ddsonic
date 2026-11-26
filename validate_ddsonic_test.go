@@ -144,7 +144,7 @@ func validateFixture(t *testing.T, out1, out2 string, makeExit int) (dir string)
 	writeExec(t, filepath.Join(dir, "out2"), out2)
 	writeExec(t, filepath.Join(dir, "tools/change-class.sh"),
 		`d=$(dirname "$0")/..; if [ -f "$d/called" ]; then cat "$d/out2"; else : >"$d/called"; cat "$d/out1"; fi`+"\n")
-	writeExec(t, filepath.Join(dir, "make"), `echo "$*" >>"$(dirname "$0")/made"; exit `+string(rune('0'+makeExit))+"\n")
+	writeExec(t, filepath.Join(dir, "make"), `echo "$*" >>"$(dirname "$0")/made"; echo "${DDSONIC_CITATION_BASE-unset} ${DDSONIC_CITATION_STRICT-unset}" >>"$(dirname "$0")/env"; exit `+string(rune('0'+makeExit))+"\n")
 	return dir
 }
 
@@ -187,6 +187,37 @@ func TestValidateProfiles(t *testing.T) {
 			passed := strings.Contains(stdout, "validate: PASSED class=")
 			if passed != (tt.wantExit == 0) {
 				t.Fatalf("PASSED line %v with exit %d\n%s", passed, code, stdout)
+			}
+		})
+	}
+}
+
+// Every profile but docs (which passes VALIDATE_BASE) runs make with the
+// classifier's base and the citation check strict, so the check never skips;
+// a fail-closed full has no base, and stays strict.
+func TestValidatePassesTheCitationBase(t *testing.T) {
+	meta := "# base=" + sha + " head=h+worktree rules=" + sha + ":tools/validation-classes.txt\n"
+	tests := []struct{ name, out, profile, wantEnv string }{
+		{"test", "test\n" + meta, "", sha + " 1"},
+		{"code", "code\n" + meta, "", sha + " 1"},
+		{"full", "full\n" + meta, "", sha + " 1"},
+		{"PROFILE raises docs to code", "docs\n" + meta, "code", sha + " 1"},
+		{"a fail-closed full has no base, and is strict", "full\n# fail-closed\n", "", " 1"},
+		{"docs gets its base as an argument", "docs\n" + meta, "", "unset unset"},
+	}
+	// Only what validate.sh sets may reach the fake make: make validate
+	// itself runs these tests with both variables set.
+	for _, k := range []string{"DDSONIC_CITATION_BASE", "DDSONIC_CITATION_STRICT"} {
+		t.Setenv(k, "")
+		os.Unsetenv(k)
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := validateFixture(t, tt.out, tt.out, 0)
+			stdout, stderr, code := runSh(t, dir, []string{"MAKE=" + filepath.Join(dir, "make"), "PROFILE=" + tt.profile}, "/bin/sh", "tools/validate.sh")
+			env, _ := os.ReadFile(filepath.Join(dir, "env"))
+			if code != 0 || strings.TrimRight(string(env), "\n") != tt.wantEnv {
+				t.Fatalf("exit %d, env %q; want %q\n%s%s", code, env, tt.wantEnv, stdout, stderr)
 			}
 		})
 	}

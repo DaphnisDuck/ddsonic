@@ -68,10 +68,26 @@ configure_args="--build=$triplet --host=$triplet --prefix=$prefix --disable-shar
 jobs=$(sysctl -n hw.ncpu)
 
 # fetch <name> <version> <url> <sha256>: download, verify, unpack, record.
+# A transient failure (a reset, a timeout, an HTTP error) is retried a few
+# times within a bounded time; each attempt starts the file afresh. A
+# download that still fails, or whose SHA-256 is wrong, stops the build and
+# its file is removed: nothing incomplete or unverified is kept.
 fetch() {
 	file="$prefix/src/${3##*/}"
-	curl -fsSL --proto '=https' --proto-redir '=https' "$3" -o "$file"
-	echo "$4  $file" | shasum -a 256 -c -
+	echo "codecs: downloading $3"
+	if ! curl -fsSL --proto '=https' --proto-redir '=https' \
+		--connect-timeout 20 --max-time 300 \
+		--retry 5 --retry-delay 10 --retry-max-time 600 --retry-all-errors \
+		"$3" -o "$file"; then
+		rm -f "$file"
+		echo "codecs: download failed: $3" >&2
+		exit 1
+	fi
+	if ! echo "$4  $file" | shasum -a 256 -c -; then
+		rm -f "$file"
+		echo "codecs: SHA-256 mismatch: $3" >&2
+		exit 1
+	fi
 	tar -xf "$file" -C "$work"
 	printf '%s %s %s %s\n' "$1" "$2" "$3" "$4" >> "$prefix/codecs.txt"
 }

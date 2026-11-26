@@ -22,6 +22,7 @@ func (m *Model) replacePlaylist(tracks []playlist.Track) {
 		tracks = playlist.WithPlaybackContext(tracks)
 	}
 	m.playlist.Replace(tracks)
+	m.playlistUndo = playlistUndo{} // ddsonic: a replacement drops the undo, even of an equal list (#22)
 	m.normalizeQueueOverlay()
 	m.retireLibraryPlay() // ddsonic: a newer queue retires a pending library play
 }
@@ -383,7 +384,7 @@ func (m *Model) removeSelectedFromPlaylist() {
 		return
 	}
 	m.normalizeQueueOverlay()
-	m.playlistUndo = playlistUndo{active: true, snapshot: snapshot, loaded: loaded, saved: saved, persisted: persisted}
+	m.armPlaylistUndo(playlistUndo{snapshot: snapshot, loaded: loaded, saved: saved, persisted: persisted}) // ddsonic: #22
 	if wasActive {
 		m.stopPlayback()
 		m.player.ClearPreload()
@@ -403,11 +404,11 @@ func (m *Model) removeSelectedFromPlaylist() {
 }
 
 func (m *Model) undoPlaylistMutation() tea.Cmd {
-	undo := m.playlistUndo
-	if !undo.active {
+	if !m.playlistUndoCurrent() { // ddsonic: a changed playlist drops the undo (#22)
 		m.status.Warning("Nothing to undo", statusTTLShort)
 		return nil
 	}
+	undo := m.playlistUndo
 	if undo.persisted {
 		saver := m.localSaver()
 		if saver == nil {
@@ -420,6 +421,10 @@ func (m *Model) undoPlaylistMutation() tea.Cmd {
 		}
 	}
 	m.playlist.Restore(undo.snapshot)
+	if undo.detached { // ddsonic: #22
+		m.loadedPlaylist = undo.loaded
+		m.setHeaderStateFromTracks(m.playlist.Tracks())
+	}
 	m.normalizeQueueOverlay()
 	m.playlistUndo = playlistUndo{}
 	if m.plCursor >= m.playlist.Len() {
@@ -433,6 +438,7 @@ func (m *Model) undoPlaylistMutation() tea.Cmd {
 // playTrack plays a track, using async HTTP for streams and sync I/O for local files.
 // yt-dlp URLs are streamed via a piped yt-dlp | ffmpeg chain for instant playback.
 func (m *Model) playTrack(track playlist.Track) tea.Cmd {
+	m.sleepUserPlayback() // ddsonic: a user's play is a sleep timer command (sleep_ddsonic.go)
 	m.pausedAt = time.Time{}
 	if track.Feed || playlist.IsFeed(track.Path) {
 		m.feedLoading = true
@@ -616,6 +622,7 @@ func (m *Model) fetchLyricsForTrack(track playlist.Track, artist, title string) 
 // For live streams and long-paused yt-dlp streams, unpausing reconnects instead
 // of playing stale data sitting in OS/decoder buffers from before the pause.
 func (m *Model) togglePlayPause() tea.Cmd {
+	m.sleepCommand() // ddsonic: a transport command (sleep_ddsonic.go)
 	if m.buffering {
 		return nil
 	}

@@ -237,3 +237,46 @@ func TestExtraPlaylists(t *testing.T) {
 		t.Errorf("after the failure: %d playlists, want both kept", len(pls))
 	}
 }
+
+// limited answers Liked Music with a held limit and counts playlist reads.
+type limited struct {
+	fakeClient
+	listCalls, likedCalls int
+}
+
+var errLimit = &catalog.RateLimitError{Quota: true, Reason: "YouTube Data API: quotaExceeded"}
+
+func (l *limited) LikedTrackRecords(context.Context) ([]catalog.TrackRecord, error) {
+	l.likedCalls++
+	return nil, fmt.Errorf("youtube: playlist LM: %w", errLimit)
+}
+
+func (l *limited) PlaylistRecords(ctx context.Context, synced map[string]string) ([]catalog.PlaylistRecord, error) {
+	l.listCalls++
+	return l.fakeClient.PlaylistRecords(ctx, synced)
+}
+
+// ddsonic (#170): a held limit on Liked Music ends YouTube's sync before
+// its playlists are read, and in mixed mode it is not read again through
+// the other sign-in.
+func TestALimitStopsTheSync(t *testing.T) {
+	client := &limited{}
+	store, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	eng := catalogsync.New(store, nil, New(client))
+	if err := eng.Sync(context.Background(), catalog.YouTube); !errors.Is(err, errLimit) {
+		t.Fatalf("Sync = %v, want the limit", err)
+	}
+	if client.listCalls != 0 {
+		t.Errorf("playlists read %d times after the limit; want none", client.listCalls)
+	}
+
+	cookies := &limited{}
+	m := Mixed{OAuth: &limited{}, Cookies: cookies}
+	if _, err := m.LikedTrackRecords(context.Background()); !errors.Is(err, errLimit) || cookies.likedCalls != 0 {
+		t.Errorf("mixed liked = %v, cookies read %d times; want the limit and none", err, cookies.likedCalls)
+	}
+}

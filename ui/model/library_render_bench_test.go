@@ -33,6 +33,30 @@ func BenchmarkLibraryList(b *testing.B) {
 	}
 }
 
+// Album rows: a title and detail field on each row (libEntryLabel).
+func BenchmarkLibraryAlbumList(b *testing.B) {
+	for _, n := range []int{100, 10_000} {
+		for _, w := range []int{80, 300} {
+			b.Run(fmt.Sprint(n, "x", w), func(b *testing.B) {
+				entries := make([]library.Entry, n)
+				for i := range entries {
+					entries[i] = library.Entry{ID: fmt.Sprint(i), Title: fmt.Sprint("The Album Called Number ", i, " (Deluxe Edition)"),
+						Detail: fmt.Sprint("Some Artist ", i%37, " · 1999"), Open: library.Menu("x")}
+				}
+				root := library.NewLevel("Big", func(context.Context) ([]library.Entry, error) { return entries, nil })
+				m := resized(b, newLibraryModel(root), w, 40)
+				m = libRun(b, m, m.libraryLoad())
+				m.libTop().cursor = n / 2
+				m.libAdjustScroll()
+				b.ResetTimer()
+				for b.Loop() {
+					m.renderLibraryList(25)
+				}
+			})
+		}
+	}
+}
+
 // The layout cached with the entries is the one a render would work out:
 // headings between sections, each entry's line, and per-section numbers.
 func TestLibraryLayoutCached(t *testing.T) {

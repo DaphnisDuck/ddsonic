@@ -85,47 +85,8 @@ func probeYTDLDuration(ctx context.Context, pageURL string) time.Duration { // d
 	return time.Duration(secs * float64(time.Second))
 }
 
-// InstallYTDLP attempts to install yt-dlp using the system package manager.
-// Returns nil on success. The caller should re-check YTDLPAvailable() after.
-func InstallYTDLP() error {
-	switch runtime.GOOS {
-	case "darwin":
-		if _, err := exec.LookPath("brew"); err == nil {
-			cmd := exec.Command("brew", "install", "yt-dlp")
-			cmd.Stdout = os.Stderr
-			cmd.Stderr = os.Stderr
-			return cmd.Run()
-		}
-		// Fall through to pip
-	case "linux":
-		if _, err := exec.LookPath("apt-get"); err == nil {
-			cmd := exec.Command("sudo", "apt-get", "install", "-y", "yt-dlp")
-			cmd.Stdout = os.Stderr
-			cmd.Stderr = os.Stderr
-			return cmd.Run()
-		}
-		if _, err := exec.LookPath("pacman"); err == nil {
-			cmd := exec.Command("sudo", "pacman", "-S", "--noconfirm", "yt-dlp")
-			cmd.Stdout = os.Stderr
-			cmd.Stderr = os.Stderr
-			return cmd.Run()
-		}
-	}
-	// Fallback: pip/pipx
-	if path, err := exec.LookPath("pipx"); err == nil {
-		cmd := exec.Command(path, "install", "yt-dlp")
-		cmd.Stdout = os.Stderr
-		cmd.Stderr = os.Stderr
-		return cmd.Run()
-	}
-	if path, err := exec.LookPath("pip3"); err == nil {
-		cmd := exec.Command(path, "install", "yt-dlp")
-		cmd.Stdout = os.Stderr
-		cmd.Stderr = os.Stderr
-		return cmd.Run()
-	}
-	return fmt.Errorf("no supported package manager found — install manually: https://github.com/yt-dlp/yt-dlp#installation")
-}
+// ddsonic: no InstallYTDLP. ddsonic never installs yt-dlp; it says how
+// (YtdlpInstallHint, #82).
 
 // YtdlpInstallHint returns a platform-specific install command suggestion.
 func YtdlpInstallHint() string {
