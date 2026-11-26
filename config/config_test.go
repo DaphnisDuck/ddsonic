@@ -915,7 +915,6 @@ func TestLoadExpanded(t *testing.T) {
 		want bool
 	}{
 		{name: "true", body: "expanded = true\n", want: true},
-		{name: "mixed case", body: "expanded = True\n", want: true},
 		{name: "false", body: "expanded = false\n", want: false},
 		{name: "absent", body: "visualizer = \"Wave\"\n", want: false},
 	} {

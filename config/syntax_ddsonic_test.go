@@ -452,7 +452,7 @@ func TestLegacyDeviceLineAfterAQuoteRunThatEndsAMultilineString(t *testing.T) {
 	for name, doc := range accepted {
 		// Each prefix is valid TOML by itself: the fixture is what it claims.
 		prefix := doc[:strings.Index(doc, "audio_device")]
-		if err := parseTOML(prefix); err != nil {
+		if _, _, err := decodeTOML(prefix); err != nil {
 			t.Fatalf("%s: the fixture's prefix is not valid TOML: %v", name, err)
 		}
 		if err := checkSyntax("config.toml", []byte(doc)); err != nil {

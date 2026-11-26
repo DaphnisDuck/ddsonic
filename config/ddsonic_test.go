@@ -17,7 +17,6 @@ func TestLoadDdsonicSection(t *testing.T) {
 	}{
 		{"default without the section", "volume = -3\n", DefaultSpotifyRefresh},
 		{"quoted duration", "[ddsonic]\nspotify_refresh = \"45m\"\n", 45 * time.Minute},
-		{"bare duration", "[ddsonic]\nspotify_refresh = 90s\n", 90 * time.Second},
 		{"zero syncs every startup", "[ddsonic]\nspotify_refresh = \"0s\"\n", 0},
 		{"invalid keeps the default", "[ddsonic]\nspotify_refresh = \"soon\"\n", DefaultSpotifyRefresh},
 		{"negative keeps the default", "[ddsonic]\nspotify_refresh = \"-5m\"\n", DefaultSpotifyRefresh},

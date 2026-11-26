@@ -26,7 +26,7 @@ func TestLoadSleepFade(t *testing.T) {
 		{"one over the maximum keeps the default", "[ddsonic]\nsleep_fade_seconds = 3601\n", 30 * time.Second},
 		{"9223372036 keeps the default", "[ddsonic]\nsleep_fade_seconds = 9223372036\n", 30 * time.Second},
 		{"9223372037 (overflows a Duration) keeps the default", "[ddsonic]\nsleep_fade_seconds = 9223372037\n", 30 * time.Second},
-		{"huge keeps the default", "[ddsonic]\nsleep_fade_seconds = 99999999999999999999999\n", 30 * time.Second},
+		{"huge keeps the default", "[ddsonic]\nsleep_fade_seconds = \"99999999999999999999999\"\n", 30 * time.Second}, // ddsonic: past int64 a bare number is not TOML (#75)
 		{"not a number keeps the default", "[ddsonic]\nsleep_fade_seconds = \"long\"\n", 30 * time.Second},
 		{"a duration string is not seconds", "[ddsonic]\nsleep_fade_seconds = \"10s\"\n", 30 * time.Second},
 		{"not from another section", "sleep_fade_seconds = 5\n", 30 * time.Second},
