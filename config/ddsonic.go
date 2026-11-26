@@ -100,8 +100,11 @@ func parseSleepPresets(val string) ([]time.Duration, bool) {
 			continue // TOML allows a trailing comma
 		}
 		v, err := strconv.Atoi(p)
-		d := time.Duration(v) * time.Minute
-		if err != nil || v < 1 || v > MaxSleepPresetMinutes || (len(out) > 0 && d <= out[len(out)-1]) {
+		if err != nil || v < 1 || v > MaxSleepPresetMinutes {
+			return nil, false
+		}
+		d := time.Duration(v) * time.Minute // bounded first: no overflow
+		if len(out) > 0 && d <= out[len(out)-1] {
 			return nil, false
 		}
 		out = append(out, d)
