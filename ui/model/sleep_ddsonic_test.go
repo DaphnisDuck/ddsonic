@@ -147,6 +147,31 @@ func TestSleepKeyCyclesPresetsFromNow(t *testing.T) {
 	}
 }
 
+// Configured presets (#204) replace the built-in ones, Off included, and a
+// one-minute timer fades over its last 30 seconds and pauses at its end.
+func TestSleepConfiguredPresets(t *testing.T) {
+	r := newSleepRig(t, 30*time.Second)
+	r.m.SetSleepPresets([]time.Duration{time.Minute, 2 * time.Minute, 5 * time.Minute})
+	for _, want := range []string{"1 min", "2 min", "5 min", "off", "1 min"} {
+		r.key("Z")
+		if !strings.Contains(r.m.status.text, want) {
+			t.Errorf("status %q, want %s", r.m.status.text, want)
+		}
+	}
+	if got := r.m.sleep.deadline.Sub(r.now); got != time.Minute {
+		t.Fatalf("deadline in %v, want 1m", got)
+	}
+	r.tick(29 * time.Second)
+	if len(r.e.fades) != 0 {
+		t.Fatalf("faded early: %q", r.e.fades)
+	}
+	r.tick(30 * time.Second)
+	r.tick(time.Minute)
+	if !r.e.paused || !slices.Equal(r.e.fades, []string{"until 1m0s", "reset"}) {
+		t.Errorf("at 1m: paused %v, fades %q", r.e.paused, r.e.fades)
+	}
+}
+
 func TestSleepBadge(t *testing.T) {
 	tests := []struct {
 		left time.Duration

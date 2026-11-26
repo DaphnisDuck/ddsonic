@@ -1,7 +1,8 @@
 package model
 
 // ddsonic: the sleep timer (#35). Z cycles Off, 15, 30, 45, 60 and 90
-// minutes; each choice counts from the moment it is made. When the time is
+// minutes, or the presets [ddsonic] sleep_timer_presets_minutes lists
+// (#204); each choice counts from the moment it is made. When the time is
 // up, playback pauses: the track, its position and the queue stay, and
 // Space resumes. Before that the player fades out over [ddsonic]
 // sleep_fade_seconds (30 by default; 0 pauses without a fade), reaching
@@ -35,11 +36,12 @@ import (
 	"github.com/bjarneo/cliamp/ui"
 )
 
-// sleepPresets are the durations Z steps through, after Off.
+// sleepPresets are the durations Z steps through, after Off, unless the
+// config lists others (SetSleepPresets).
 var sleepPresets = []time.Duration{15 * time.Minute, 30 * time.Minute, 45 * time.Minute, 60 * time.Minute, 90 * time.Minute}
 
 type sleepTimer struct {
-	preset   int       // 0 is off, else 1 + an index into sleepPresets
+	preset   int       // 0 is off, else 1 + an index into presets
 	deadline time.Time // when playback pauses; zero when off
 	fading   bool      // the player's fade gain is ramping down or held at 0
 	// pausePending: the deadline passed while a track was starting; it is
@@ -48,8 +50,9 @@ type sleepTimer struct {
 	// user: Update is handling a key or a remote command (sleepUserInput).
 	user bool
 
-	fade time.Duration    // how long the fade lasts; 0 is no fade (config)
-	now  func() time.Time // the clock; nil is time.Now (tests set it)
+	fade    time.Duration    // how long the fade lasts; 0 is no fade (config)
+	presets []time.Duration  // what Z steps through (config); empty is sleepPresets
+	now     func() time.Time // the clock; nil is time.Now (tests set it)
 }
 
 // playerFader is the player's fade gain (player/fade_ddsonic.go). The UI
@@ -64,6 +67,11 @@ type playerFader interface {
 // SetSleepFade sets the sleep timer's fade-out ([ddsonic]
 // sleep_fade_seconds); 0 is no fade.
 func (m *Model) SetSleepFade(d time.Duration) { m.sleep.fade = max(d, 0) }
+
+// SetSleepPresets sets the durations Z steps through ([ddsonic]
+// sleep_timer_presets_minutes, validated by the config); empty keeps the
+// built-in ones.
+func (m *Model) SetSleepPresets(p []time.Duration) { m.sleep.presets = p }
 
 func (m Model) sleepNow() time.Time {
 	if m.sleep.now != nil {
@@ -81,13 +89,17 @@ func (m *Model) sleepFader() playerFader {
 // last. A fade under way stops, smoothly.
 func (m *Model) cycleSleepTimer() {
 	m.endSleepFade()
-	m.sleep.preset = (m.sleep.preset + 1) % (len(sleepPresets) + 1)
+	presets := m.sleep.presets
+	if len(presets) == 0 {
+		presets = sleepPresets
+	}
+	m.sleep.preset = (m.sleep.preset + 1) % (len(presets) + 1)
 	if m.sleep.preset == 0 {
 		m.sleep.deadline = time.Time{}
 		m.status.Showf(statusTTLDefault, "Sleep timer off. Press Z to set.")
 		return
 	}
-	d := sleepPresets[m.sleep.preset-1]
+	d := presets[m.sleep.preset-1]
 	m.sleep.deadline = m.sleepNow().Add(d)
 	m.status.Showf(statusTTLDefault, "Sleep timer: %d min. Press Z again for more time.", int(d/time.Minute))
 }

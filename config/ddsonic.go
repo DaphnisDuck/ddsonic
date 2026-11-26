@@ -6,6 +6,7 @@ package config
 
 import (
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -22,6 +23,9 @@ const (
 	// for: an hour, more than the longest timer needs. A larger value
 	// keeps the default, like any other invalid one.
 	MaxSleepFadeSeconds = 3600
+	// MaxSleepPresetMinutes is the longest sleep timer preset
+	// sleep_timer_presets_minutes may list: a day.
+	MaxSleepPresetMinutes = 1440
 )
 
 // DdsonicConfig is the [ddsonic] section.
@@ -46,6 +50,10 @@ type DdsonicConfig struct {
 	// SleepFade is how long the sleep timer fades out before it pauses
 	// playback; 0 pauses at once (sleep_fade_seconds, #35).
 	SleepFade time.Duration
+	// SleepPresets are the durations the sleep timer's key steps through
+	// before Off (sleep_timer_presets_minutes, #204); nil keeps the
+	// built-in 15, 30, 45, 60 and 90 minutes.
+	SleepPresets []time.Duration
 }
 
 func defaultDdsonicConfig() DdsonicConfig {
@@ -70,7 +78,35 @@ func (c *DdsonicConfig) parseKey(key, val string) {
 		setBool(&c.NetEaseLyrics, val)
 	case "sleep_fade_seconds":
 		setSeconds(&c.SleepFade, val, MaxSleepFadeSeconds)
+	case "sleep_timer_presets_minutes":
+		if p, ok := parseSleepPresets(val); ok {
+			c.SleepPresets = p
+		}
 	}
+}
+
+// parseSleepPresets reads a one-line array of whole minutes, each from 1 to
+// MaxSleepPresetMinutes, in strictly increasing order. Anything else, an
+// empty array included, is invalid: the caller keeps the default.
+func parseSleepPresets(val string) ([]time.Duration, bool) {
+	inner, open := strings.CutPrefix(val, "[")
+	inner, closed := strings.CutSuffix(inner, "]")
+	if !open || !closed {
+		return nil, false
+	}
+	var out []time.Duration
+	for _, p := range strings.Split(inner, ",") {
+		if p = strings.TrimSpace(p); p == "" {
+			continue // TOML allows a trailing comma
+		}
+		v, err := strconv.Atoi(p)
+		d := time.Duration(v) * time.Minute
+		if err != nil || v < 1 || v > MaxSleepPresetMinutes || (len(out) > 0 && d <= out[len(out)-1]) {
+			return nil, false
+		}
+		out = append(out, d)
+	}
+	return out, len(out) > 0
 }
 
 // setDuration sets d from a duration value, keeping d when it is invalid

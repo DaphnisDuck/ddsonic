@@ -128,7 +128,7 @@ In the library:
 | `p` `n` | Previous, next track |
 | `Tab` | Switch between the library and the queue |
 | `r` | Sync the source you're browsing |
-| `Z` | Sleep timer: 15, 30, 45, 60, 90 minutes, off |
+| `Z` | Sleep timer: 15, 30, 45, 60, 90 minutes (configurable), off |
 | `q` | Quit, from any screen |
 
 Choosing a track plays its album or playlist from that track. `Tab` shows the queue, where you can shuffle, repeat, reorder, open track info (`i`) and lyrics (`y`), and change the equalizer, visualizer and speed. In the queue, Enter plays the selected track, `/` filters, `r` cycles repeat, `x` removes a track and `X` clears the whole queue; `Ctrl+Z` brings it back until the queue next changes. The sleep timer (`Z`) shows the time left in the header, fades the music out (30 seconds by default; `sleep_fade_seconds` in the `[ddsonic]` table sets it) and then pauses; `Space` resumes. In Local > Folders, `f` switches between audio files only and every file. Where you are typing (search, the queue filter), letters such as `q` are text. Every screen lists its keys at the bottom; the complete tables are in [docs/ddsonic/navigation.md](docs/ddsonic/navigation.md).

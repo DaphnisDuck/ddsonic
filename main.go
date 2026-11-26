@@ -514,7 +514,8 @@ func run(overrides config.Overrides, positional []string, daemon, visualizer60FP
 	m.SetIPCBroker(pluginBroker)
 	m.SetCustomEQBands(cfg.EQ)
 	m.SetVisVolumeLinked(cfg.VisVolumeLinked)
-	m.SetSleepFade(cfg.Ddsonic.SleepFade) // ddsonic: the sleep timer
+	m.SetSleepFade(cfg.Ddsonic.SleepFade)       // ddsonic: the sleep timer
+	m.SetSleepPresets(cfg.Ddsonic.SleepPresets) // ddsonic: its presets (#204)
 	m.SetVisRows(cfg.VisRows)
 	m.SetVisualizer60FPS(visualizer60FPS)
 

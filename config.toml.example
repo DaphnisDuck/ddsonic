@@ -117,6 +117,11 @@ eq = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 # playback; 0 pauses without a fade, at most 3600 (default: 30).
 # See docs/ddsonic/navigation.md.
 # sleep_fade_seconds = 30
+#
+# The durations Z steps through before off: whole minutes from 1 to 1440,
+# increasing, on one line. Any other value keeps the default; delete or
+# comment out the line to restore it.
+# sleep_timer_presets_minutes = [15, 30, 45, 60, 90]
 
 # --- Spotify (optional; needs a Premium account) ---
 #
