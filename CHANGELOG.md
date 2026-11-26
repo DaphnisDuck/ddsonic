@@ -4,6 +4,11 @@ Notable changes to ddsonic (DaphnisDuck's Music Player). The format follows [Kee
 
 ddsonic is a fork of [cliamp](https://github.com/bjarneo/cliamp). Versions before 0.6 were released as omatunes, and 0.6 up to the candidate 1.0.0-rc.1 as ddmus; their entries below keep the name they were released under.
 
+## [Unreleased]
+
+### Fixed
+- Pausing, skipping and stopping could replay a moment of old audio: a resume began with a short silence or stutter, and the next track, after a skip or `Stop`, could start with a fragment of the track before it, after any buffering wait. A track started while paused, and a seek while paused, now start cleanly at the new track or position; a plain resume still continues where it paused ([#83](https://github.com/DaphnisDuck/ddsonic/issues/83)).
+
 ## [1.1.0] - 2026-11-19
 
 ### Added
@@ -205,6 +210,7 @@ Released as omatunes. The first release of the fork, based on cliamp just after 
 ### Removed
 - cliamp's self-updater: `upgrade` refuses to run, because it would install cliamp over the fork.
 
+[Unreleased]: https://github.com/DaphnisDuck/ddsonic/compare/v1.1.0...HEAD
 [1.1.0]: https://github.com/DaphnisDuck/ddsonic/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/DaphnisDuck/ddsonic/releases/tag/v1.0.0
 [0.10.0]: https://github.com/DaphnisDuck/ddsonic/compare/v0.9.0...v0.10.0

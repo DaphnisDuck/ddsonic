@@ -214,14 +214,30 @@ func TestR12PauseFallsBackWhenTheDeviceCannotSuspend(t *testing.T) {
 	}
 }
 
-// TestR12SwitchWhilePausedPlaysNoOldAudio is the case #83 leaves open: a
-// track started while paused begins with the paused track's read-ahead
-// frames (125-188 ms in this model). It fails today and is skipped unless
-// R12_KNOWN_FAILING=1, so the target stays written down.
-func TestR12SwitchWhilePausedPlaysNoOldAudio(t *testing.T) {
-	if os.Getenv("R12_KNOWN_FAILING") == "" {
-		t.Skip("#83: not fixed; set R12_KNOWN_FAILING=1 to run")
+// onlyFromStart checks that what is heard from frame index at onwards is,
+// after silence, one unbroken run of track from its counter first, and that
+// every Drop read only silence.
+func onlyFromStart(t *testing.T, m *otoModel, at int, track byte, first int) {
+	t.Helper()
+	heard := heardAfter(m, at)
+	if len(heard) > 0 && heard[0].track == '0' {
+		heard = heard[1:]
 	}
+	if len(heard) != 1 || heard[0].track != track || heard[0].first != first {
+		t.Errorf("after the action, want silence then one run of %c from %d:%s", track, first, describe(m))
+	}
+	for _, f := range m.dropped {
+		if f != ([2]float64{}) {
+			t.Errorf("a drop read music from the chain:%s", describe(m))
+			break
+		}
+	}
+}
+
+// TestR12SwitchWhilePausedPlaysNoOldAudio: a track started while paused
+// begins with silence and its own first frame, never the paused track's
+// read-ahead frames (125-188 ms in this model before the drop).
+func TestR12SwitchWhilePausedPlaysNoOldAudio(t *testing.T) {
 	for _, c := range r12Cases() {
 		t.Run(c.name, func(t *testing.T) {
 			p, m := newModelPlayer(t, r12BufferMs, c.periods, c.suspendLag, c.lateRefill)
@@ -238,12 +254,91 @@ func TestR12SwitchWhilePausedPlaysNoOldAudio(t *testing.T) {
 				t.Fatal(err)
 			}
 			m.steps(8)
-			for _, s := range heardAfter(m, at) {
-				if s.track == 'A' {
-					t.Errorf("A heard after B was asked for:%s", describe(m))
-					break
-				}
-			}
+			onlyFromStart(t, m, at, 'B', 1)
 		})
+	}
+}
+
+// TestR12SwitchAfterPauseAndStopPlaysNoOldAudio: pause, Stop (as the library
+// does before playing a selection), then another track. The device was
+// already suspended by the pause, so Stop's drain cannot play the paused
+// track's read-ahead out; the start drops it.
+func TestR12SwitchAfterPauseAndStopPlaysNoOldAudio(t *testing.T) {
+	for _, c := range r12Cases() {
+		t.Run(c.name, func(t *testing.T) {
+			p, m := newModelPlayer(t, r12BufferMs, c.periods, c.suspendLag, c.lateRefill)
+			a, b := r12Tracks(t, p, c)
+			if err := p.PlayAt(a, 0, 0); err != nil {
+				t.Fatal(err)
+			}
+			m.steps(c.before)
+			p.TogglePause()
+			m.steps(4)
+			p.Stop()
+			m.drain(2 * r12BufferMs * time.Millisecond)
+			m.mark("playB")
+			at := len(m.out)
+			if err := p.PlayAt(b, 0, 0); err != nil {
+				t.Fatal(err)
+			}
+			m.steps(8)
+			onlyFromStart(t, m, at, 'B', 1)
+		})
+	}
+}
+
+// TestR12SeekWhilePausedResumesAtTheNewPosition: a seek while paused, then
+// resume. Heard: silence, then the track from where the seek put it, never
+// the frames read ahead before the seek. (The local decoders seek natively;
+// ffmpeg and yt-dlp seeks are in TestR12SeekWhilePausedDropsOnResume.)
+func TestR12SeekWhilePausedResumesAtTheNewPosition(t *testing.T) {
+	for _, c := range r12Cases() {
+		t.Run(c.name, func(t *testing.T) {
+			p, m := newModelPlayer(t, r12BufferMs, c.periods, c.suspendLag, c.lateRefill)
+			a, _ := r12Tracks(t, p, c)
+			if err := p.PlayAt(a, 0, 0); err != nil {
+				t.Fatal(err)
+			}
+			m.steps(c.before)
+			p.TogglePause()
+			m.steps(4)
+			if err := p.Seek(time.Second); err != nil {
+				t.Fatal(err)
+			}
+			if c.source == "factory" && !p.Seekable() {
+				t.Skip("the factory stream is not seekable")
+			}
+			speaker.Lock()
+			want := p.current.decoder.Position()%counterWrap + 1 // the next frame the decoder gives
+			speaker.Unlock()
+			m.mark("resume")
+			at := len(m.out)
+			p.TogglePause()
+			m.steps(8)
+			onlyFromStart(t, m, at, 'A', want)
+		})
+	}
+}
+
+// TestR12PlainPauseResumeDoesNotDrop: the frames the device holds at a pause
+// are the music's next frames, and a resume plays them (S1); a seek while
+// playing is heard after the device's usual latency. Neither drops.
+func TestR12PlainPauseResumeDoesNotDrop(t *testing.T) {
+	p, m := newModelPlayer(t, r12BufferMs, 2, 1, false)
+	a, _ := r12Tracks(t, p, r12Case{source: "local"})
+	if err := p.PlayAt(a, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	m.steps(6)
+	if err := p.Seek(time.Second); err != nil {
+		t.Fatal(err)
+	}
+	m.steps(2)
+	p.TogglePause()
+	m.steps(4)
+	p.TogglePause()
+	m.steps(4)
+	if m.drops != 0 {
+		t.Errorf("%d drops, want none:%s", m.drops, describe(m))
 	}
 }

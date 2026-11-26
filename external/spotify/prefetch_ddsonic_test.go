@@ -169,9 +169,10 @@ func playbackOf(t *testing.T, src *pcmSource) beep.StreamSeekCloser {
 	return s
 }
 
-// pull is one pull of the speaker: Beep calls Stream holding its global
-// mutex (beep speaker.go, sampleReader.stream), the mutex TogglePause, Seek,
-// Stop and the position the UI shows take.
+// pull is one pull of the speaker: the player's output streams holding its
+// lock (player/speaker.go, mixerReader.Read), the lock TogglePause, Seek,
+// Stop and the position the UI shows take. Beep's speaker mutex stands in
+// for that lock here.
 func pull(s beep.Streamer, n int) ([][2]float64, int, bool) {
 	buf := make([][2]float64, n)
 	speaker.Lock()

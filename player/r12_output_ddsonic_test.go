@@ -12,33 +12,35 @@ import (
 	"time"
 
 	"github.com/gopxl/beep/v2"
-	"github.com/gopxl/beep/v2/speaker"
 )
 
 // #83 (R-12): what a listener hears around pause/resume and a manual track
 // switch, measured without audio hardware. The real Player (PlayAt,
-// TogglePause, Stop) drives a model of the output device that Beep's speaker
-// and oto v3.4.1 put behind it. Every frame the model sends to the device is
-// recorded and classified, so a silence inside the music, a dropped or
-// repeated frame, or a frame of the previous track is counted exactly.
+// TogglePause, Stop) drives a model of the output device that the output
+// (speaker.go, upstream's port of Beep's speaker) and oto v3.4.1 put behind
+// it. Every frame the model sends to the device is recorded and classified,
+// so a silence inside the music, a dropped or repeated frame, or a frame of
+// the previous track is counted exactly.
 //
-// What the model copies from the dependencies ($BEEP = gopxl/beep/v2@v2.1.1,
-// $OTO = ebitengine/oto/v3@v3.4.1):
-//   - Beep gives half of speaker.Init's buffer to oto's player buffer
-//     ($BEEP/speaker/speaker.go:47-48, :64) and the other half to the driver.
+// What the model copies from the output and its dependency
+// ($OTO = ebitengine/oto/v3@v3.4.1):
+//   - Init gives half of its buffer to oto's player buffer
+//     (speaker.go:54, :61) and the other half to the driver.
 //   - oto's mux goroutine reads the source whenever the player buffer holds
 //     less than its size, one buffer-size chunk per read, so the buffer holds
 //     between one and two chunks ($OTO/internal/mux/mux.go:90-119, :521-567).
-//     Beep's reader fills the whole chunk ($BEEP/speaker/speaker.go:167-200),
-//     from the chain under the speaker lock (:204-208).
+//     The mixer reader fills the whole chunk (speaker.go:134-155), from
+//     the chain under the speaker lock (:144-147).
 //   - The driver takes one period at a time from that buffer
 //     ($OTO/internal/mux/mux.go:141-156, :460-519): on Linux a period is half
 //     the driver buffer ($OTO/driver_unix.go:153-160, :214-238); on macOS a
 //     quarter ($OTO/driver_darwin.go:30, :101-103, :183-217).
 //   - Context.Suspend stops the driver taking periods and clears nothing
 //     ($OTO/driver_unix.go:241-256, $OTO/driver_darwin.go:219-230); no Reset
-//     of the player buffer ($OTO/internal/mux/mux.go:379-392) is ever called
-//     by Beep. Resume takes up where it stopped.
+//     of the player buffer ($OTO/internal/mux/mux.go:379-392) is called by
+//     Suspend or Resume. Resume takes up where it stopped. Only Drop
+//     (speaker.go:117-123) empties the player buffer, through Seek, and
+//     refills it from the chain at once: the model's Drop does the same.
 //   - Suspend does not stop the device at once: on Linux it waits for the
 //     writer's lock, which the writer holds across a blocking write and can
 //     take again first ($OTO/driver_unix.go:214-219, :244); on macOS the
@@ -53,7 +55,7 @@ import (
 //     two orderings bound what the model shows, not every interleaving.
 //   - At speaker.Init the player reads one chunk from the empty mixer, which
 //     is silence ($OTO/internal/mux/mux.go:298-335), and Player.New suspends
-//     right after (player.go:129).
+//     right after (player.go:131).
 //
 // What it leaves out: the driver's own buffer (the ALSA ring, the
 // AudioQueue buffers). It is a queue after the player buffer and changes
@@ -61,9 +63,9 @@ import (
 // recorded sequence is what the listener hears, in order. Pause silence
 // (the device stopped) is not in the record; silence the source produced is.
 
-// otoModel is the output device as Beep and oto build it (see above).
+// otoModel is the output device as the output (speaker.go) and oto build it (see above).
 type otoModel struct {
-	pull       func([][2]float64) // Beep's read of the chain
+	pull       func([][2]float64) // the mixer reader's read of the chain
 	chunk      int                // oto player buffer, frames
 	period     int                // frames the driver takes per write
 	suspendLag int                // periods taken after Suspend is called
@@ -77,6 +79,8 @@ type otoModel struct {
 	out       [][2]float64
 	suspended bool
 	marks     []mark
+	drops     int          // Drop calls
+	dropped   [][2]float64 // what each Drop read back into the buffer
 }
 
 type mark struct {
@@ -142,6 +146,16 @@ func (m *otoModel) Resume() error {
 	return nil
 }
 
+// Drop is speaker.Drop: oto's Seek empties the player buffer and reads it
+// full again at once ($OTO/internal/mux/mux.go:379-392, :298-335).
+func (m *otoModel) Drop() {
+	m.pending = false
+	m.queue = nil
+	m.drops++
+	m.refill()
+	m.dropped = append(m.dropped, m.queue...)
+}
+
 // drain plays what a drainAfter delay of d lets the device play, then fires
 // the suspends scheduled with it.
 func (m *otoModel) drain(d time.Duration) {
@@ -181,24 +195,22 @@ func newModelPlayer(t *testing.T, bufferMs, periodsPerChunk, suspendLag int, lat
 		suspended:  true,
 	}
 	m.queue = make([][2]float64, m.chunk)
+	speaker.Clear() // the mixer is the package's; a test before may have left a chain in it
 	m.pull = func(buf [][2]float64) {
 		speaker.Lock()
 		defer speaker.Unlock()
-		if p.ctrl == nil {
-			clear(buf) // the empty mixer
-			return
-		}
-		p.ctrl.Stream(buf)
+		speaker.mixer.Stream(buf) // the empty mixer sends silence
 	}
-	oldSuspend, oldResume, oldDrain := speakerSuspend, speakerResume, drainAfter
-	speakerSuspend, speakerResume = m.Suspend, m.Resume
+	oldSuspend, oldResume, oldDrop, oldDrain := speakerSuspend, speakerResume, speakerDrop, drainAfter
+	speakerSuspend, speakerResume, speakerDrop = m.Suspend, m.Resume, m.Drop
 	drainAfter = func(_ time.Duration, f func()) *time.Timer {
 		m.drains = append(m.drains, f)
 		return nil
 	}
 	t.Cleanup(func() {
 		p.Stop()
-		speakerSuspend, speakerResume, drainAfter = oldSuspend, oldResume, oldDrain
+		speaker.Clear()
+		speakerSuspend, speakerResume, speakerDrop, drainAfter = oldSuspend, oldResume, oldDrop, oldDrain
 	})
 	return p, m
 }
@@ -378,6 +390,94 @@ func TestR12ModelMatchesHandComputedCase(t *testing.T) {
 				t.Errorf("record\n got %v\nwant %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestR12MeasureDrop logs S1-S4 with and without speaker.Drop: "without"
+// swaps the drop for a no-op, which leaves the device's queue as Beep's
+// speaker did, so the rows show what each drop removes (#83).
+func TestR12MeasureDrop(t *testing.T) {
+	if !testing.Verbose() {
+		t.Skip("a measurement: run with -v")
+	}
+	a := writeFixture(t, "a.wav", 1, 3)
+	b := writeFixture(t, "b.wav", -1, 3)
+	playB := func(t *testing.T, p *Player, m *otoModel) {
+		t.Helper()
+		if err := p.PlayAt(b, 0, 0); err != nil {
+			t.Fatal(err)
+		}
+		m.mark("playB")
+		m.steps(8)
+	}
+	scenarios := []struct {
+		name string
+		run  func(t *testing.T, p *Player, m *otoModel)
+	}{
+		{"S1-pause-resume", func(t *testing.T, p *Player, m *otoModel) {
+			m.mark("pause")
+			p.TogglePause()
+			m.steps(6)
+			m.mark("resume")
+			p.TogglePause()
+			m.steps(6)
+		}},
+		{"S2-stop-slow-next", func(t *testing.T, p *Player, m *otoModel) {
+			m.mark("stop")
+			p.Stop()
+			m.drain(p.drainDelay())
+			m.steps(4) // the next track buffers
+			playB(t, p, m)
+		}},
+		{"S2-pause-stop-next", func(t *testing.T, p *Player, m *otoModel) {
+			m.mark("pause")
+			p.TogglePause()
+			m.steps(2)
+			m.mark("stop")
+			p.Stop()
+			m.steps(4)
+			playB(t, p, m)
+		}},
+		{"S3-next-while-paused", func(t *testing.T, p *Player, m *otoModel) {
+			m.mark("pause")
+			p.TogglePause()
+			m.steps(4)
+			playB(t, p, m)
+		}},
+		{"S4-seek-while-paused", func(t *testing.T, p *Player, m *otoModel) {
+			m.mark("pause")
+			p.TogglePause()
+			m.steps(4)
+			if err := p.Seek(2 * time.Second); err != nil {
+				t.Fatal(err)
+			}
+			m.mark("seek2s+resume")
+			p.TogglePause()
+			m.steps(8)
+		}},
+	}
+	for _, sc := range scenarios {
+		for _, dev := range []struct {
+			name    string
+			periods int
+		}{{"linux", 2}, {"macos", 4}} {
+			for _, fixed := range []bool{false, true} {
+				name := fmt.Sprintf("%s/%s/drop=%v", sc.name, dev.name, fixed)
+				t.Run(name, func(t *testing.T) {
+					p, m := newModelPlayer(t, 250, dev.periods, 1, false)
+					if !fixed {
+						speakerDrop = func() {}
+					}
+					if err := p.PlayAt(a, 0, 0); err != nil {
+						t.Fatal(err)
+					}
+					m.mark("playA")
+					m.steps(6)
+					sc.run(t, p, m)
+					t.Logf("%s:%s", name, describe(m))
+				})
+			}
+		}
 	}
 }
 

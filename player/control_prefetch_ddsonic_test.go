@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/gopxl/beep/v2"
-	"github.com/gopxl/beep/v2/speaker"
 )
 
 // A compositional check for the Spotify responsiveness fix

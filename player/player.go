@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/gopxl/beep/v2"
-	"github.com/gopxl/beep/v2/speaker"
 )
 
 // Quality holds configurable audio output parameters.
@@ -40,8 +39,9 @@ type Player struct {
 	current         *trackPipeline // active track's resources
 	nextPipeline    *trackPipeline // preloaded track's resources
 	started         bool           // true after first speaker.Play()
-	suspendMu       sync.Mutex     // guards suspended and speaker suspend/resume calls
+	suspendMu       sync.Mutex     // guards suspended, dropQueued and speaker suspend/resume/drop calls
 	suspended       bool           // true when speaker.Suspend() has been called
+	dropQueued      bool           // the suspended speaker holds samples of a stopped track (ddsonic: or from before a paused seek); resumeSpeaker drops them
 	drainGen        atomic.Uint64  // ddsonic: invalidates a pending suspendAfterDrain (#83)
 	ctrl            *beep.Ctrl
 	volMin          atomic.Uint64     // dB floor stored as Float64bits, range [-90, 0]
@@ -301,7 +301,9 @@ func (p *Player) playPipelineForGeneration(tp *trackPipeline, generation uint64)
 		go tp.close()
 		return nil
 	}
-	p.resumeSpeaker()
+	// The suspended speaker still holds the samples of a paused track. Only
+	// a plain resume of that track may play them.
+	p.resumeSpeaker(p.paused.Load())
 
 	// Collect old pipelines to close after releasing locks.
 	var oldCurrent, oldNext *trackPipeline
@@ -585,6 +587,7 @@ func (p *Player) Seek(d time.Duration) error {
 	p.nextPipeline = nil
 	p.mu.Unlock()
 	speaker.Unlock()
+	p.markQueuedStale() // ddsonic: a seek while paused (#83)
 	p.lifecycleMu.Unlock()
 	if old != nil {
 		old.close()
@@ -642,6 +645,7 @@ func (p *Player) commitPreparedSeek(cur *trackPipeline, seeker preparedFFmpegSee
 	p.gapless.Replace(cur.stream)
 	p.gaplessAdvance.Store(false)
 	speaker.Unlock()
+	p.markQueuedStale() // ddsonic: a seek while paused (#83)
 	p.lifecycleMu.Unlock()
 
 	_ = oldPipe.stop()
@@ -700,6 +704,7 @@ func (p *Player) SeekYTDL(d time.Duration) error {
 	p.gapless.Replace(nil)
 	p.gaplessAdvance.Store(false)
 	speaker.Unlock()
+	p.markQueuedStale() // ddsonic: a seek while paused (#83)
 
 	newPos := max(curPos+d, 0)
 	if cur.knownDuration > 0 && newPos >= cur.knownDuration {
@@ -1170,12 +1175,14 @@ func (p *Player) RegisterSourceResolver(scheme string, r SourceResolver) {
 
 // suspendSpeaker suspends the ALSA audio callback goroutine so it blocks
 // on a condition variable instead of busy-looping. Safe to call multiple
-// times; subsequent calls are no-ops.
-func (p *Player) suspendSpeaker() {
+// times. The speaker keeps the samples that it queued. When drop is true,
+// they belong to a track that stopped, and the next resume drops them.
+func (p *Player) suspendSpeaker(drop bool) {
 	p.suspendMu.Lock()
 	defer p.suspendMu.Unlock()
 
 	if p.suspended {
+		p.dropQueued = p.dropQueued || drop
 		return
 	}
 	if err := speakerSuspend(); err != nil { // ddsonic: a test seam (speaker_seam_ddsonic.go)
@@ -1185,16 +1192,24 @@ func (p *Player) suspendSpeaker() {
 		return
 	}
 	p.suspended = true
+	p.dropQueued = drop
 }
 
 // resumeSpeaker resumes the ALSA audio callback goroutine. Safe to call
-// multiple times; subsequent calls are no-ops.
-func (p *Player) resumeSpeaker() {
+// multiple times; subsequent calls are no-ops. When drop is true, or when
+// Stop marked the queued samples, it drops them first. The speaker then reads
+// new samples at once, so drop only while the chain sends silence: before a
+// new source starts, or after Stop cleared the source.
+func (p *Player) resumeSpeaker(drop bool) {
 	p.suspendMu.Lock()
 	defer p.suspendMu.Unlock()
 
 	if !p.suspended {
 		return
+	}
+	if drop || p.dropQueued {
+		p.dropSilently() // ddsonic: the chain runs while paused (output_ddsonic.go)
+		p.dropQueued = false
 	}
 	if err := speakerResume(); err != nil { // ddsonic: a test seam (speaker_seam_ddsonic.go)
 		return
