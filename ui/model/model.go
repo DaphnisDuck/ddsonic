@@ -470,6 +470,9 @@ type Model struct {
 
 	// Local station favorites, independent of bookmarks and heart favorites.
 	radioFavorites *radio.Favorites
+	// ddsonic: #135. Favorite cliamp radio channels; on Model, not in the
+	// library state, which SetLibrary replaces.
+	channelFavs *radio.ChannelFavorites
 	// Shared across Model value copies; keyed by input revisions, not handlers.
 	radioMarkers *radioMarkerCache
 

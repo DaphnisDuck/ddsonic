@@ -18,14 +18,14 @@ import (
 // SetChannelFavorites shares the channel favorites store the library's
 // Favorites and search read.
 func (m *Model) SetChannelFavorites(favorites *radio.ChannelFavorites) {
-	m.lib.channelFavs = favorites
+	m.channelFavs = favorites
 }
 
 // libSelectedChannel is the channel of the library row selected in front,
 // or nil: the queue has no channel rows, and a list that is loading or
 // failed selects none.
 func (m Model) libSelectedChannel() *library.ChannelRef {
-	if m.lib.channelFavs == nil || !m.libraryEnabled() || !m.lib.visible {
+	if m.channelFavs == nil || !m.libraryEnabled() || !m.lib.visible {
 		return nil
 	}
 	f := m.libTop()
@@ -45,7 +45,7 @@ func (m Model) libChannelFavoriteKeys() (keys []libKeyHelp, ok bool) {
 		return nil, false
 	case m.lib.chanSaving[c.ID]:
 		return nil, true
-	case m.lib.channelFavs.Contains(c.ID):
+	case m.channelFavs.Contains(c.ID):
 		return []libKeyHelp{libUnfavoriteKey}, true
 	}
 	return []libKeyHelp{libFavoriteKey}, true
@@ -73,7 +73,7 @@ func (m *Model) libToggleChannelFavorite() (cmd tea.Cmd, ok bool) {
 		m.lib.chanSaving = map[string]bool{}
 	}
 	m.lib.chanSaving[c.ID] = true
-	favorites, channel := m.lib.channelFavs, *c
+	favorites, channel := m.channelFavs, *c
 	return func() tea.Msg {
 		added, err := favorites.Toggle(radio.ChannelFavorite{ID: channel.ID, Name: channel.Name})
 		return libChannelFavoriteSavedMsg{channel: channel, added: added, err: err}

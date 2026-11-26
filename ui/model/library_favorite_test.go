@@ -6,6 +6,7 @@ package model
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,8 +41,9 @@ type favFixture struct {
 //
 //	Radio          the library's own Radio menu (Favorites, Browse Stations)
 //	Chile          a directory list, titled as a country list decorates it
-//	cliamp radio   channel rows, which play but are no directory station:
-//	               Lofi has songs, so f favorites it; Groove is a stream
+//	cliamp radio   a channel stream row (Groove), which plays but is no
+//	               directory station; the real channels, from the dated
+//	               snapshot, are under Radio > Browse Stations
 //	Mixed          a directory station among streams that are not
 //	Search         results holding a station row and a directory search
 func newFavModel(t *testing.T) (Model, favFixture) {
@@ -70,7 +72,7 @@ func newFavModel(t *testing.T) (Model, favFixture) {
 	httpTrack := playlist.Track{Path: "https://files.example/song.mp3", Title: "A song", Stream: true}
 	file := playlist.Track{Path: "/music/song.flac", Title: "A file"}
 
-	channels := &channelsProv{songs: map[string][]playlist.Track{"lofi": {{Path: "https://songs.example/lofi/1", Title: "Lofi song"}}}}
+	channels := snapshotChannels(t)
 	entries, err := library.Root(library.Sources{Radio: prov, Channels: channels, ChannelFavorites: func() []library.ChannelRef {
 		var refs []library.ChannelRef
 		for _, c := range fx.chans.Channels() {
@@ -97,33 +99,48 @@ func newFavModel(t *testing.T) (Model, favFixture) {
 		library.Entry{Title: "Radio", Open: entries[0].Open, Source: catalog.Radio},
 		library.Entry{Title: "Chile", Open: tracks("Chile", uno, dos), Source: catalog.Radio},
 		library.Entry{Title: "cliamp radio", Open: library.Menu("cliamp radio", library.Entry{Title: "Groove",
-			Play: func(context.Context) ([]playlist.Track, error) { return []playlist.Track{channel}, nil }},
-			library.Entry{Title: "Lofi", Channel: &library.ChannelRef{ID: "lofi", Name: "Lofi"},
-				Play: func(context.Context) ([]playlist.Track, error) { return channels.Tracks("lofi") }})},
+			Play: func(context.Context) ([]playlist.Track, error) { return []playlist.Track{channel}, nil }})},
 		library.Entry{Title: "Mixed", Open: tracks("Mixed", uno, channel, custom, httpTrack, file)},
 		library.Entry{Title: "Search", Open: search},
 	)
-	m := newLibraryModel(root)
+	// The stores are set before the library, in main.go's order.
+	m := Model{player: &playbackFakeEngine{}, playlist: playlist.New(), plVisible: 10}
 	m.SetRadioFavorites(fx.favs)
 	m.SetChannelFavorites(fx.chans)
+	m.SetLibrary(root)
 	return m, fx
 }
 
-// channelsProv is a cliamp radio channel list: each channel with songs.
-type channelsProv struct{ songs map[string][]playlist.Track }
+// channelsProv is the cliamp radio channel list of the dated real snapshot
+// (external/radio/testdata), listed as radio.ChannelProvider lists it: each
+// channel with its song count; a channel's songs are one stand-in song.
+type channelsProv struct{ infos []playlist.PlaylistInfo }
+
+func snapshotChannels(t *testing.T) *channelsProv {
+	t.Helper()
+	data, err := os.ReadFile("../../external/radio/testdata/channels-20261125.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct{ Stations []radio.Channel }
+	if err := json.Unmarshal(data, &doc); err != nil || len(doc.Stations) == 0 {
+		t.Fatalf("snapshot: %v", err)
+	}
+	p := &channelsProv{}
+	for _, c := range doc.Stations {
+		p.infos = append(p.infos, playlist.PlaylistInfo{ID: c.ID, Name: c.Name, TrackCount: c.Tracks})
+	}
+	return p
+}
 
 func (*channelsProv) Name() string { return "cliamp radio" }
 
 func (p *channelsProv) Playlists() ([]playlist.PlaylistInfo, error) {
-	var infos []playlist.PlaylistInfo
-	for id, songs := range p.songs {
-		infos = append(infos, playlist.PlaylistInfo{ID: id, Name: id, TrackCount: len(songs)})
-	}
-	return infos, nil
+	return slices.Clone(p.infos), nil
 }
 
 func (p *channelsProv) Tracks(id string) ([]playlist.Track, error) {
-	return slices.Clone(p.songs[id]), nil
+	return []playlist.Track{{Path: "https://songs.example/" + id + "/1", Title: id + " song"}}, nil
 }
 
 // catalogSearch is a search level read from every source's catalog, as the
@@ -395,17 +412,17 @@ func TestFavoriteKeyIgnoresWhatIsNotADirectoryStation(t *testing.T) {
 // Favorites, where Enter queues its songs and f removes it.
 func TestFavoriteKeyTogglesASelectedChannel(t *testing.T) {
 	m, fx := newFavModel(t)
-	m = libEnter(t, m, "cliamp radio")
-	libSelect(t, &m, "Lofi")
+	m = libEnter(t, libEnter(t, libEnter(t, m, "Radio"), "Browse Stations"), "cliamp radio")
+	libSelect(t, &m, "Amiga")
 	if got := favKeyHint(m); got != "Favorite" {
 		t.Errorf("key bar hint for f = %q, want Favorite", got)
 	}
 	m = libPress(t, m, "f")
-	want := []radio.ChannelFavorite{{ID: "lofi", Name: "Lofi"}}
+	want := []radio.ChannelFavorite{{ID: "amiga", Name: "Amiga"}}
 	if got := radio.LoadChannelFavorites().Channels(); !slices.Equal(got, want) {
 		t.Fatalf("saved channel favorites = %+v, want %+v", got, want)
 	}
-	if !strings.Contains(m.status.text, "Favorited channel: Lofi") {
+	if !strings.Contains(m.status.text, "Favorited channel: Amiga") {
 		t.Errorf("status = %q", m.status.text)
 	}
 	if got := favKeyHint(m); got != "Unfavorite" {
@@ -415,17 +432,16 @@ func TestFavoriteKeyTogglesASelectedChannel(t *testing.T) {
 		t.Errorf("station favorites = %+v, want none", favSaved())
 	}
 
-	m = libPress(t, m, "esc")
-	m = libEnter(t, m, "Radio")
+	m = libPress(t, libPress(t, m, "esc"), "esc")
 	m = libEnter(t, m, "Favorites")
-	if got := libRowTitles(m); !slices.Equal(got, []string{"Lofi"}) {
+	if got := libRowTitles(m); !slices.Equal(got, []string{"Amiga"}) {
 		t.Fatalf("Favorites = %v, want the channel", got)
 	}
 	if e := m.libTop().entries[0]; e.Detail != "cliamp radio" {
 		t.Errorf("channel favorite's marker = %q", e.Detail)
 	}
 	m = libPress(t, m, "enter")
-	if cur, _ := m.playlist.Current(); cur.Path != "https://songs.example/lofi/1" {
+	if cur, _ := m.playlist.Current(); cur.Path != "https://songs.example/amiga/1" {
 		t.Errorf("Enter plays %q, want the channel's songs", cur.Path)
 	}
 	m = libPress(t, m, "f")
