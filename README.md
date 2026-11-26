@@ -153,6 +153,8 @@ ddsonic reads `~/.config/ddsonic/config.toml`. `ddsonic setup` writes the parts 
   border = true
   ```
 
+  The file is TOML: a comment may follow a value on its line (`border = true # framed`).
+
 ## Documentation
 
 | Topic | Where |
