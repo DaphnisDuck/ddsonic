@@ -3,8 +3,7 @@
 # ddsonic reads ~/.config/ddsonic/config.toml (DDSONIC_CONFIG_DIR picks another
 # folder). You don't need this file to start: `ddsonic setup` writes the
 # Spotify, YouTube Music and music-folder settings for you, and everything
-# else has a default. Copy the lines you want to change. A comment needs a
-# line of its own: ddsonic does not read one that follows a value.
+# else has a default. Copy the lines you want to change.
 #
 # The file must be valid TOML: text goes in quotes ("Tokyo Night"), and a key
 # appears once. ddsonic does not start with a file it cannot parse, and says
@@ -119,7 +118,7 @@ eq = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 # sleep_fade_seconds = 30
 #
 # The durations Z steps through before off: whole minutes from 1 to 1440,
-# increasing, on one line. Any other value keeps the default; delete or
+# increasing. Any other value keeps the default; delete or
 # comment out the line to restore it.
 # sleep_timer_presets_minutes = [15, 30, 45, 60, 90]
 

@@ -70,8 +70,6 @@ youtube_refresh = "2h"
 youtube_playlists = []
 ```
 
-Keep each comment on a line of its own, as here: ddsonic does not read a comment that follows a value.
-
 Durations use Go's format: `90s`, `30m`, `2h`. An invalid value keeps the default.
 
 ## Starting over

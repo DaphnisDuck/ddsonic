@@ -153,8 +153,6 @@ ddsonic reads `~/.config/ddsonic/config.toml`. `ddsonic setup` writes the parts 
   border = true
   ```
 
-  A comment needs a line of its own: ddsonic does not read one that follows a value.
-
 ## Documentation
 
 | Topic | Where |
