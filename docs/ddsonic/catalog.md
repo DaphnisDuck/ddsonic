@@ -70,7 +70,7 @@ youtube_refresh = "2h"
 youtube_playlists = []
 ```
 
-Durations use Go's format: `90s`, `30m`, `2h`. An invalid value keeps the default.
+Durations are strings in Go's format, in quotes: `"90s"`, `"30m"`, `"2h"`. An invalid value keeps the default.
 
 ## Starting over
 

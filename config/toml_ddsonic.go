@@ -78,11 +78,11 @@ func configEntries(data map[string]any, md toml.MetaData) []configEntry {
 			continue // under an array of tables
 		}
 		if _, table := v.(map[string]any); table {
-			current = strings.ToLower(strings.Join(key, "."))
+			current = sectionName(key)
 			out = append(out, configEntry{header: true, section: current})
 			continue
 		}
-		section := strings.ToLower(strings.Join(key[:len(key)-1], "."))
+		section := sectionName(key[:len(key)-1])
 		if section != current {
 			current = section
 			out = append(out, configEntry{header: true, section: current})
@@ -90,6 +90,21 @@ func configEntries(data map[string]any, md toml.MetaData) []configEntry {
 		out = append(out, configEntry{section: section, key: key[len(key)-1], val: renderValue(v)})
 	}
 	return out
+}
+
+// sectionName is a table's name as Load's switch matches it: its parts in
+// lower case joined with dots, a part that is empty or holds a dot keeping
+// its quotes, so that [plugins.""] or ["plugins.x"] is no other table's
+// name (the top-level [plugins] allowlist included).
+func sectionName(key toml.Key) string {
+	parts := make([]string, len(key))
+	for i, k := range key {
+		if k == "" || strings.Contains(k, ".") {
+			k = strconv.Quote(k)
+		}
+		parts[i] = strings.ToLower(k)
+	}
+	return strings.Join(parts, ".")
 }
 
 func lookup(data map[string]any, key toml.Key) (any, bool) {
