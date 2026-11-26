@@ -137,11 +137,13 @@ func (s *catalogView) results(ctx context.Context, query string) ([]Entry, error
 	var entries []Entry
 	for _, sec := range searchSections {
 		rs := found[sec.kind]
-		for _, e := range s.withChannels(sec.kind, channels, s.rows(rs[:min(len(rs), sec.limit)])) {
+		ch := sectionChannels(sec.kind, channels) // ddsonic: #135
+		shown := slices.Clip(ch[:min(len(ch), sec.limit)])
+		for _, e := range append(shown, s.rows(rs[:min(len(rs), sec.limit-len(shown))])...) {
 			e.Section = sec.heading
 			entries = append(entries, e)
 		}
-		if len(rs) > sec.limit {
+		if len(ch)+len(rs) > sec.limit { // ddsonic: #135
 			entries = append(entries, Entry{
 				ID: "more:" + string(sec.kind), Section: sec.heading,
 				Title: "More " + strings.ToLower(sec.heading) + "…", Open: s.more(q, sec.kind, sec.heading),
@@ -167,7 +169,7 @@ func (s *catalogView) more(q catalog.Query, kind catalog.SearchKind, heading str
 		if err != nil {
 			return nil, err
 		}
-		return s.withChannels(kind, channels, s.rows(found[kind])), nil
+		return append(channels, s.rows(found[kind])...), nil
 	}}, "", nil} // read from the catalog alone, so a sync rereads it
 }
 

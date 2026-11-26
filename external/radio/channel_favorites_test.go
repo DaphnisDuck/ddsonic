@@ -19,8 +19,8 @@ func TestChannelFavoritesTogglePersistsByID(t *testing.T) {
 	if err != nil || !added {
 		t.Fatalf("Toggle add = %v, %v; want true, nil", added, err)
 	}
-	if !f.Contains("lofi") || f.Revision() != 1 {
-		t.Fatalf("after add: Contains = %v, Revision = %d", f.Contains("lofi"), f.Revision())
+	if !f.Contains("lofi") {
+		t.Fatal("after add: not Contains")
 	}
 
 	reloaded := LoadChannelFavorites()

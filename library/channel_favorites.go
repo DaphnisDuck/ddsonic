@@ -124,7 +124,8 @@ func channelFavoriteMatches(q catalog.Query, channels playlist.Provider, channel
 
 // channelNameMatches applies search's word rules (catalog/sqlite ftsMatch)
 // to a name: every term must match, its words in order, the last as a
-// prefix unless it is a single character, which matches only a whole word.
+// prefix unless the term has a single letter or digit, which matches only a
+// whole word.
 // Case, accents and punctuation are ignored.
 func channelNameMatches(name string, terms []catalog.Term) bool {
 	words := searchWords(name)
@@ -133,7 +134,7 @@ func channelNameMatches(name string, terms []catalog.Term) bool {
 			return false
 		}
 		want := searchWords(t.Text)
-		if len(want) == 0 || !wordsMatch(words, want) {
+		if len(want) == 0 || !wordsMatch(words, want, len(want) > 1 || len([]rune(want[0])) > 1) {
 			return false
 		}
 	}
@@ -149,14 +150,14 @@ func searchWords(s string) []string {
 }
 
 // wordsMatch reports whether want occurs in words in order, each word whole
-// but the last, which is a prefix when it is longer than one character.
-func wordsMatch(words, want []string) bool {
+// but the last, which is a prefix when prefix is set.
+func wordsMatch(words, want []string, prefix bool) bool {
 	last := len(want) - 1
 	for i := 0; i+len(want) <= len(words); i++ {
 		ok := true
 		for j, w := range want {
 			got := words[i+j]
-			if j == last && len([]rune(w)) > 1 {
+			if j == last && prefix {
 				ok = strings.HasPrefix(got, w)
 			} else {
 				ok = got == w
@@ -172,12 +173,12 @@ func wordsMatch(words, want []string) bool {
 	return false
 }
 
-// withChannels puts the matching favorite channels ahead of the Stations
-// results: they are favorites, which come first among stations. Other
-// sections are rows as they are.
-func (s *catalogView) withChannels(kind catalog.SearchKind, channels, rows []Entry) []Entry {
-	if kind != catalog.SearchStation || len(channels) == 0 {
-		return rows
+// sectionChannels is the matching favorite channels a search section lists
+// ahead of its catalog rows, counted against the section's limit: Stations'
+// favorites, which come first among stations, and none for other sections.
+func sectionChannels(kind catalog.SearchKind, channels []Entry) []Entry {
+	if kind != catalog.SearchStation {
+		return nil
 	}
-	return append(slices.Clip(channels), rows...)
+	return channels
 }

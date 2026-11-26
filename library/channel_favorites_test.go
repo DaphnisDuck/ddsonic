@@ -129,7 +129,8 @@ func TestChannelFavoritePlayErrors(t *testing.T) {
 
 // Search's Stations lists a favorite channel whose saved name matches,
 // ahead of the catalog's stations, unless the query rules out stations or
-// radio. Search's word rules apply: a prefix, a whole single letter.
+// radio. Search's word rules apply: a prefix, but a single-letter term
+// only as a whole word. Channels count against the section's five rows.
 func TestSearchListsMatchingChannelFavoritesFirst(t *testing.T) {
 	cat, _, _ := newCatalogFixture()
 	cat.found = catalog.SearchResults{catalog.SearchStation: {
@@ -155,6 +156,7 @@ func TestSearchListsMatchingChannelFavoritesFirst(t *testing.T) {
 		{"m", []string{"WBGO"}},
 		{"edm mi", []string{"EDM Mix", "WBGO"}},
 		{"edm m", []string{"WBGO"}},
+		{`"edm m"`, []string{"EDM Mix", "WBGO"}},
 		{"source:radio lofi", []string{"Lofi", "WBGO"}},
 		{"source:spotify lofi", nil},
 		{"type:album lofi", nil},
@@ -163,6 +165,21 @@ func TestSearchListsMatchingChannelFavoritesFirst(t *testing.T) {
 		if got := stations(tc.query); !slices.Equal(got, tc.want) {
 			t.Errorf("%q Stations = %q, want %q", tc.query, got, tc.want)
 		}
+	}
+	var many []ChannelRef
+	for _, n := range []string{"Lofi A", "Lofi B", "Lofi C", "Lofi D", "Lofi E", "Lofi F"} {
+		many = append(many, ChannelRef{ID: n, Name: n})
+	}
+	full := child(t, Root(Sources{Radio: &directoryRadio{fakeProvider{name: "Radio"}}, Channels: snapshotChannels(t), Catalog: cat,
+		ChannelFavorites: refs(many...)}), "Search")
+	var section []string
+	for _, e := range searchFor(t, full, "lofi") {
+		if e.Section == "Stations" {
+			section = append(section, e.Title)
+		}
+	}
+	if want := []string{"Lofi A", "Lofi B", "Lofi C", "Lofi D", "Lofi E", "More stations…"}; !slices.Equal(section, want) {
+		t.Errorf("full Stations = %q, want %q", section, want)
 	}
 	for _, e := range searchFor(t, search, "lofi") {
 		if e.Title == "Lofi" && (e.Channel == nil || e.Channel.ID != "lofi" || e.Detail != channelMarker) {

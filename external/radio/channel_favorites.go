@@ -34,7 +34,6 @@ type ChannelFavorite struct {
 type ChannelFavorites struct {
 	mutate   sync.Mutex
 	mu       sync.RWMutex
-	revision uint64
 	channels []ChannelFavorite
 	byID     map[string]struct{}
 	path     string
@@ -70,13 +69,6 @@ func (f *ChannelFavorites) Contains(id string) bool {
 	defer f.mu.RUnlock()
 	_, ok := f.byID[id]
 	return ok
-}
-
-// Revision changes when a successful toggle publishes a new local snapshot.
-func (f *ChannelFavorites) Revision() uint64 {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-	return f.revision
 }
 
 // Toggle applies the opposite of this instance's displayed membership of
@@ -130,7 +122,6 @@ func (f *ChannelFavorites) Toggle(c ChannelFavorite) (bool, error) {
 	}
 	f.mu.Lock()
 	f.channels, f.byID = channels, byID
-	f.revision++
 	f.mu.Unlock()
 	return favorite, nil
 }
