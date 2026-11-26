@@ -41,6 +41,7 @@ func (m *Model) handlePluginQueue(msg PluginQueueMsg) tea.Cmd {
 			return nil
 		}
 		refresh := m.scrobbleCurrent()
+		m.sleepCommand()      // ddsonic: a jump is a transport command for the sleep timer
 		m.retireLibraryPlay() // ddsonic: the chosen track wins over an album still loading
 		m.playlist.SetIndex(msg.Index)
 		cmd := m.playCurrentTrack()

@@ -793,7 +793,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 				break
 			}
 			refresh := m.scrobbleCurrent()
-			m.chooseTrack() // ddsonic: the chosen track wins over an album still loading, and is a command for the sleep timer
+			m.retireLibraryPlay() // ddsonic: the chosen track wins over an album still loading
 			m.playlist.SetIndex(m.plCursor)
 			cmd := m.playCurrentTrack()
 			m.notifyPlayback()
@@ -1575,7 +1575,7 @@ func (m *Model) handleSearchKey(msg tea.KeyPressMsg) tea.Cmd {
 		var cmd tea.Cmd
 		if len(m.search.results) > 0 {
 			idx := m.search.results[m.search.cursor]
-			m.chooseTrack() // ddsonic: the chosen track wins over an album still loading, and is a command for the sleep timer
+			m.retireLibraryPlay() // ddsonic: the chosen track wins over an album still loading
 			m.playlist.SetIndex(idx)
 			m.plCursor = idx
 			cmd = m.playCurrentTrack()
@@ -1754,6 +1754,7 @@ func (m *Model) handleURLInputKey(msg tea.KeyPressMsg) tea.Cmd {
 		if input != "" {
 			m.feedLoading = true
 			m.status.Activity("Loading URL...", statusTTLLong)
+			m.sleepLaterPlay(false) // ddsonic: the URL plays when it arrives (sleep_ddsonic.go)
 			return resolveURLCmd(input, true)
 		}
 		m.urlInputting = true
@@ -2229,7 +2230,6 @@ func (m *Model) handlePlMgrTracksKey(msg tea.KeyPressMsg) tea.Cmd {
 // plMgrLoadAndPlay replaces the live playlist with the manager's tracks and
 // starts playback at startIdx.
 func (m *Model) plMgrLoadAndPlay(startIdx int) tea.Cmd {
-	m.sleepCommand() // ddsonic: a transport command (sleep_ddsonic.go)
 	m.player.Stop()
 	m.player.ClearPreload()
 	m.resetYTDLBatch()

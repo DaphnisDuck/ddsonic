@@ -177,7 +177,7 @@ func (m *Model) playCurrentTrack() tea.Cmd {
 // playTrackImmediate appends a track to the playlist and starts playing it now,
 // stopping any current playback. Used by search-result "Play now" actions.
 func (m *Model) playTrackImmediate(track playlist.Track) tea.Cmd {
-	m.chooseTrack() // ddsonic: every caller is an explicit play
+	m.retireLibraryPlay() // ddsonic: every caller is an explicit play
 	m.player.Stop()
 	m.player.ClearPreload()
 	m.playlist.Add(track)
@@ -202,7 +202,6 @@ func (m *Model) appendTrack(track playlist.Track) tea.Cmd {
 	idx := m.playlist.Len() - 1
 	m.status.Showf(statusTTLMedium, "Added: %s", track.DisplayName())
 	if wasEmpty || !m.player.IsPlaying() {
-		m.sleepCommand() // ddsonic: adding starts playback: a transport command (sleep_ddsonic.go)
 		m.playlist.SetIndex(idx)
 		m.plCursor = idx
 		m.adjustScroll()
@@ -217,7 +216,7 @@ func (m *Model) appendTrack(track playlist.Track) tea.Cmd {
 // its first track. Like playTrackImmediate it adds rather than replaces, so a
 // queue built up over an evening survives picking an album from search.
 func (m *Model) playAlbumImmediate(album playlist.Track, tracks []playlist.Track) tea.Cmd {
-	m.chooseTrack() // ddsonic: every caller is an explicit play
+	m.retireLibraryPlay() // ddsonic: every caller is an explicit play
 	m.player.Stop()
 	m.player.ClearPreload()
 	idx := m.playlist.Len()
@@ -243,7 +242,6 @@ func (m *Model) appendAlbum(album playlist.Track, tracks []playlist.Track) tea.C
 	m.addToHeaderState(tracks)
 	m.status.Showf(statusTTLMedium, "Added album: %s (%d tracks)", album.Title, len(tracks))
 	if wasEmpty || !m.player.IsPlaying() {
-		m.sleepCommand() // ddsonic: adding starts playback: a transport command (sleep_ddsonic.go)
 		m.playlist.SetIndex(idx)
 		m.plCursor = idx
 		m.adjustScroll()
@@ -388,7 +386,6 @@ func (m *Model) removeSelectedFromPlaylist() {
 	m.normalizeQueueOverlay()
 	m.armPlaylistUndo(playlistUndo{snapshot: snapshot, loaded: loaded, saved: saved, persisted: persisted}) // ddsonic: #22
 	if wasActive {
-		m.sleepCommand() // ddsonic: removing the playing track stops it (sleep_ddsonic.go)
 		m.stopPlayback()
 		m.player.ClearPreload()
 	}
@@ -441,6 +438,7 @@ func (m *Model) undoPlaylistMutation() tea.Cmd {
 // playTrack plays a track, using async HTTP for streams and sync I/O for local files.
 // yt-dlp URLs are streamed via a piped yt-dlp | ffmpeg chain for instant playback.
 func (m *Model) playTrack(track playlist.Track) tea.Cmd {
+	m.sleepUserPlayback() // ddsonic: a user's play is a sleep timer command (sleep_ddsonic.go)
 	m.pausedAt = time.Time{}
 	if track.Feed || playlist.IsFeed(track.Path) {
 		m.feedLoading = true

@@ -250,6 +250,7 @@ func (m *Model) handleV2QueueRequest(ctx context.Context, jobs *ipc.JobStore, jo
 		}
 		track := ipcTrackFromInfo(*request.Track)
 		if track.Feed {
+			m.sleepLaterPlay(request.Cmd == "track.play") // ddsonic: the feed plays when it arrives (sleep_ddsonic.go)
 			return ipcFeedLoadCmd(ctx, ipc.QueueRequestMsg{Op: request.Cmd}, track, jobs, jobID, request.Revision)
 		}
 		if request.Cmd == "track.play" {

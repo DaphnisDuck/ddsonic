@@ -57,6 +57,7 @@ func (m *Model) clearPlaybackTrack() {
 // seconds after the user stopped or ran past the end of the queue. It returns
 // the track that was playing and whether the engine had started it.
 func (m *Model) stopPlayback() (playlist.Track, bool) {
+	m.sleepUserPlayback() // ddsonic: a user's stop is a sleep timer command (sleep_ddsonic.go)
 	nextRequest(&m.requests.stream)
 	m.player.SetPlaybackGeneration(m.requests.stream)
 	m.player.Stop()

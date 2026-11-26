@@ -10,11 +10,17 @@ package model
 //
 // The Model owns the timer and checks its deadline on the ticks the UI
 // already runs: no goroutine, so nothing to lock or race. During a fade, a
-// volume or transport command from the user cancels the fade and the
-// timer: the handlers that carry out such commands call sleepCommand, and
-// MPRIS and IPC commands are recognised as they arrive (sleepRemote).
-// Automatic playback (a track ending and the next starting) never cancels.
-// The timer does not survive a restart.
+// volume or transport command the user gives cancels the fade and the
+// timer, when it is accepted. Most are recognised where playback starts or
+// stops: while Update handles a key or a remote (MPRIS, IPC, plugin)
+// command, playTrack and stopPlayback call sleepUserPlayback. The commands
+// that may change nothing (a volume at its limit, a Play while playing, a
+// seek) call sleepCommand where they are accepted, or are recognised as they
+// arrive (sleepRemoteCommand); those that start playback later (a load, a
+// URL, files, an episode list) call sleepLaterPlay where they are accepted.
+// A result arriving later, a refused command, automatic playback (a track
+// ending and the next starting) and resuming never cancel. The timer does
+// not survive a restart.
 
 import (
 	"fmt"
@@ -39,6 +45,8 @@ type sleepTimer struct {
 	// pausePending: the deadline passed while a track was starting; it is
 	// paused, silent, as soon as the start finishes.
 	pausePending bool
+	// user: Update is handling a key or a remote command (sleepUserInput).
+	user bool
 
 	fade time.Duration    // how long the fade lasts; 0 is no fade (config)
 	now  func() time.Time // the clock; nil is time.Now (tests set it)
@@ -122,11 +130,40 @@ func (m *Model) setVolumeByUser(db float64) {
 	m.player.SetVolume(db)
 }
 
-// chooseTrack is a track the user picked to play now: it retires a library
-// play still loading and is a transport command for the sleep timer.
-func (m *Model) chooseTrack() {
-	m.sleepCommand()
-	m.retireLibraryPlay()
+// sleepUserPlayback is called where playback starts or stops (playTrack,
+// stopPlayback): while Update handles a user's command, that is a transport
+// command; otherwise it is automatic and changes nothing.
+func (m *Model) sleepUserPlayback() {
+	if m.sleep.user {
+		m.sleepCommand()
+	}
+}
+
+// sleepUserInput reports whether msg is the user's: a key, or a command from
+// MPRIS, IPC or a plugin. The results of work they started, ticks and the
+// player's own events are not. PluginQueueMsg is left out: of its
+// operations only jump is a transport command (plugin_queue.go).
+func sleepUserInput(msg tea.Msg) bool {
+	switch msg.(type) {
+	case tea.KeyPressMsg,
+		playback.PlayPauseMsg, playback.PlayMsg, playback.PauseMsg, playback.StopMsg,
+		playback.NextMsg, playback.PrevMsg, playback.SeekMsg, playback.SetPositionMsg,
+		playback.SetVolumeMsg,
+		ipc.LoadMsg, ipc.QueueMsg, ipc.QueueRequestMsg, ipc.LibraryRequestMsg,
+		ipc.URLRequestMsg, V2RequestMsg:
+		return true
+	}
+	return false
+}
+
+// sleepLaterPlay accepts a command whose playback starts when its result
+// arrives (a load, an episode list, files, a URL): it is a transport command
+// when it asks to play now, or when nothing plays, so the result will start
+// playback. The result itself never cancels.
+func (m *Model) sleepLaterPlay(playNow bool) {
+	if (m.sleep.fading || m.sleep.pausePending) && (playNow || !m.player.IsPlaying()) {
+		m.sleepCommand()
+	}
 }
 
 // libSleepCommand: Enter on a library row that plays is a transport
@@ -137,30 +174,29 @@ func (m *Model) libSleepCommand(e library.Entry) {
 	}
 }
 
-// sleepRemote runs before Update handles msg: an MPRIS or IPC volume or
-// transport command is a command like a key's.
+// sleepRemote runs before Update handles msg: it opens the user's scope
+// for sleepUserPlayback (sleepTick closes it), and a remote command that
+// may change nothing, or plays a URL later, is a command as it arrives.
 func (m *Model) sleepRemote(msg tea.Msg) {
+	m.sleep.user = sleepUserInput(msg)
 	if (m.sleep.fading || m.sleep.pausePending) && m.sleepRemoteCommand(msg) {
 		m.sleepCommand()
 	}
 }
 
-// sleepRemoteCommand reports whether msg is a volume or transport command
-// from MPRIS or IPC: anything that sets the volume, pauses, plays, stops,
-// skips or seeks, including the queue operations that stop playback
-// (clearing the queue, removing the playing track) or start it. Reading,
-// enqueueing and moving do not count. A provider load is not classified
-// here: handleIPCLibrary calls sleepCommand once it accepts one.
+// sleepRemoteCommand reports whether msg is an MPRIS or IPC command that
+// counts even when it changes nothing: the volume, pause, play, stop, skip
+// and seek. A URL load counts when the URL will play: asked to, or with
+// nothing playing. Everything else that starts or stops playback is caught
+// there (sleepUserPlayback).
 func (m *Model) sleepRemoteCommand(msg tea.Msg) bool {
 	switch msg := msg.(type) {
 	case playback.PlayPauseMsg, playback.PlayMsg, playback.PauseMsg, playback.StopMsg,
 		playback.NextMsg, playback.PrevMsg, playback.SeekMsg, playback.SetPositionMsg,
-		playback.SetVolumeMsg, ipc.LoadMsg:
+		playback.SetVolumeMsg:
 		return true
 	case ipc.URLRequestMsg:
-		return msg.Play
-	case ipc.QueueRequestMsg: // the older IPC protocol (ipc_extended.go)
-		return m.sleepQueueCommand(msg.Op, msg.Index)
+		return msg.Play || !m.player.IsPlaying()
 	case V2RequestMsg:
 		request, err := v2OperationRequest(msg.Request)
 		if err != nil {
@@ -168,24 +204,11 @@ func (m *Model) sleepRemoteCommand(msg tea.Msg) bool {
 		}
 		switch request.Cmd {
 		case "play", "pause", "toggle", "stop", "next", "prev",
-			"volume", "volume.adjust", "seek", "seek.absolute", "load":
+			"volume", "volume.adjust", "seek", "seek.absolute":
 			return true
 		case "url.load":
-			return request.Play
+			return request.Play || !m.player.IsPlaying()
 		}
-		return m.sleepQueueCommand(request.Cmd, request.Index)
-	}
-	return false
-}
-
-// sleepQueueCommand reports whether a queue operation stops or starts
-// playback.
-func (m *Model) sleepQueueCommand(op string, index int) bool {
-	switch op {
-	case "queue.play", "track.play", "queue.clear":
-		return true
-	case "queue.remove":
-		return m.playlist != nil && index == m.playlist.Index()
 	}
 	return false
 }
@@ -194,9 +217,11 @@ func (m *Model) sleepPlaying() bool {
 	return m.player != nil && m.player.IsPlaying() && !m.player.IsPaused() && !m.buffering
 }
 
-// sleepTick runs after Update has handled msg: on a UI tick it starts the
-// fade when its time has come, and pauses at the deadline.
+// sleepTick runs after Update has handled msg: it closes the user's scope,
+// and on a UI tick it starts the fade when its time has come, and pauses at
+// the deadline.
 func (m *Model) sleepTick(msg tea.Msg) {
+	m.sleep.user = false
 	if t, ok := msg.(tickMsg); ok {
 		m.tickSleep(time.Time(t))
 	}

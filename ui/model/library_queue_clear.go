@@ -22,7 +22,6 @@ func (m *Model) libClearQueue() tea.Cmd {
 		return nil
 	}
 	snapshot, loaded := m.playlist.Snapshot(), m.loadedPlaylist
-	m.sleepCommand() // it stops playback: a transport command (sleep_ddsonic.go)
 	m.stopPlayback()
 	m.retireTracksPaging()
 	m.replacePlaylist(nil)
