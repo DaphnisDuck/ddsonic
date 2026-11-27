@@ -10,7 +10,7 @@ Never end a turn inside an active review cycle without a tracked wait pending, e
 - Short operations: one `herdr_agent_wait` of at most 120 s (Herdr cuts longer timeouts at 120 s and the call fails).
 - Long builds, validation and managed-agent work: ONE watcher started with `run_in_background` and bounded to about 25 minutes (a plain shell loop over `herdr agent get`, every ~10 s, with a hard deadline; not a detached `&` process, daemon or unbounded loop). It reads structured state only (`agent_status`, `completion_seq`), never conversational text, and exits when `completion_seq` has advanced and the agent is `idle` or `done`, when the agent is `blocked`, or at the deadline. It never signals, kills or modifies an agent, and there is at most one watcher per agent. The harness notifies when it exits; read the session file only then, to fetch the result.
 - A `completion_seq` advance means the agent's turn ended, not always that the task did (an agent may end a turn while its own background command, such as `make validate`, still runs): check the response and, if it is still waiting, record the new value and arm one more watcher.
-- On wake-up, verify the actual state and response; for the Writer, also run `ctx Writer` (at `warn`, have it record a checkpoint and name its next safe boundary; at `refresh`, reset it with `fresh` once the step at that boundary is done, unless a reset of it already failed: then stop for the owner): FAIL, relay the actionable in-scope findings to the Writer and arm the next wait; PASS, verify the commit, tests and evidence, then report to the owner; BLOCKED, stop for the owner (never answer another agent's permission prompt); TIMEOUT, check status and, if the agent is still working, arm another bounded watcher.
+- On wake-up, verify the actual state and response, and the Writer's `ctx` against the thresholds: FAIL, relay the actionable in-scope findings to the Writer and arm the next wait; PASS, verify the commit, tests and evidence, then report to the owner; BLOCKED, stop for the owner (never answer another agent's permission prompt); TIMEOUT, check status and, if the agent is still working, arm another bounded watcher.
 - Escalate for repeated defects, scope growth, real risk or an authorization need, not for a fixed number of rounds.
 
 ## Starting a review round
@@ -22,6 +22,8 @@ Never end a turn inside an active review cycle without a tracked wait pending, e
 ## Reporting to the owner
 
 Stop and report: the outcome, what was fixed, every dispute with both positions, deferred items, unresolved MEDIUMs, and the checks run. A review that did not finish is reported as such. Before reporting a round or a task closed, check that its findings, blockers, decisions and outcome are on the issue (Recording, in `CLAUDE.md`) and post what is missing.
+
+While #206 is open, check each Writer assignment's `ctx` checks, resets and skills at closeout against its qualification criteria, and record the result there.
 
 A dev candidate's SHA goes to the owner for `ddsonic-fetch` only after the Writer's staging has succeeded.
 
@@ -35,4 +37,4 @@ A dev candidate's SHA goes to the owner for `ddsonic-fetch` only after the Write
 
 ## Context helper
 
-`ddsonic-herdr ctx <Dispatcher|Writer>` prints status, session, active tokens and state (`ok`, `warn` at 85K, `refresh` at 100K, `pending` after a compaction until the next request), the time of that measurement and the compaction count; `ddsonic-herdr fresh <role> --checkpoint COMMENT_URL [--boundary KEY] [--self]` does one guarded `/clear` (it needs a comment URL, not an issue URL). `ddsonic-herdr` is a symlink to the helper that selects the ddsonic profile. Waits are bounded and processes are tracked by PID or output marker. After a failure or timeout, inspect the pane and the state first; a failed reset is never retried automatically and a used boundary is not reused.
+`ddsonic-herdr ctx <Dispatcher|Writer>` prints active tokens and state (`ok`, `warn` at 85K, `refresh` at 100K, `pending` after a compaction until the next request); `ddsonic-herdr fresh <role> --checkpoint COMMENT_URL [--boundary KEY] [--self]` does one guarded `/clear` (the dd-devops README). A planned reset passes `--boundary <issue>-<step>`; the 600 s cooldown applies only without one. A refusal is not a failure: repeat it once its cause is gone. After a failure or timeout, inspect the pane and the state first; a failed reset is never retried (stop for the owner) and a used boundary is not reused.

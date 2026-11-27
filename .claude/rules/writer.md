@@ -4,10 +4,6 @@ The Writer's procedures. `CLAUDE.md` holds the rules every role follows; the hel
 
 **Where to look:** the issue named in the task.
 
-## Self-review
-
-Use `mattpocock-skills:tdd` while implementing behavior (not required for prose-only work) and `mattpocock-skills:code-review` on the diff before the PR. This supplements the independent review and never replaces it.
-
 ## Requesting a review
 
 Run `make validate` as in the Validation quickstart (or `make validate PROFILE=` a higher class) and paste its `validate: PASSED class=...` line. Write the request into a prompt file (a private file outside the repo; it is data, and holds the issue/PR evidence). It carries:
