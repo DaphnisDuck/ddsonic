@@ -79,6 +79,7 @@ All providers implement the interfaces in `provider/interfaces.go` (Browse, Trac
 Lua plugins run in isolated `gopher-lua` VMs. Crashes are sandboxed. Hooks fire on playback events; plugins can register custom visualizers. When you add or change a plugin API, update **both** of:
 1. `luaplugin/api_*.go` (implementation + tests)
 2. `docs/plugins.md` (user-facing reference)
+(Upstream also updates `site/index.html`; ddsonic has no `site/`.)
 
 ---
 
@@ -119,27 +120,25 @@ Config lives at `~/.config/ddsonic/config.toml` (`DDSONIC_CONFIG_DIR` overrides;
 
 ## Skills to use
 
-Call skills by their full names. Matt Pocock's skills are `mattpocock-skills:<name>` and are used unmodified (natively where the agent supports skills, otherwise by following the installed `SKILL.md`); a bare `/code-review` is a different, built-in command. Disclose a material deviation on the issue or PR; skills never change an approval boundary.
+Call skills by their full names. Matt Pocock's skills are `mattpocock-skills:<name>` and are used unmodified (natively where the agent supports skills, otherwise by following the installed `SKILL.md`); a bare `/code-review` is a different, built-in command. Disclose a material deviation on the issue or PR; skills never change an approval boundary. Applicable skills are mandatory, whatever a brief says; the review request lists each as invoked, or skipped with its exception named:
 
-Applicable skills are mandatory, whatever a brief says; the review request lists each as invoked, or skipped with its exception named:
-- `mattpocock-skills:tdd`: a commit changing non-test code's behavior. Except docs or comments only, test-only, a pure rename or move, an upstream merge.
-- `mattpocock-skills:code-review`: the diff, once per PR head before its first review request, when non-doc files change. Except verify-round fixes of LOW/NIT only.
-- `/simplify` (built-in): non-trivial edits in `player/`, `ui/model/`, `luaplugin/` or `library/`.
-- `mattpocock-skills:writing-for-agents`: any edit to this file, `AGENTS.md`, `.claude/rules/` or a skill.
-- `mattpocock-skills:pr`: a new PR body. Except edits to an existing body.
-- `mattpocock-skills:diagnosing-bugs`: a deliverable that is a reported defect's cause. Except a cause already documented.
+- `mattpocock-skills:tdd`: a commit changing non-test code's behavior. Except docs or comments only, test-only, a pure rename or move, an upstream merge. `mattpocock-skills:code-review`: the diff, once per PR head before its first review request, when non-doc files change. Except verify-round fixes of LOW/NIT only.
+- `/simplify` (built-in): non-trivial edits in `player/`, `ui/model/`, `luaplugin/` or `library/`. `mattpocock-skills:writing-for-agents`: any edit to this file, `AGENTS.md`, `.claude/rules/` or a skill.
+- `mattpocock-skills:pr`: a new PR body. Except edits to an existing body. `mattpocock-skills:diagnosing-bugs`: a deliverable that is a reported defect's cause. Except a cause already documented.
 - Optional plugins, where installed:
   - `ecc` (`ecc:golang-patterns`, `ecc:golang-testing`, `ecc:go-review`) for idiomatic Go and table-driven tests;
   - `context7` for current docs of an external library (Bubbletea v2, Beep, go-librespot, urfave/cli, gopher-lua, SQLite drivers);
   - `gopls-lsp` for go-to-definition and find-references across `ui/model/`.
+- After a refactor, `make check` (gofmt, vet, tests) passes before you stop.
 
 Golden path for a non-trivial change:
 1. Read the issue, the relevant `docs/*.md` / `docs/ddsonic/*.md` and the `plan.md` section the task needs (above), and skim the target package.
 2. Plan.
 3. Implement the narrowest change that works. Add/extend table-driven tests.
-4. Run `make check` while iterating and before you stop; before review, `make validate` (Validation quickstart).
-5. If user-visible: upstream-style changes update `docs/`; ddsonic-only changes update `docs/ddsonic/`.
-6. Run the review loop below before reporting the change as done.
+4. Run `make check` while iterating; before review, `make validate` (Validation quickstart).
+5. Invoke the applicable skills (above).
+6. If user-visible: upstream-style changes update `docs/`; ddsonic-only changes update `docs/ddsonic/`.
+7. Run the review loop below before reporting the change as done.
 
 ### Roles and the review loop (ddsonic)
 
