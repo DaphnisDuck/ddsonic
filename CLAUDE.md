@@ -16,7 +16,7 @@ Fork rules (keep upstream merges cheap):
 
 - `make tools` once: CI's pinned tools into `~/.local/share/ddsonic/devtools` (outside `/tmp`, so they outlive a session); `make preflight` checks them in under a second.
 - Before a review, commit, then `make validate`: local proportional validation (`docs/ddsonic/acceptance.md`, "Proportional validation"). It runs the profile of the change's class and ends with the `validate: PASSED class=...` line for the review request; the Reviewer verifies the class. The class is full, and `make validate` runs the full `make ci` (about 10 minutes: run it in the background), for security-sensitive code, tools, CI, dependencies, the Spotify boundary and sign-in, and anything unknown or ambiguous. Policy prose (this file, `SECURITY.md`, `docs/ddsonic/releasing.md`, the design notes) is docs class, which still runs the citation check; its review is unchanged. Commit first: `make ci` ends with `git diff --exit-code`.
-- GitHub CI always runs in full. Nothing local is tamperproof (a change can edit its own Makefile and scripts), so independent review and the owner's merge approval remain required.
+- GitHub CI always runs in full. Nothing local is tamperproof (a change can edit its own Makefile and scripts), so independent review and merge authority (Autonomy and merge authority, below) remain required.
 
 ---
 
@@ -225,5 +225,19 @@ GitHub Issues and the owner's Project are the authoritative source for the curre
 - **Lifecycles.** Dispatcher and Writer: fresh for each assignment unrelated to the last. Related: same issue, and it consumes the previous output; it continues only while `ctx` reads `ok`. A review correction stays in its assignment. The Dispatcher records a new owner task verbatim before its `fresh --self`.
 - **Checks.** Dispatcher and Writer run `ddsonic-herdr ctx <own role>` at each phase boundary (end of orientation, commit, self-review, validation, review request, triage, staging, report) and before context-intensive work (a subagent; reading a report, log or diff over ~20 KB); the Dispatcher also checks the Writer at each wake-up. After a compaction `ctx` reads `pending` until the next request.
 - **Thresholds.** At 85K (`warn`) record the state on GitHub (a comment URL, an existing one counts: every reset needs it) and name the next safe boundary: the current step finished and, for the Dispatcher, no watcher armed. At 100K (`refresh`) reset there with `fresh` (the Dispatcher resets the Writer), never during active work; a Dispatcher with a watcher armed resets once it exits, before relaying anything else. Below 100K, carry on to the assignment's end. 150K is the auto-compaction window set by the helper's `start` (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`, never persistent settings); compaction at about 117K is only the backstop.
+- **Resume checkpoint.** At `warn` and before each reset, the Dispatcher and the Writer rewrite, whole, a private checkpoint file outside the repo, at most 1.5 KB, with the headings `Task`, `Authority`, `State`, `Open waits`, `Next`, `Links`; `fresh --resume FILE` seeds the reset from it.
 - **Discovery is proportional.** Resolve routine engineering questions from the code. Batch consequential ones to the owner with a recommendation each. Grill fully only when the owner asks or the scope is unclear.
 - **Architecture analysis** only on request. `GLOSSARY.md` and ADRs mirror GitHub decisions and never track planning.
+
+**Report digest.** A substantive report (a Writer assignment or triage report, a review round, a Codex round's output, an investigation, a Release Director audit) ends with a digest, the Dispatcher's view of it; the owner gets the full report verbatim (`.claude/rules/dispatcher.md`, Reports). Write every line; `None` is an affirmative answer:
+```
+DIGEST
+Verdict: PASS|FAIL|BLOCKED|DONE   Head: <sha>   Validate: <validate line, or "not run: <why>">
+Findings: B<n> H<n> M<n> L<n> N<n>; open: one line per unresolved BLOCKER, HIGH or MEDIUM
+Deferred: <one line each, or None>
+Disputes: <one line each, or None>
+Caveats: <one line each, or None>
+Not executed: <checks not run, or taken as Writer or GitHub CI evidence, or None>
+Report: <path of the full report, or "this reply">
+```
+Keep it under 1 KB by wording, never by dropping a disclosure: every open finding, deferral, dispute, caveat and unexecuted check stays, and a digest that then exceeds 1 KB starts `DIGEST over-limit`.

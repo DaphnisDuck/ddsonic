@@ -8,10 +8,11 @@ Never end a turn inside an active review cycle without a tracked wait pending, e
 
 - Before relaying work to a managed agent (Dispatcher, Writer or Reviewer; a supplemental Codex round is not one), record its `completion_seq` (`herdr agent get`).
 - Short operations: one `herdr_agent_wait` of at most 120 s (Herdr cuts longer timeouts at 120 s and the call fails).
-- Long builds, validation and managed-agent work: ONE watcher started with `run_in_background` and bounded to about 25 minutes (a plain shell loop over `herdr agent get`, every ~10 s, with a hard deadline; not a detached `&` process, daemon or unbounded loop). It reads structured state only (`agent_status`, `completion_seq`), never conversational text, and exits when `completion_seq` has advanced and the agent is `idle` or `done`, when the agent is `blocked`, or at the deadline. It never signals, kills or modifies an agent, and there is at most one watcher per agent. The harness notifies when it exits; read the session file only then, to fetch the result.
-- A `completion_seq` advance means the agent's turn ended, not always that the task did (an agent may end a turn while its own background command, such as `make validate`, still runs): check the response and, if it is still waiting, record the new value and arm one more watcher.
-- On wake-up, verify the actual state and response, and the Writer's `ctx` against the thresholds: FAIL, relay the actionable in-scope findings to the Writer and arm the next wait; PASS, verify the commit, tests and evidence, then report to the owner; BLOCKED, stop for the owner (never answer another agent's permission prompt); TIMEOUT, check status and, if the agent is still working, arm another bounded watcher.
-- Escalate for repeated defects, scope growth, real risk or an authorization need, not for a fixed number of rounds.
+- Long builds, validation and managed-agent work: the watcher is ONE `ddsonic-herdr await <role> --since SEQ`, started with `run_in_background` (default and maximum 1500 s; the dd-devops README is the reference). It reads structured Herdr state only and never signals an agent; keep at most one per agent, and no status polls or separate `ctx` calls beside it (its `ctx` field is the wake-up check). The harness notifies when it exits; its one JSON line is the result.
+- A `done` means the agent's turn ended, not always that the task did (an agent may end a turn while its own background command, such as `make validate`, still runs): if it is still waiting, arm one more `await` from the new `completion_seq`.
+- On wake-up, read the digest from the end of the `reply` file (`sed -n '/^DIGEST/,$p'`), and check `ctx` against the thresholds. `done`: FAIL, relay the actionable in-scope findings to the Writer and arm the next wait; PASS, verify the commit, tests and evidence, then report to the owner. `blocked` (exit 3): stop and report the stall to the owner; never answer another agent's permission prompt. `timeout` (exit 4): check the status it prints and re-arm once; a second timeout goes to the owner.
+- Read the full report only on FAIL, BLOCKED, a dispute, an open MEDIUM or higher, or `DIGEST over-limit`. Targeted expansion: when a material decision needs more evidence than the digest gives, read just the sections that decide it (`grep -n`, `sed -n` ranges) and say so in the owner report. A missing digest line is a defect to send back.
+- Review rounds: at most four per bounded task, stopping on PASS; a fifth needs the owner. Before that limit, escalate for repeated defects, scope growth, real risk or an authorization need.
 
 ## Starting a review round
 
@@ -19,16 +20,25 @@ Never end a turn inside an active review cycle without a tracked wait pending, e
 - **Supplemental Codex round**, only with the owner's authorization for it: `ddsonic-herdr review --repo DIR --prompt-file FILE [--timeout SECS]`, started with `run_in_background`; the helper's `--timeout` bounds the wait. The helper reports a round as success only with a new session ID and the profile's header.
 - **Verify round.** A fresh round whose prompt carries the original findings and the Writer's response to every one (when to repeat: `CLAUDE.md`).
 
+## Reports
+
+Every substantive report (`CLAUDE.md`, Report digest) reaches the owner verbatim through `ddsonic-herdr deliver FILE...`, run with the report's path without reading it; the stream is shown in the ddsonic workspace's Reports tab, and Terminal stays the owner's shell. Your commentary may accompany a report, never replace it.
+- Each delivery notification to the owner names every report by the `id` and `title` from `deliver`'s result line.
+- `deliver` exits 1 (not persisted) or 2 (persisted, not presented): tell the owner `delivery failed: <reason>; report at <path>`. Every failure is stated.
+- A revised report is delivered again as a new entry.
+- At the start of a new Writer assignment, run `ddsonic-herdr new-view <issue>-<assignment>`; resets and review corrections keep the current view.
+
 ## Reporting to the owner
 
-Stop and report: the outcome, what was fixed, every dispute with both positions, deferred items, unresolved MEDIUMs, and the checks run. A review that did not finish is reported as such. Before reporting a round or a task closed, check that its findings, blockers, decisions and outcome are on the issue (Recording, in `CLAUDE.md`) and post what is missing.
+Stop and report: the outcome, what was fixed, every dispute with both positions, deferred items, unresolved MEDIUMs, and the checks run, carrying over every Deferred, Disputes, Caveats, Not-executed and open-finding line of the digests. A review that did not finish is reported as such. Before reporting a round or a task closed, check that its findings, blockers, decisions and outcome are on the issue (Recording, in `CLAUDE.md`) and post what is missing.
 
-While #206 is open, check each Writer assignment's `ctx` checks, resets and skills at closeout against #206's qualification criteria, and record the result there.
+While #206 is open, check each Writer assignment's `ctx` checks, resets and skills at closeout against #206's qualification criteria, and record the result there. While #217 is in qualification, record each assignment's measurements on #217 at closeout, drafted by the Writer.
 
 A dev candidate's SHA goes to the owner for `ddsonic-fetch` only after the Writer's staging has succeeded.
 
 ## GitHub
 
+- **Your share.** The Writer and Reviewer draft records; you post them. Code reading and diffs go to them. Wait for CI with one background `gh run watch <id> --exit-status`. Read and set Project fields with `ddsonic-herdr project <issue> [--status S] [--area A] [--commitment C]`. Read GitHub with narrow `--jq` queries, once each.
 - **Where to look:** open issues not yet in the Project (intake), and the Project's Todo and In progress items.
 - **Intake: when.** When the owner asks, and at the start of a Dispatcher planning session. Nothing polls: no bot, Action, scheduled job or daemon.
 - **Intake: what.** Any issue is accepted as written, in any format, from the owner or a contributor, with or without a template; no agent-specific template or legacy ID is needed. Untriaged means an open issue that is not in the Project, or a Project item whose Area, Commitment or Status is unset. For each, search existing issues, open and closed, for a duplicate; add the issue to the Project if needed; and set the intake defaults below. Leave the reporter's title and text as written and never close or reject an issue for its format or missing sections. A likely duplicate gets one comment linking the original; closing it is the owner's call.
@@ -37,4 +47,4 @@ A dev candidate's SHA goes to the owner for `ddsonic-fetch` only after the Write
 
 ## Context helper
 
-`ddsonic-herdr ctx <Dispatcher|Writer>` prints active tokens and state (Thresholds and Checks, `CLAUDE.md`); `ddsonic-herdr fresh <role> --checkpoint COMMENT_URL [--boundary KEY] [--self]` does one guarded `/clear` (the dd-devops README). A planned reset (any reset at a safe boundary) passes `--boundary <issue>-<step>`; the 600 s cooldown applies only without one. A refusal is not a failure: repeat it once its cause is gone. After a failure or timeout, inspect the pane and the state first; a failed reset is never retried (stop for the owner) and a used boundary is not reused.
+`ddsonic-herdr ctx <Dispatcher|Writer>` prints active tokens and state (Thresholds and Checks, `CLAUDE.md`); `ddsonic-herdr fresh <role> --checkpoint COMMENT_URL [--boundary KEY] [--self]` does one guarded `/clear` (the dd-devops README); `--resume FILE` seeds the reset with the role's resume checkpoint (`CLAUDE.md`, Context and handoffs). A planned reset (any reset at a safe boundary) passes `--boundary <issue>-<step>`; the 600 s cooldown applies only without one. A refusal is not a failure: repeat it once its cause is gone. After a failure or timeout, inspect the pane and the state first; a failed reset is never retried (stop for the owner) and a used boundary is not reused.

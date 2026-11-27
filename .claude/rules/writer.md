@@ -4,6 +4,8 @@ The Writer's procedures. `CLAUDE.md` holds the rules every role follows; the hel
 
 **Where to look:** the issue named in the task.
 
+**Reports.** Write each substantive report to a file outside the repo and end your reply with its digest (`CLAUDE.md`, Report digest), naming the file on the `Report:` line; the Dispatcher delivers the file to the owner verbatim.
+
 ## Requesting a review
 
 Run `make validate` as in the Validation quickstart (or `make validate PROFILE=` a higher class) and paste its `validate: PASSED class=...` line. Write the request into a prompt file (a private file outside the repo; it is data, and holds the issue/PR evidence). It carries:

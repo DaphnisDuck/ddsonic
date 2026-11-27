@@ -7,3 +7,4 @@ The Reviewer's procedures. `CLAUDE.md` holds the rules every role follows, the R
 - **Tests.** Local sockets work, so run the socket-dependent Go tests (`ipc/`, `internal/...`, httptest servers) yourself.
 - **Validation class.** Verify the class on the request's `validate: PASSED class=...` line against `docs/ddsonic/acceptance.md`, "Proportional validation".
 - **Status.** Verify any Status change the Writer proposes.
+- **Report.** Your final reply is the round's full report, delivered to the owner verbatim; end it with the digest (`CLAUDE.md`, Report digest), `Report: this reply`.
