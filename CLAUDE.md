@@ -225,7 +225,7 @@ GitHub Issues and the owner's Project are the authoritative source for the curre
 - **Lifecycles.** Dispatcher and Writer: fresh for each assignment unrelated to the last. Related: same issue, and it consumes the previous output; it continues only while `ctx` reads `ok`. A review correction stays in its assignment. The Dispatcher records a new owner task verbatim before its `fresh --self`.
 - **Checks.** Dispatcher and Writer run `ddsonic-herdr ctx <own role>` at each phase boundary (end of orientation, commit, self-review, validation, review request, triage, staging, report) and before context-intensive work (a subagent; reading a report, log or diff over ~20 KB); the Dispatcher also checks the Writer at each wake-up. After a compaction `ctx` reads `pending` until the next request.
 - **Thresholds.** At 85K (`warn`) record the state on GitHub (a comment URL, an existing one counts: every reset needs it) and name the next safe boundary: the current step finished and, for the Dispatcher, no watcher armed. At 100K (`refresh`) reset there with `fresh` (the Dispatcher resets the Writer), never during active work; a Dispatcher with a watcher armed resets once it exits, before relaying anything else. Below 100K, carry on to the assignment's end. 150K is the auto-compaction window set by the helper's `start` (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`, never persistent settings); compaction at about 117K is only the backstop.
-- **Resume checkpoint.** At `warn` and before each reset, the Dispatcher and the Writer rewrite, whole, a private checkpoint file outside the repo, at most 1.5 KB, with the headings `Task`, `Authority`, `State`, `Open waits`, `Next`, `Links`; `fresh --resume FILE` seeds the reset from it.
+- **Resume checkpoint.** At `warn` and before each reset, the Dispatcher and the Writer rewrite, whole, a private checkpoint file outside the repo, at most 1.5 KB, with the headings `## Task`, `## Authority`, `## State`, `## Open waits`, `## Next`, `## Links`; the Writer names the file's path in its reply, and `fresh --resume FILE` seeds the reset from it.
 - **Discovery is proportional.** Resolve routine engineering questions from the code. Batch consequential ones to the owner with a recommendation each. Grill fully only when the owner asks or the scope is unclear.
 - **Architecture analysis** only on request. `GLOSSARY.md` and ADRs mirror GitHub decisions and never track planning.
 
@@ -234,10 +234,11 @@ GitHub Issues and the owner's Project are the authoritative source for the curre
 DIGEST
 Verdict: PASS|FAIL|BLOCKED|DONE   Head: <sha>   Validate: <validate line, or "not run: <why>">
 Findings: B<n> H<n> M<n> L<n> N<n>; open: one line per unresolved BLOCKER, HIGH or MEDIUM
+Owner: <each decision or question for the owner, `owner` dispositions included, or None>
 Deferred: <one line each, or None>
 Disputes: <one line each, or None>
 Caveats: <one line each, or None>
 Not executed: <checks not run, or taken as Writer or GitHub CI evidence, or None>
 Report: <path of the full report, or "this reply">
 ```
-Keep it under 1 KB by wording, never by dropping a disclosure: every open finding, deferral, dispute, caveat and unexecuted check stays, and a digest that then exceeds 1 KB starts `DIGEST over-limit`.
+Keep it under 1 KB by wording, never by dropping a disclosure: every open finding, owner question, deferral, dispute, caveat and unexecuted check stays, and a digest that then exceeds 1 KB starts `DIGEST over-limit`.
