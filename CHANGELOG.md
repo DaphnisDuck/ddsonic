@@ -7,7 +7,7 @@ ddsonic is a fork of [cliamp](https://github.com/bjarneo/cliamp). Versions befor
 ## [Unreleased]
 
 ### Fixed
-- Pausing, skipping and stopping could replay a moment of old audio: a resume began with a short silence or stutter, and the next track, after a skip or `Stop`, could start with a fragment of the track before it, after any buffering wait. A track started while paused, and a seek while paused, now start cleanly at the new track or position; a plain resume still continues where it paused ([#83](https://github.com/DaphnisDuck/ddsonic/issues/83)).
+- Pausing, skipping and stopping could replay a moment of old audio: a resume began with a short silence or stutter, and the next track, after a skip or `Stop`, could start with a fragment of the track before it, after any buffering wait. A track started while paused, and a seek while paused, now start cleanly at the new track or position; a plain resume still continues where it paused ([#83](https://github.com/DaphnisDuck/ddsonic/issues/83)). On macOS, these can still begin with a moment of old audio (up to about half of `buffer_ms`), then a short silence; see [docs/ddsonic/playback.md](docs/ddsonic/playback.md).
 
 ## [1.1.0] - 2026-11-19
 
