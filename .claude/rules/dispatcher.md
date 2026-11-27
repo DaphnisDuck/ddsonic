@@ -23,7 +23,7 @@ Never end a turn inside an active review cycle without a tracked wait pending, e
 
 Stop and report: the outcome, what was fixed, every dispute with both positions, deferred items, unresolved MEDIUMs, and the checks run. A review that did not finish is reported as such. Before reporting a round or a task closed, check that its findings, blockers, decisions and outcome are on the issue (Recording, in `CLAUDE.md`) and post what is missing.
 
-While #206 is open, check each Writer assignment's `ctx` checks, resets and skills at closeout against its qualification criteria, and record the result there.
+While #206 is open, check each Writer assignment's `ctx` checks, resets and skills at closeout against #206's qualification criteria, and record the result there.
 
 A dev candidate's SHA goes to the owner for `ddsonic-fetch` only after the Writer's staging has succeeded.
 
@@ -37,4 +37,4 @@ A dev candidate's SHA goes to the owner for `ddsonic-fetch` only after the Write
 
 ## Context helper
 
-`ddsonic-herdr ctx <Dispatcher|Writer>` prints active tokens and state (`ok`, `warn` at 85K, `refresh` at 100K, `pending` after a compaction until the next request); `ddsonic-herdr fresh <role> --checkpoint COMMENT_URL [--boundary KEY] [--self]` does one guarded `/clear` (the dd-devops README). A planned reset passes `--boundary <issue>-<step>`; the 600 s cooldown applies only without one. A refusal is not a failure: repeat it once its cause is gone. After a failure or timeout, inspect the pane and the state first; a failed reset is never retried (stop for the owner) and a used boundary is not reused.
+`ddsonic-herdr ctx <Dispatcher|Writer>` prints active tokens and state (Thresholds and Checks, `CLAUDE.md`); `ddsonic-herdr fresh <role> --checkpoint COMMENT_URL [--boundary KEY] [--self]` does one guarded `/clear` (the dd-devops README). A planned reset (any reset at a safe boundary) passes `--boundary <issue>-<step>`; the 600 s cooldown applies only without one. A refusal is not a failure: repeat it once its cause is gone. After a failure or timeout, inspect the pane and the state first; a failed reset is never retried (stop for the owner) and a used boundary is not reused.
