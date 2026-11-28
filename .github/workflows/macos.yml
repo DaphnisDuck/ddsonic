@@ -8,7 +8,7 @@ name: macOS
 #   summary; it is not a required check, so it blocks nothing. Making it
 #   required is a later owner decision. It is not a statement that macOS is
 #   supported.
-#   Deliberately skipped (SKIPPED_TESTS in the job, exact names): 21
+#   Deliberately skipped (SKIPPED_TESTS in the job, exact names): 22
 #   validation-tooling tests of the root package that run
 #   tools/classify-change.sh and tools/change-class.sh, development tools for
 #   the Linux dev shell (bash 5; macOS has bash 3.2). They are not player code;
@@ -57,7 +57,7 @@ jobs:
     timeout-minutes: 60
     env:
       # Exact top-level test names, "|"-separated; see the comment at the top.
-      SKIPPED_TESTS: "TestChangeClassClasses|TestClassifierFilesAreFull|TestClassifyChange|TestClassifyChangeExportedSpecialVariables|TestClassifyChangeFailsClosed|TestClassifyChangeIgnoresBashEnvFunctions|TestClassifyChangeIgnoresGitEnvironment|TestClassifyChangeIgnoresShellState|TestClassifyChangeNeverPrintsConfigSecrets|TestClassifyChangeRefusesAShallowClone|TestClassifyChangeRefusesInvalidUTF8|TestClassifyChangeRefusesInvisibleCodePoints|TestClassifyChangeRefusesNonCanonicalUTF8|TestClassifyChangeRefusesToRunInsideAnotherShell|TestClassifyChangeRejectsBadRules|TestClassifyChangeResistsExportedFunctions|TestClassifyChangeTrustsOnlyTheProjectOrigin|TestClassifyChangeUsesTheBaseRules|TestClassifyChangeWorkingTree|TestClassifyPathsUsesTheGivenRules|TestReadOrEmbeddedFilesAreCodeOrAbove"
+      SKIPPED_TESTS: "TestChangeClassClasses|TestClassifierFilesAreFull|TestClassifyChange|TestClassifyChangeAcceptsGitAuthorMetadata|TestClassifyChangeExportedSpecialVariables|TestClassifyChangeFailsClosed|TestClassifyChangeIgnoresBashEnvFunctions|TestClassifyChangeIgnoresGitEnvironment|TestClassifyChangeIgnoresShellState|TestClassifyChangeNeverPrintsConfigSecrets|TestClassifyChangeRefusesAShallowClone|TestClassifyChangeRefusesInvalidUTF8|TestClassifyChangeRefusesInvisibleCodePoints|TestClassifyChangeRefusesNonCanonicalUTF8|TestClassifyChangeRefusesToRunInsideAnotherShell|TestClassifyChangeRejectsBadRules|TestClassifyChangeResistsExportedFunctions|TestClassifyChangeTrustsOnlyTheProjectOrigin|TestClassifyChangeUsesTheBaseRules|TestClassifyChangeWorkingTree|TestClassifyPathsUsesTheGivenRules|TestReadOrEmbeddedFilesAreCodeOrAbove"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
