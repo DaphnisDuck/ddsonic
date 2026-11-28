@@ -59,9 +59,7 @@ Change it in `packaging/Dockerfile` (the Go image digest, `DEBIAN_SNAPSHOT`, the
 
 ## GitHub settings the workflows rely on
 
-The owner administers the repository in the web UI only; agents work as the machine account, a non-admin collaborator, so no credential on their host can change these settings.
-
-- **A tag ruleset** on all tags that restricts creations, updates and deletions, with an empty bypass list. It is switched off only while a release tag is pushed.
+- **A tag ruleset** on all tags that restricts creations, updates and deletions, with an empty bypass list. It is switched off only while a release tag is pushed. The owner administers the repository in the web UI only; agents work as the machine account, a non-admin collaborator, so no credential on their host can change these settings.
 - **The "Deploy to GitHub Pages" workflow stays disabled** (Actions → the workflow → Disable workflow). It was cliamp's and is gone from `main`, but the copies in older tags can be started by hand and have no repository check.
 - **Private vulnerability reporting** is on (`SECURITY.md` points to it).
 
