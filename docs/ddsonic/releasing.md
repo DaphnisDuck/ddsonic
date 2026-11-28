@@ -30,7 +30,7 @@ Before a release candidate, from `v1.0.0-rc.4` on: the human acceptance checklis
 The checklist is now [Release Acceptance](acceptance.md), and it runs on the candidate itself, so it comes after the tag and before publication: the tag and the workflow produce the draft release; download its archive and `SHA256SUMS`; run acceptance on **the binary extracted from that archive** (`acceptance run --archive … --sums … --version … --source-sha …`), then the live and human runbooks; publish the draft only when the gate is met; then commit the acceptance summary into the release record. The tag is not moved and the candidate is not rebuilt: a local build of the same source is not the candidate. The archive says what it is: it carries `RELEASE-MANIFEST.json` (version, source commit, the binary's SHA-256), and the release binary's `--version` names its source commit; acceptance requires the commit you give it, the manifest's and the binary's to be the same, and stops if any is missing or differs. A candidate that fails is abandoned, and the fix ships as the next number.
 
 1. `CHANGELOG.md` has a section for the version (`## [1.0.0]`). A candidate (`v1.0.0-rc.2`) uses the section of the version it leads to.
-2. Switch the repository's tag ruleset off (Settings → Rules → Rulesets), tag the commit, push that one tag (`git push origin v1.0.0`), and switch the ruleset back on. The ruleset refuses every new, moved or deleted tag, so that cliamp's tags can never reach ddsonic's repository by accident: a tag push runs the workflow of the tagged commit, and cliamp's would publish cliamp releases here. Locally, cliamp's tags live under `refs/upstream-tags/` for the same reason; see [upstream.md](upstream.md).
+2. Switch the repository's tag ruleset off (Settings → Rules → Rulesets), tag the commit, push that one tag (`git push origin v1.0.0`) with an owner credential that is not stored on the agents' host, and switch the ruleset back on. The ruleset refuses every new, moved or deleted tag, so that cliamp's tags can never reach ddsonic's repository by accident: a tag push runs the workflow of the tagged commit, and cliamp's would publish cliamp releases here. Locally, cliamp's tags live under `refs/upstream-tags/` for the same reason; see [upstream.md](upstream.md).
 3. The Release workflow (actions pinned by commit) builds the files, installs the archive in a fresh Debian 13 container, attests the build, and creates a **draft** release. A tag with a hyphen is marked as a prerelease.
 4. Check the draft and the [checks before anything is made public](#before-anything-is-made-public), then publish it by hand.
 5. Stable releases only: update `packaging/aur/PKGBUILD` (`pkgver`, `updpkgsums`, `.SRCINFO`) and push it to the AUR. A candidate is tested from the recipe locally and never pushed.
@@ -58,6 +58,8 @@ This builds the committed tree (`HEAD`); `dist/` is ignored by git. The files ar
 Change it in `packaging/Dockerfile` (the Go image digest, `DEBIAN_SNAPSHOT`, the mpg123 version and checksum), keep `mise.toml` and the Go version in `.github/workflows/ci.yml` in step, and cut a new candidate.
 
 ## GitHub settings the workflows rely on
+
+The owner administers the repository in the web UI only; agents work as the machine account, a non-admin collaborator, so no credential on their host can change these settings.
 
 - **A tag ruleset** on all tags that restricts creations, updates and deletions, with an empty bypass list. It is switched off only while a release tag is pushed.
 - **The "Deploy to GitHub Pages" workflow stays disabled** (Actions → the workflow → Disable workflow). It was cliamp's and is gone from `main`, but the copies in older tags can be started by hand and have no repository check.
@@ -116,7 +118,7 @@ This consolidates requirements that already exist, with their sources. It adds n
 - [ ] **Privacy and packaging checks:** [Before anything is made public](#before-anything-is-made-public) for the new public files, the release page, the SBOM, the notices, the source archive and the paths embedded in the binary.
 - [ ] **#87**, source-build version: on a real checkout of `main` with tags, `make build` and `./ddsonic --version` report `<highest stable tag>-<N>-g<sha>` (today `v1.0.0-<N>-g<sha>`). Release builds set the version explicitly and are unaffected.
 
-**The candidate** (the tag is the owner's: switch the tag ruleset off and back on; the Release workflow then builds a **draft** release)
+**The candidate** (the tag is the owner's: switch the tag ruleset off in the web UI, push the tag with the owner credential kept off the agents' host, and switch the ruleset back on; the Release workflow then builds a **draft** release)
 
 - [ ] **Artifacts:** download the draft's archive and `SHA256SUMS`; `sha256sum -c`; `RELEASE-MANIFEST.json`, the binary's `--version` and the expected commit agree.
 - [ ] **Linux scripted acceptance** on the binary extracted from that archive, as in [Cutting a release](#cutting-a-release) and [acceptance.md](acceptance.md#running-it): `go run ./acceptance/cmd/acceptance run --archive <archive> --sums SHA256SUMS --version v1.1.0 --source-sha <40-character commit> --manual manual-results.yaml --triage triage.yaml`.
