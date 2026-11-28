@@ -294,10 +294,10 @@ fi
 
 # The base: given, or main fetched now from the project's repository. The
 # fetch trusts nothing in the repository's own config that could redirect,
-# extend or weaken it: the config may hold only the keys a plain clone has
-# (an allow-list), origin must be set once to the project's GitHub URL, and
-# the result goes to a ref of this run's own, created by this fetch, which
-# is read once and removed.
+# extend or weaken it: the config may hold only the keys a plain clone has,
+# and user.name and user.email (an allow-list), origin must be set once to
+# the project's GitHub URL, and the result goes to a ref of this run's own,
+# created by this fetch, which is read once and removed.
 if [ -z "$base" ]; then
 	git config --local --list -z >"$tmp/config" 2>/dev/null || fail "cannot read the repository config"
 	url='' origins=0
@@ -308,6 +308,7 @@ if [ -z "$base" ]; then
 		remote.origin.url) origins=$((origins + 1)) url=$val ;;
 		remote.*.url | remote.*.fetch) ;; # other remotes: never fetched; their URL and refspec only
 		branch.*.remote | branch.*.merge) ;;
+		user.name | user.email) ;; # author identity (#222): no part in where or how the fetch connects
 		*)
 			# The key's section and variable only: a subsection can be a URL
 			# with credentials in it (url.<base>.insteadOf, http.<url>.*).

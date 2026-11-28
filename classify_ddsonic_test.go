@@ -523,6 +523,9 @@ func TestClassifyChangeTrustsOnlyTheProjectOrigin(t *testing.T) {
 		"an extension":                 {{"remote.origin.url", gh}, {"extensions.worktreeConfig", "true"}},
 		"an fsmonitor":                 {{"remote.origin.url", gh}, {"core.fsmonitor", "/tmp/evil"}},
 		"a credential helper":          {{"remote.origin.url", gh}, {"credential.helper", "/tmp/evil"}},
+		"a signing key":                {{"remote.origin.url", gh}, {"user.name", "n"}, {"user.signingKey", "/tmp/key"}},
+		"user.useConfigOnly":           {{"remote.origin.url", gh}, {"user.useConfigOnly", "true"}},
+		"a user subsection":            {{"remote.origin.url", gh}, {"user.x.name", "n"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f, _ := newFixture(t)
@@ -538,6 +541,19 @@ func TestClassifyChangeTrustsOnlyTheProjectOrigin(t *testing.T) {
 				t.Fatalf("%q, want full with a refusal of the config or origin, before any fetch\n%s", got, rest)
 			}
 		})
+	}
+}
+
+// Repo-local Git author metadata, user.name and user.email, is accepted
+// (#222): with no origin, the run stops at the origin check, after the
+// allow-list and before any fetch, so this needs no network.
+func TestClassifyChangeAcceptsGitAuthorMetadata(t *testing.T) {
+	f, _ := newFixture(t)
+	f.git("config", "--local", "user.name", "Someone")
+	f.git("config", "--local", "user.email", "someone@example.invalid")
+	got, rest := classifyAs(t, supported, f.dir, nil)
+	if got != "full" || strings.Contains(rest, "the repository config sets ") || !strings.Contains(rest, "fail-closed: remote.origin.url is set 0 times") {
+		t.Fatalf("%q, want user.name and user.email accepted, then the refusal of the missing origin\n%s", got, rest)
 	}
 }
 
