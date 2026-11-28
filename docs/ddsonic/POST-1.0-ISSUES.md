@@ -1,6 +1,6 @@
 # Post-1.0 catalog: where each entry is tracked
 
-The ddsonic backlog is [GitHub Issues](https://github.com/DaphnisDuck/ddsonic/issues). The [post-1.0 catalog](POST-1.0-CATALOG.md) and [POST-1.0-IDEAS.md](POST-1.0-IDEAS.md) are kept as history and are no longer updated.
+The ddsonic backlog is [GitHub Issues](https://github.com/DaphnisDuck/ddsonic/issues). The [post-1.0 catalog](POST-1.0-CATALOG.md) and [POST-1.0-IDEAS.md](POST-1.0-IDEAS.md) are kept as history and are no longer updated. **Historical, not authoritative:** this is a record of past work and does not direct future development; current work is tracked in [GitHub Issues](https://github.com/DaphnisDuck/ddsonic/issues), and contributor guidance is in [development.md](development.md).
 
 Each migrated issue keeps its catalog ID at the start of its title. The P-, E-, R- and D- IDs are historical: new work gets a GitHub issue and is referred to by its issue number, and no new catalog ID is assigned.
 

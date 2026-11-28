@@ -27,7 +27,7 @@ These are owner decisions that have not been made. Until they are, the tooling a
 |---|---|
 | How old live evidence may be and still be reused for a later candidate | No reuse: every candidate needs its own live results |
 | Which accounts are test accounts, and whether new ones are created | Use only the accounts the owner already uses with ddsonic; create nothing |
-| Which changes to an account an agent or a person may make for a test | None: see [Account changes](#account-changes) |
+| Which changes to an account a person may make for a test | None: see [Account changes](#account-changes) |
 | How the owner's approval of a waiver is recorded | A waiver needs a reference to the owner's own written words; see [../acceptance.md](../acceptance.md#the-gate) |
 
 ## Spotify sign-in and sync

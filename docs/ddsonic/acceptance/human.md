@@ -2,11 +2,11 @@
 
 This runbook holds the procedures of the manual cases in [cases.yaml](cases.yaml) that need no account. The live-provider procedures are in [live.md](live.md). The gate, and how a result is recorded, are in [../acceptance.md](../acceptance.md).
 
-**Order.** The human pass comes last. It starts only after the agent's pass is green: the scripted cases pass on the candidate's binary and the agent-reviewed manual and live cases have results. A person's time goes to what only a person can judge, not to finding what a script would have.
+**Order.** The human pass comes last. It starts only after the runbook pass is green: the scripted cases pass on the candidate's binary and the runbook-reviewed manual and live cases have results. A person's time goes to what only a person can judge, not to finding what a script would have.
 
 **The binary.** The candidate's own: the binary extracted from the draft release's archive, the same one the scripted cases ran on. Not a local build.
 
-**Your own setup or a scratch one.** The first two sections below are run by an agent in an isolated home (a scratch `HOME`, with `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME` and `XDG_STATE_HOME` inside it, and `DDSONIC_CONFIG_DIR` and `CLIAMP_CONFIG_DIR` unset). Keep that home's path short: the IPC socket's path has a limit ([../files.md](../files.md)). The human sections are run in your real setup, with your real accounts and a terminal you actually use.
+**Your own setup or a scratch one.** The first two sections below are run by following the runbook in an isolated home (a scratch `HOME`, with `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME` and `XDG_STATE_HOME` inside it, and `DDSONIC_CONFIG_DIR` and `CLIAMP_CONFIG_DIR` unset). Keep that home's path short: the IPC socket's path has a limit ([../files.md](../files.md)). The human sections are run in your real setup, with your real accounts and a terminal you actually use.
 
 ## Recording what you find
 
@@ -41,7 +41,7 @@ How much a failure matters and what happens next are separate, and go in the tri
 
 ## Radio favorites
 
-*Case RADIO-001. Run by an agent, isolated home, network available for the directory.*
+*Case RADIO-001. Runbook, isolated home, network available for the directory.*
 
 1. Start ddsonic. Open **Radio → Browse Stations** and star one station. Note its name.
 2. Open **Radio → Favorites**: the station is listed.
@@ -52,7 +52,7 @@ Pass when all four hold. Quote the station's name and the Favorites rows you saw
 
 ## Unified search
 
-*Case SEARCH-006. Run by an agent, isolated home, with at least Local and one synced provider's cached catalog.*
+*Case SEARCH-006. Runbook, isolated home, with at least Local and one synced provider's cached catalog.*
 
 1. Press `/` and type a word that matches a local track and, where you have one, a synced provider's track.
 2. Every row says which source it is from. A recording held in two sources appears once per source, each labelled.

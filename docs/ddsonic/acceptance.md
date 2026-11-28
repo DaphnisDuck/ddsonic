@@ -6,9 +6,9 @@ This page says how it works. The cases are in [acceptance/cases.yaml](acceptance
 
 ## Three layers, in this order
 
-1. **Automated code validation.** `make ci`: format, vet, staticcheck, govulncheck, the tests with the race detector, the contract gate. In CI on every pull request commit, every commit on `main` and every release tag (a branch's pushes are covered by its pull request), always in full, as two parallel jobs: `go` (`make ci-core`, everything but the gate) and `sdk-contract`; locally, `make tools` once, then `make ci`, or before a review `make validate`, which runs the local profile of the change's class ([Proportional validation](#proportional-validation)) and is full for anything sensitive or unclear.
-2. **Agent and workflow acceptance.** The scripted cases below, then the manual and live cases an agent can review, against the candidate.
-3. **Human exploratory acceptance.** A person, on the same binary, **after** the agent pass is green.
+1. **Automated code validation.** `make ci`: format, vet, staticcheck, govulncheck, the tests with the race detector, the contract gate. In CI on every pull request commit, every commit on `main` and every release tag (a branch's pushes are covered by its pull request), always in full, as two parallel jobs: `go` (`make ci-core`, everything but the gate) and `sdk-contract`; locally, `make tools` once, then `make ci`.
+2. **Runbook and workflow acceptance.** The scripted cases below, then the manual and live cases checked by following a runbook (reviewer `agent`), against the candidate.
+3. **Human exploratory acceptance.** A person, on the same binary, **after** the runbook pass is green.
 
 A later layer does not start on a red earlier one.
 
@@ -32,7 +32,7 @@ A case's `lane` says where it executes.
 |---|---|---|
 | `binary` | A ddsonic executable in an isolated home, driven through a terminal (tmux) | The built program, end to end. YouTube Music is a fake `yt-dlp`, so not the real service |
 | `go` | Go tests in the checkout, in-process | Real sync, catalog and library code over a fake Spotify client that the test can change, fail and block. Not the release binary, and not Spotify's real client or session |
-| `manual` | A person or an agent following a runbook | Whatever needs judgement, ears or a real account |
+| `manual` | A person following a runbook | Whatever needs judgement, ears or a real account |
 
 **The `go` lane tests the checkout's source, not the release binary.** In a release run it is allowed to count only when the checkout's production code is the release's source commit; otherwise those cases are `blocked`.
 
@@ -89,7 +89,7 @@ What it does not show: that the real `yt-dlp`, YouTube or a signed-in account be
 | `lane` | `binary`, `go` or `manual` |
 | `runner` | A scripted case's Go test: `<package dir>:<TestName>` |
 | `procedure` | A manual case's steps: `<runbook>#<heading anchor>` |
-| `reviewer` | `assertions`, `agent` or `human` |
+| `reviewer` | `assertions`, `agent` or `human`; `agent` is the historical schema value, kept for compatibility, for a case checked step by step from its runbook |
 | `applicability` | When the case applies |
 | `gate` | `required` (gates a release) or `advisory` |
 | `implemented` | `false` for a scripted case whose runner does not exist yet; it cannot pass |
@@ -181,7 +181,7 @@ Rules, for a release-gating case:
 - **Hand-recorded results are bound to the candidate, exactly.** The file names the candidate it was recorded on: its version, source commit, archive checksum and binary checksum, each to the character (a version in another case, a checksum in capitals or an abbreviated commit is not the candidate). If any is missing or differs, the whole file is refused. Each result says who executed it and when; a time that cannot be read, or is later than the moment of the run by any margin, is refused. How old a result may be is not judged: that policy is not configured.
 - Every case that did not pass needs a severity and a disposition.
 - **BLOCKER and HIGH block publication.**
-- **An unfixed MEDIUM needs Steve's written waiver.** Only Steve approves a waiver. An agent may propose a severity and write the rationale; it does not approve.
+- **An unfixed MEDIUM needs Steve's written waiver.** Only Steve approves a waiver. A contributor may propose a severity and write the rationale; it does not approve.
 - LOW and NIT do not block.
 - **`investigate` cannot remain at publication,** at any severity.
 - A case with no result is `not run`.
@@ -271,26 +271,3 @@ A case, its runner, a fixture, a semantics row and the harness are what a result
 - it is reviewed like any other change;
 - it shows in the summary as a different catalog checksum and harness revision;
 - a change that turns a failing case green is a change of expectation. It is reported as one, with its reason, and is not the candidate passing.
-
-## Proportional validation
-
-This is a local aid for the time before a review. It does not change CI: GitHub runs both jobs, `go` and `sdk-contract`, in full on every pull request commit, every commit on `main` and every release tag.
-
-`make validate` gives the working tree's change one of four classes, with `tools/classify-change.sh` and the rules in `tools/validation-classes.txt`, against `main` fetched at that moment from the project's repository, and runs that class's profile:
-
-| Class | What it covers | Profile |
-|---|---|---|
-| docs | documentation no test reads | preflight, gofmt, `git diff --check` against the base, the root package's tests with the citation check strict (`make validate-docs`) |
-| test | tests only | preflight, vet, staticcheck, the whole suite under the race detector, shellcheck (`make validate-test`) |
-| code | Go source and what tests read or embed | `make ci-core`, everything but the contract gate |
-| full | everything else | `make ci`, the contract gate included |
-
-The class of a change is the highest class of its paths. A path no rule names is full, and so is anything the classifier cannot decide safely: a symlink, a submodule, a mode or type change, a binary, a deleted or renamed test, a rename across classes, a name that is not plain UTF-8, an empty diff, a shallow clone, a malformed rule and any error. The build, CI, tooling and the classifier with its rules, dependencies, the Spotify boundary, sign-in and the other security-sensitive code, and this page are full by rule, so they always need the full `make ci`. The rules come from the fetched base, not from the change.
-
-`PROFILE=test`, `code` or `full` raises the profile; a lower or unknown one is an error, and nothing runs. After the profile, `make validate` classifies again and fails if the class rose meanwhile. Its last line, `validate: PASSED class=... profile=... base=... head=...`, goes into the review request, and the Reviewer checks the class independently.
-
-**What it is not.** `make validate` runs the Makefile and scripts of the working tree, which the change itself can edit, so its class line is evidence for the Reviewer, not a control. Nothing here, locally or in CI, is tamperproof against a change that edits its own Makefile, scripts or workflow: such edits are full by rule, and independent review and the owner's approval of the merge remain necessary.
-
-**Residual risk.** A lower local profile can miss what only the skipped steps would find, for example a regression across components that the contract gate would have caught; CI's full run of the pull request, and of `main` after the merge, is where that shows.
-
-**If `main` is red after a merge:** no further merges until it is green; find the pull request that caused it; the owner decides between a revert and a fix forward; record it as a defect, with the run; report it. No silent re-run: a re-run is part of that record.

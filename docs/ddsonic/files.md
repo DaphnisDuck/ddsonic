@@ -83,16 +83,3 @@ Upstream tests hard-code `cliamp` as a path segment under a temporary HOME. ddso
 files=$(grep -rl --include=*_test.go -E '"\.config", "cliamp"|"Music", "cliamp"|share", "cliamp"|\.config/cliamp' . | grep -v upgrade/)
 sed -i -E 's/"\.config", "cliamp"/".config", "ddsonic"/g; s/"Music", "cliamp"/"Music", "ddsonic"/g; s/("share", )"cliamp"/\1"ddsonic"/g; s#\.config/cliamp#.config/ddsonic#g' $files
 ```
-
-## Agent team startup and recovery (ddsonic-dev)
-
-The dev VM's recovery helper (`~/.local/share/ddsonic-dev/startup.py`, not in this repo) was written for a persistent Reviewer. The Reviewer is now on demand: each round is a fresh Claude Reviewer started by `ddsonic-herdr start Reviewer`, and a supplemental Codex round is a fresh `codex exec` in the Codex tab's shell pane, started by `ddsonic-herdr review` (the profile selects the ddsonic workspace and the `default` Herdr session; see `.claude/rules/dispatcher.md`). Both panes are on demand since #199, whose adaptation of the helper is staged with that issue, not in this repo. State and logs for the helper live in `~/.local/state/ddnetmirror-herdr/`; the Reviewer's saved session metadata (`reviewer-session`, a `reviewer` entry in `startup-sessions.json`, a managed Reviewer pane in a saved Herdr layout) is stale and must not be resumed.
-
-Verified read-only against a simulated team (stub `herdr`, temporary HOME, the saved `native-restore-*.json` layout shape; the live helper was not run), with the Reviewer pane a plain shell. The unmodified helper:
-
-- Without a valid `reviewer-session` designation fails closed before starting anything (`reviewer: no valid saved session ID; refusing a fresh replacement.`), so a dead Dispatcher or Writer is not recovered either.
-- With stale designation metadata resumes the old Codex Reviewer into the pane, which then holds an agent that `review` refuses.
-- With a saved layout that marks the Reviewer pane as a managed agent (the migration state) refuses to start the server (`Saved Herdr layout cannot prove exact native recovery; server left stopped.`), which blocks Dispatcher and Writer recovery.
-- From reading the code (not simulated), `--stop` refuses because it expects three live agents.
-
-So the unmodified helper must not be used to recover or stop the team while the Reviewer is on demand. [startup-on-demand-reviewer.md](startup-on-demand-reviewer.md) holds the tested adaptation as a patch, with apply steps, rollback, the harness and results. It is a reviewable artifact only; applying it to the live file needs the owner's approval. Until it is applied, recover the Dispatcher and Writer by hand (`ddsonic-herdr layout`, then `start <role>`; fresh sessions, never resumed) and leave the Reviewer pane as a shell.

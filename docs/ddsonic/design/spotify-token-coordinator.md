@@ -1713,7 +1713,7 @@ browser) and `TestCancelledBetweenStoredAndInteractive`.
   choreographies mapped above and the forced-refresh probe of 16(a), must
   stay green without edits to their assertions.
 
-### 14.4 Reviewer round-8 probes
+### 14.4 Review round-8 probes
 
 | Probe | Regression | Note |
 |---|---|---|
@@ -2171,7 +2171,7 @@ no intermediate commit may be described as "one token authority".
 8. Hygiene removals; docs (`plan.md`, `docs/ddsonic/upstream.md`,
    `CHANGELOG.md`, the 15.4(1) limitation).
 
-## 16. Reviewer hotspots
+## 16. Review hotspots
 
 Five places where this design removes or reinterprets something the round-8
 review relied on. Each needs the reviewer's explicit approval, not silence.

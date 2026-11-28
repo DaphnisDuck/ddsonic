@@ -2,9 +2,9 @@
 
 Oct 1, 2026 · @Steve
 
-> **Historical record.** This is the 1.0 release plan, completed with `v1.0.0` on 2026-10-31, and kept as written. It is not the current roadmap: current plans, platform targets and decisions live on [GitHub issues](https://github.com/DaphnisDuck/ddsonic/issues) and the owner's Project (macOS: [#88](https://github.com/DaphnisDuck/ddsonic/issues/88); other platforms: [#89](https://github.com/DaphnisDuck/ddsonic/issues/89)). It was written while the project was called ddmus and uses the name ddsonic throughout, including in decisions dated before the rename on 2026-10-04.
+> **Historical record.** This is the 1.0 release plan, completed with `v1.0.0` on 2026-10-31, and kept as written. It is not the current roadmap: current plans, platform targets and decisions live on [GitHub issues](https://github.com/DaphnisDuck/ddsonic/issues) and the owner's Project (macOS: [#88](https://github.com/DaphnisDuck/ddsonic/issues/88); other platforms: [#89](https://github.com/DaphnisDuck/ddsonic/issues/89)). It was written while the project was called ddmus and uses the name ddsonic throughout, including in decisions dated before the rename on 2026-10-04. **Historical, not authoritative:** this is a record of past work and does not direct future development; current work is tracked in [GitHub Issues](https://github.com/DaphnisDuck/ddsonic/issues), and contributor guidance is in [development.md](development.md).
 
-ddsonic is feature-complete for 1.0. This plan proves, packages, documents and releases what is built. Nothing here starts until you approve it. Revised after Codex's independent review: its corrections are applied throughout.
+ddsonic is feature-complete for 1.0. This plan proves, packages, documents and releases what is built. Nothing here starts until you approve it. Revised after an independent review: its corrections are applied throughout.
 
 ## The plan at a glance
 
@@ -18,10 +18,10 @@ Until `review-fixes` merges, only work that leaves that branch alone goes ahead:
 
 **Before `review-fixes` lands** (done 2026-10-01; merged to `main` as 9084b3a):
 
-- [x] Codex verifies R7 (due 9:22)
-- [x] Dependency refresh: low-effort Codex review
+- [x] Independent verification of R7 (due 9:22)
+- [x] Dependency refresh: low-effort independent review
 - [x] Your Kitty checks (listed under the release gate)
-- [x] Decide on Codex's untracked review report. My recommendation: commit it under `docs/ddsonic/reviews/`, since `plan.md` cites it by finding number and it records why the fixes exist
+- [x] Decide on the untracked independent review report. My recommendation: commit it under `docs/ddsonic/reviews/`, since `plan.md` cites it by finding number and it records why the fixes exist
 - [x] Your approval, then commit, merge, push
 
 **Safe meanwhile, read-only:** the CLI inventory, the license scan, and packaging research. They produce findings, not changes.
@@ -30,7 +30,7 @@ Until `review-fixes` merges, only work that leaves that branch alone goes ahead:
 
 ## What the brief overlooked
 
-Eleven findings from inspecting the repository, four of them corrected by Codex. You decided the three that set the audit's scope on 2026-10-01: remove the hidden providers' entry points, `--daemon`, and `cliamp://` links.
+Eleven findings from inspecting the repository, four of them corrected in review. You decided the three that set the audit's scope on 2026-10-01: remove the hidden providers' entry points, `--daemon`, and `cliamp://` links.
 
 | # | Finding | Why it matters for 1.0 |
 | --- | --- | --- |
@@ -75,7 +75,7 @@ Also worth deciding: what 1.0 promises about config and catalog compatibility, a
 3. **Test behavior, not exit codes.** Run each command in an isolated environment (see fresh-user tests for what that takes), and IPC commands against a live ddsonic in tmux on its own socket. Check what changed, the message and the exit code, including invalid commands, flags and values.
 4. **Setup as onboarding**, against each scenario from the brief: fresh, existing, rerun, missing credentials, provider, local-only, Ctrl+C, invalid input, malformed config, unwritable paths. Setup should configure what ddsonic uses: Spotify, YouTube Music and the Local folder.
 5. **One reference**: `docs/ddsonic/cli.md` documents the final surface, and the help texts match it.
-6. **Review**: one medium-effort Codex review of the resulting change set.
+6. **Review**: one medium-effort independent review of the resulting change set.
 
 ## Workstream 2: packaging, distribution and licensing
 
@@ -184,15 +184,15 @@ Each scenario starts from the published README and docs only. Whenever the teste
 | G | Upgrade | Your real v0.10 config and catalog, copied after ddsonic has shut down (or through an SQLite backup), never while its WAL may be live | 1.0 opens them, the migrations run, nothing is lost |
 | H | Setup | Fresh, then rerun, then Ctrl+C mid-way | The config written is what ddsonic reads; a rerun keeps existing answers |
 
-A to D and G run after the README and docs are written and before the RC. E, F and the artwork checks go on your list. I suggest a Codex low-effort review afterwards of the docs only: does a stranger have enough?
+A to D and G run after the README and docs are written and before the RC. E, F and the artwork checks go on your list. I suggest a low-effort independent review afterwards of the docs only: does a stranger have enough?
 
 ## RC audit and release gate
 
-Each gate is a checklist; the next phase starts only when every box is ticked or explicitly waived by you, with one exception: the box for [the adversarial security audit before `v1.0.0`](#before-v100-the-adversarial-security-audit) may not be waived. Only the RC audit gets a high-effort comprehensive Codex review; ordinary fixes stay low or medium.
+Each gate is a checklist; the next phase starts only when every box is ticked or explicitly waived by you, with one exception: the box for [the adversarial security audit before `v1.0.0`](#before-v100-the-adversarial-security-audit) may not be waived. Only the RC audit gets a high-effort comprehensive independent review; ordinary fixes stay low or medium.
 
 **Gate A: clean baseline** (end of `review-fixes`)
 
-- [x] R7 verified by Codex; dependency refresh reviewed
+- [x] R7 independently verified; dependency refresh reviewed
 - [x] Steve's Kitty check: interrupt an album load with Stop or `n`
 - [x] Steve's Kitty check: the info view while the queue changes
 - [x] Steve's Kitty check: an artist page (cached albums first, Full discography…)
@@ -215,11 +215,11 @@ Each gate is a checklist; the next phase starts only when every box is ticked or
 - [ ] AUR recipe builds and installs from a test release
 - [ ] README, `CHANGELOG.md` and `docs/ddsonic/` done; website drafted (live no later than v1.0.0)
 - [ ] Fresh-user scenarios A–D, G and H pass in isolation and a clean container or VM; E and F pass with you
-- [ ] Upstream fix triage (decided 2026-10-02): upstream's fix commits up to the cutoff: upstream's latest release tag if one newer than v2.3.0 exists when the session starts, else `9d9e55ab` (2026-10-02); the triage doesn't wait for a release, checked against ddsonic's code in one session. Plugin fixes apply only if plugins are reachable, which the 1.0 decision rules out; the triage confirms that rather than porting them. Severity is set from evidence that the defect exists and is reachable in ddsonic, not from commit titles. Accepted fixes are ported (with their prerequisites) to one integration branch, each with a regression test that fails without it, then `make check`, `-race` and one Codex round. Log: `docs/ddsonic/upstream-triage.md`, a row per plausibly relevant fix (commit, area, behaviour, applies (evidence), severity, decision). Not a full merge. A serious upstream fix during the soak is assessed on its own; accepting it means a new candidate
+- [ ] Upstream fix triage (decided 2026-10-02): upstream's fix commits up to the cutoff: upstream's latest release tag if one newer than v2.3.0 exists when the session starts, else `9d9e55ab` (2026-10-02); the triage doesn't wait for a release, checked against ddsonic's code in one session. Plugin fixes apply only if plugins are reachable, which the 1.0 decision rules out; the triage confirms that rather than porting them. Severity is set from evidence that the defect exists and is reachable in ddsonic, not from commit titles. Accepted fixes are ported (with their prerequisites) to one integration branch, each with a regression test that fails without it, then `make check`, `-race` and one independent review round. Log: `docs/ddsonic/upstream-triage.md`, a row per plausibly relevant fix (commit, area, behaviour, applies (evidence), severity, decision). Not a full merge. A serious upstream fix during the soak is assessed on its own; accepting it means a new candidate
 
 **Gate C: v1.0.0-rc.1.** The candidate is built as a draft and published as a prerelease only after the checks marked "before publishing" pass; the audit and your own use follow publication:
 
-- [ ] One Codex high-effort audit of everything changed since its last comprehensive review (ea0a4a3), given the CLI disposition table, the platform matrix, earlier findings, changed files and test evidence. Inherited high-risk boundaries get a selective look
+- [ ] One high-effort independent audit of everything changed since its last comprehensive review (ea0a4a3), given the CLI disposition table, the platform matrix, earlier findings, changed files and test evidence. Inherited high-risk boundaries get a selective look
 - [ ] Before publishing, once per candidate, in CI: `make fmt-check` (not `make check`, which rewrites files), `go vet`, `go test -race ./...`, staticcheck, govulncheck, dependency licenses
 - [ ] Before publishing: the release archive has dependencies, version, checksums, notices, source and the SBOM; its build attestation verifies (`gh attestation verify`); it installs cleanly in a fresh container
 - [ ] A release record per candidate (`docs/ddsonic/releases/<tag>.md`): candidate commit, artifact checksums, check results, findings and waivers with their rationale
@@ -236,7 +236,7 @@ Each gate is a checklist; the next phase starts only when every box is ticked or
 
 **Before v1.0.0-rc.4: the human acceptance checklist** (required, decided 2026-10-09). The rc.3 report that albums saved in YouTube Music never appeared was found by using ddsonic, not by a test or an audit. A reusable human release-candidate acceptance checklist is therefore created and executed before the next candidate, and at every candidate after it: a repeatable gate in place of ad-hoc exploratory testing. It complements the automated tests and does not duplicate them.
 
-That checklist has become **Release Acceptance** ([acceptance.md](acceptance.md)): a case catalog, scripted cases that run on the candidate's own binary, live-provider and human runbooks, and one gate over all of them. The order is automated code validation, then agent and workflow acceptance, then the human exploratory pass, which starts only when the agent pass is green. For `v1.0.0-rc.4`, live acceptance of both Spotify and YouTube Music is required. The first slice of the tooling exists (2026-10-09); no release run and no live or human pass has been made yet.
+That checklist has become **Release Acceptance** ([acceptance.md](acceptance.md)): a case catalog, scripted cases that run on the candidate's own binary, live-provider and human runbooks, and one gate over all of them. The order is automated code validation, then runbook and workflow acceptance, then the human exploratory pass, which starts only when the runbook pass is green. For `v1.0.0-rc.4`, live acceptance of both Spotify and YouTube Music is required. The first slice of the tooling exists (2026-10-09); no release run and no live or human pass has been made yet.
 
 - [ ] The known rc.3 bugs are triaged or resolved
 - [ ] The checklist is drafted and independently reviewed
@@ -286,9 +286,9 @@ Required, decided by the owner on 2026-10-10. It has not been run: nothing here 
 
 **The release chain.** Source-to-artifact identity, dependency pins, the SBOM's accuracy, the build image and the trust placed in the toolchain, artifact integrity, what installing the package does, and whether the build and release tooling downloads or executes anything unexpected.
 
-**Who.** Recommended: an independent Codex GPT-6.1-Sol review at high effort, or the strongest appropriate independent reviewer available at the time.
+**Who.** Recommended: the strongest appropriate independent reviewer available at the time.
 
-**If a finding needs a code change,** `v1.0.0` is not authorized. Then: Claude implements the fix by the normal workflow; Codex reviews it independently; focused security regression tests are added and run; the affected acceptance is rerun; validation is broadened if the change materially alters release behavior; and the final, corrected snapshot is reviewed again before release authorization.
+**If a finding needs a code change,** `v1.0.0` is not authorized. Then: the fix goes through the normal workflow and is reviewed independently; focused security regression tests are added and run; the affected acceptance is rerun; validation is broadened if the change materially alters release behavior; and the final, corrected snapshot is reviewed again before release authorization.
 
 **Complete only when** all of these hold:
 
@@ -299,7 +299,7 @@ Required, decided by the owner on 2026-10-10. It has not been run: nothing here 
 
 **Gate D: v1.0.0.** Every RC-audit finding fixed or waived by you, by criteria you set in advance; no open BLOCKER or HIGH; and a 7-day soak of your own use with no new release-blocking regression. Any fix to code that runs (not docs-only) means a new candidate and restarts the soak. Otherwise cut rc.2, and review its fixes at effort proportional to their risk: a migration or concurrency fix can warrant high effort even then. The stable tag is built as a draft too: its own artifacts pass the CI, archive, SBOM, attestation and install checks, and its release record is written, before it is published.
 
-- [ ] Required before `v1.0.0`: [the adversarial security audit](#before-v100-the-adversarial-security-audit) of the candidate intended to ship is complete. It is separate from Gate C's Codex audit and from every automated check, is not skipped because they are green, and may not be waived
+- [ ] Required before `v1.0.0`: [the adversarial security audit](#before-v100-the-adversarial-security-audit) of the candidate intended to ship is complete. It is separate from Gate C's independent audit and from every automated check, is not skipped because they are green, and may not be waived
 
 ## Post-1.0 backlog
 
@@ -317,7 +317,7 @@ Historical freeze-time inventory: these items were transferred to [plan.md](../.
 | YouTube cookie playlist count check | Guard against a short playlist feed. Since 2026-10-09 part of [YouTube Music Provider v2](POST-1.0-IDEAS.md#youtube-music-provider-v2) |
 | Separate Local scan folder from file-browser folder | Open question in `plan.md` |
 | Daemon or headless persistent playback | Likely a larger 2.0 architectural project; affects how the inherited `--daemon` is treated now |
-| Broad-prefix search speed (P3) | Codex's ranking-preserving idea (about 22% faster), only if search speed becomes a complaint |
+| Broad-prefix search speed (P3) | The reviewer's ranking-preserving idea (about 22% faster), only if search speed becomes a complaint |
 | Linux arm64, macOS, Homebrew, `.deb`/`.rpm` | Once someone can test them |
 | Replace `xlab/vorbis-go` (no license file) | Feasibility study: Spotify playback decodes through it inside go-librespot. Candidate: `jfreymuth/oggvorbis` (MIT, pure Go, already in `go.mod` for local Ogg files). Likely needs a go-librespot change upstream or a maintained patch |
 | `go install`, and `ddsonic` as the name a plain `go build` gives | Needs the module renamed to `github.com/DaphnisDuck/ddsonic`, which would make upstream merges costly. A decision for when tracking upstream is no longer worth that |
@@ -325,7 +325,7 @@ Historical freeze-time inventory: these items were transferred to [plan.md](../.
 
 ## Decisions that are yours
 
-Codex pointed out that an approved plan shouldn't settle these by default, so each was put to you. All were decided on 2026-10-01.
+The review pointed out that an approved plan shouldn't settle these by default, so each was put to you. All were decided on 2026-10-01.
 
 | Decision | Needed before | Outcome |
 | --- | --- | --- |

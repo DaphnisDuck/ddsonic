@@ -16,9 +16,8 @@ config.backup.toml
 /gui/
 coverage.out
 
-# Claude Code local directory (settings, commands); root CLAUDE.md and the role rules stay tracked
-.claude/*
-!.claude/rules/
+# Local editor and tool state
+.claude/
 
 # Local project brief, kept out of the repo
 /prompt.txt

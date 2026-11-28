@@ -7,24 +7,6 @@ Review only: no repository code was modified. Behavioral probes used temporary
 files and Go overlays under /tmp. Those temporary files are not required to use
 this report; reproduction scenarios are described below.
 
-SUGGESTED PROMPT FOR CLAUDE
-
-Read CLAUDE.md/AGENTS.md, plan.md, and this report. Address the confirmed review
-findings with narrow, idiomatic changes, starting with R1, R2, R3, R4, and R8.
-Verify each finding against the current code before implementing a fix. Add
-regression tests that reproduce the behavior rather than merely mirror the fix.
-Preserve existing user changes and the project's upstream-merge conventions.
-Use new migrations for database changes; do not edit existing migrations.
-Keep the catalog-first product direction and existing playback engine.
-
-Treat architectural/product suggestions as proposals, not already approved
-behavior changes. Do not remove hidden providers simply because their menus are
-hidden: IPC, plugins, playback, and resume still use them. Avoid a broad rewrite.
-Run the repository's required checks after fixes. Update relevant ddmus docs and
-plan.md as fixes land. Report what was fixed, how it was tested, and anything
-deferred or disproved. Distinguish existing-suite passes from new regression
-tests. Do not claim live-provider or terminal validation unless actually done.
-
 OVERALL ASSESSMENT
 
 The architecture is a solid foundation. The significant defects are mostly at

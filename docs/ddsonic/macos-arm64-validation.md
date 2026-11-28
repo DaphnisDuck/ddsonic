@@ -1,6 +1,6 @@
 # macOS ARM64 build of v1.0.0: validation strategy
 
-This is the plan for building and validating a macOS ARM64 (Apple Silicon, `darwin/arm64`) build of the existing `v1.0.0` release. The target and its conditions are the owner's decisions on [#88](https://github.com/DaphnisDuck/ddsonic/issues/88). Those decisions control; this file only describes how the work is done.
+This is the plan for building and validating a macOS ARM64 (Apple Silicon, `darwin/arm64`) build of the existing `v1.0.0` release. The target and its conditions are the owner's decisions on [#88](https://github.com/DaphnisDuck/ddsonic/issues/88). Those decisions control; this file only describes how the work is done. **Historical, not authoritative:** this is a record of past work and does not direct future development; current work is tracked in [GitHub Issues](https://github.com/DaphnisDuck/ddsonic/issues), and contributor guidance is in [development.md](development.md).
 
 Nothing here authorizes publication. Building, testing and packaging produce local files on the owner's Mac. Uploading anything to the `v1.0.0` release, or changing that release in any other way, needs a separate owner decision. Every command in [The Mac commands](#the-mac-commands) runs only after the owner has approved that exact command. macOS remains provisional and unverified until the acceptance criteria on #88 are met and the owner says so. This file is not a support statement.
 

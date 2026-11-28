@@ -6,10 +6,9 @@ package main
 // it. CHANGELOG.md is the exception (shiftedFiles): a release adds its
 // section at the top, so its cited lines may move, but their text must not
 // change. Its line numbers are read at a fixed origin commit, not the base. This test compares the working tree with a base: DDSONIC_CITATION_BASE
-// when set (make validate sets it), else the merge base with origin/main.
-// Without either it is skipped and says "citation check: SKIPPED", unless
-// DDSONIC_CITATION_STRICT=1, as make validate and CI's docs profile set: then
-// a missing base is a failure.
+// when set, else the merge base with origin/main. Without either it is
+// skipped and says "citation check: SKIPPED", unless
+// DDSONIC_CITATION_STRICT=1: then a missing base is a failure.
 
 import (
 	"errors"
@@ -25,16 +24,64 @@ import (
 )
 
 var (
-	citation = regexp.MustCompile("`?(?:docs/ddsonic/(?:design/)?)?(IDEAS|RP|plan\\.md|CHANGELOG(?:\\.md)?|README(?:\\.md)?|releasing\\.md|navigation\\.md|SECURITY(?:\\.md)?|acceptance\\.md|CLAUDE\\.md|Makefile|spotify-token-coordinator\\.md)`?:((?:\\d+(?:-\\d+)?(?:, )?)+)")
+	citation = regexp.MustCompile("`?(?:docs/ddsonic/(?:design/)?)?(IDEAS|RP|plan\\.md|CHANGELOG(?:\\.md)?|README(?:\\.md)?|releasing\\.md|navigation\\.md|SECURITY(?:\\.md)?|acceptance\\.md|Makefile|spotify-token-coordinator\\.md)`?:((?:\\d+(?:-\\d+)?(?:, )?)+)")
 	hunk     = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
 	cited    = map[string]string{
 		"IDEAS": "docs/ddsonic/POST-1.0-IDEAS.md", "RP": "docs/ddsonic/release-plan.md", "plan.md": "plan.md",
 		"CHANGELOG": "CHANGELOG.md", "CHANGELOG.md": "CHANGELOG.md", "README": "README.md", "README.md": "README.md",
 		"releasing.md": "docs/ddsonic/releasing.md", "navigation.md": "docs/ddsonic/navigation.md",
 		"SECURITY": "SECURITY.md", "SECURITY.md": "SECURITY.md", "acceptance.md": "docs/ddsonic/acceptance.md",
-		"CLAUDE.md": "CLAUDE.md", "Makefile": "Makefile", "spotify-token-coordinator.md": "docs/ddsonic/design/spotify-token-coordinator.md",
+		"Makefile": "Makefile", "spotify-token-coordinator.md": "docs/ddsonic/design/spotify-token-coordinator.md",
 	}
 )
+
+// gitEnv runs git with no outside configuration.
+func gitEnv() []string {
+	env := []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.invalid", "GIT_COMMITTER_NAME=t",
+		"GIT_COMMITTER_EMAIL=t@example.invalid", "GIT_AUTHOR_DATE=2026-11-03T00:00:00Z", "GIT_COMMITTER_DATE=2026-11-03T00:00:00Z"}
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "GIT_") {
+			env = append(env, kv)
+		}
+	}
+	return env
+}
+
+// fixture is a throwaway git repository.
+type fixture struct {
+	t   *testing.T
+	dir string
+}
+
+func (f *fixture) git(args ...string) string {
+	f.t.Helper()
+	cmd := exec.Command("git", append([]string{"-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"}, args...)...)
+	cmd.Dir, cmd.Env = f.dir, gitEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		f.t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func (f *fixture) write(path, data string) {
+	f.t.Helper()
+	p := filepath.Join(f.dir, path)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		f.t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+func (f *fixture) commit(msg string) string {
+	f.t.Helper()
+	f.git("add", "-A")
+	f.git("commit", "-q", "--allow-empty", "-m", msg)
+	return f.git("rev-parse", "HEAD")
+}
 
 func gitOut(t *testing.T, args ...string) (string, error) {
 	t.Helper()
@@ -200,7 +247,7 @@ func citationBase(getenv func(string) string, mergeBase func() (string, error)) 
 	if getenv("DDSONIC_CITATION_STRICT") == "1" {
 		return "", "", errors.New("citation check: no base (DDSONIC_CITATION_BASE unset and no origin/main), and DDSONIC_CITATION_STRICT=1")
 	}
-	return "", "citation check: SKIPPED: no base to compare with: set DDSONIC_CITATION_BASE, or fetch origin/main (make validate does)", nil
+	return "", "citation check: SKIPPED: no base to compare with: set DDSONIC_CITATION_BASE, or fetch origin/main", nil
 }
 
 func TestCatalogCitationsDoNotMove(t *testing.T) {

@@ -170,7 +170,7 @@ ddsonic reads `~/.config/ddsonic/config.toml`. `ddsonic setup` writes the parts 
 | Release history | [CHANGELOG.md](CHANGELOG.md) |
 | Reporting a security problem | [SECURITY.md](SECURITY.md) |
 
-`ddsonic --help` lists every command and option.
+`ddsonic --help` lists every command and option. For contributors, [docs/ddsonic/development.md](docs/ddsonic/development.md) covers the architecture, the fork rules, building and testing.
 
 The other files in [docs/](docs/) are cliamp's own documentation, not yet adapted to ddsonic. Read `ddsonic` and `~/.config/ddsonic` where they say `cliamp` and `~/.config/cliamp`. Some still apply in part:
 
