@@ -294,9 +294,9 @@ fi
 
 # The base: given, or main fetched now from the project's repository. The
 # fetch trusts nothing in the repository's own config that could redirect,
-# extend or weaken it: the config may hold only the keys a plain clone has,
-# and user.name and user.email (an allow-list), origin must be set once to
-# the project's GitHub URL, and the result goes to a ref of this run's own,
+# extend or weaken it: the config may hold only the keys a plain clone has
+# plus user.name and user.email (an allow-list); origin must be set once to
+# the project's GitHub URL; and the result goes to a ref of this run's own,
 # created by this fetch, which is read once and removed.
 if [ -z "$base" ]; then
 	git config --local --list -z >"$tmp/config" 2>/dev/null || fail "cannot read the repository config"

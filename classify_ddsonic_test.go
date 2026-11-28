@@ -524,7 +524,7 @@ func TestClassifyChangeTrustsOnlyTheProjectOrigin(t *testing.T) {
 		"an fsmonitor":                 {{"remote.origin.url", gh}, {"core.fsmonitor", "/tmp/evil"}},
 		"a credential helper":          {{"remote.origin.url", gh}, {"credential.helper", "/tmp/evil"}},
 		"a signing key":                {{"remote.origin.url", gh}, {"user.name", "n"}, {"user.signingKey", "/tmp/key"}},
-		"user.useConfigOnly":           {{"remote.origin.url", gh}, {"user.useConfigOnly", "true"}},
+		"user.useConfigOnly on":        {{"remote.origin.url", gh}, {"user.useConfigOnly", "true"}},
 		"a user subsection":            {{"remote.origin.url", gh}, {"user.x.name", "n"}},
 	} {
 		t.Run(name, func(t *testing.T) {
