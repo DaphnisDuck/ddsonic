@@ -33,7 +33,7 @@ Every substantive report (`CLAUDE.md`, Report digest) reaches the owner verbatim
 
 Stop and report: the outcome, what was fixed, every dispute with both positions, deferred items, unresolved MEDIUMs, and the checks run, carrying over every Owner, Deferred, Disputes, Caveats, Not-executed and open-finding line of the digests. A review that did not finish is reported as such. Before reporting a round or a task closed, check that its findings, blockers, decisions and outcome are on the issue (Recording, in `CLAUDE.md`) and post what is missing.
 
-While #206 is open, check each Writer assignment's `ctx` checks, resets and skills at closeout against #206's qualification criteria, and record the result there. While #217 is in qualification, record each assignment's measurements on #217 at closeout, drafted by the Writer.
+While #206 is open, check each Writer assignment's context readings (its `CTX` lines, or the manual `ctx` fallback), resets and skills at closeout against #206's qualification criteria, and record the result there. While #217 is in qualification, record each assignment's measurements on #217 at closeout, drafted by the Writer.
 
 A dev candidate's SHA goes to the owner for `ddsonic-fetch` only after the Writer's staging has succeeded.
 
